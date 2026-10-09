@@ -20,10 +20,12 @@ firmato automaticamente con la chiave akmods, `hwtest` ok per CO, FMax, PPT, TDC
 stesso) → `shaper` è sperimentale, fuori da profili/baseline/hwtest, il setter fallisce sempre
 al readback (sicuro per costruzione). Crash-guard verificato su hardware (crash sysrq →
 profilo disattivato + notifica, riattiva, restart, boot pulito, resume). Tag `v0.1.0` su `main`.
-**Fase 2 (ventole)**: CLI `fan` scritta e coperta dal selftest su hwmon finto (3 canali:
-ventola, pompa, 3 pin); `fan enable` carica nct6775 e, se il chip non appare, aggiunge
-`acpi_enforce_resources=lax` con grubby. In attesa della verifica su hardware. Poi: fase 3 GUI,
-fase 4 calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
+**Fase 2 (ventole) verificata su hardware** (NCT6799D, nessun conflitto ACPI, nessun parametro
+kernel): `fan enable/status/autodetect/step/curve/identify` ok; autodetect ha dato pwm2 pompa
+(2125→1898 giri al 21 %), pwm5/pwm6 ventola, pwm7 (100 %, senza tachimetro) non testabile e
+protetto; step 10 s/5 s sui canali ventola elimina gli scatti sui picchi (3 s di carico pieno,
+giri fermi). Il chip arrotonda gli step a ~200 ms. Tag `v0.2.0`. Poi: fase 3 GUI, fase 4
+calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi).
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
