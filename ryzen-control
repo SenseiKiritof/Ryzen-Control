@@ -229,8 +229,10 @@ def profile_table(lines, st):
     for n, f in sorted(v["fan"].items()):
         cur = fans.get(n, {})
         if "step" in f:
-            rows.append(("Ventola %d salita" % n, diff_label(cur.get("step_up_ms"), f["step"][0], "ms", lower_is_better=False)))
-            rows.append(("Ventola %d discesa" % n, diff_label(cur.get("step_down_ms"), f["step"][1], "ms", lower_is_better=False)))
+            tol = (st.get("caps") or {}).get("fan_step_tol_ms", 0)   # il chip arrotonda (es. 5000 → 5200)
+            for name, cur_v, new_v in (("salita", cur.get("step_up_ms"), f["step"][0]), ("discesa", cur.get("step_down_ms"), f["step"][1])):
+                same = cur_v is not None and abs(cur_v - new_v) <= tol
+                rows.append(("Ventola %d %s" % (n, name), diff_label(new_v if same else cur_v, new_v, "ms", lower_is_better=False)))
         if "curve" in f:
             rows.append(("Ventola %d curva" % n, diff_label(" ".join(cur["curva"]) if cur.get("curva") else None, f["curve"])))
     grid = Gtk.Grid(column_spacing=18, row_spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
@@ -625,14 +627,23 @@ class ModesPage(Adw.PreferencesPage):
             chk.connect("toggled", self.on_mode, key)
             regen = None
             if key in PRESETS:
-                tag = Gtk.Label(label="calibrata sull'hardware" if key in CALIBRATED else "preset fisso", valign=Gtk.Align.CENTER)
+                # suffissi compatti: con troppi pulsanti larghi il titolo veniva schiacciato a una colonna
+                row.set_title_lines(1)
+                row.set_subtitle_lines(2)
+                tag = Gtk.Label(label="calibrata" if key in CALIBRATED else "preset", valign=Gtk.Align.CENTER,
+                                tooltip_text="Si adatta all'hardware con test di carico" if key in CALIBRATED
+                                else "Valori fissi ricavati da quelli di fabbrica, nessun test")
                 tag.add_css_class("chip")
                 tag.add_css_class("success" if key in CALIBRATED else "dim-label")
                 row.add_suffix(tag)
                 if key in CALIBRATED:
                     cal = button("Calibra…", lambda k=key: self.calibrate(k))
+                    cal.set_tooltip_text("Misura su questa CPU: undervolt per core, FMax, limiti e ventole")
                     row.add_suffix(cal)
-                regen = button("Rigenera dai valori di fabbrica", lambda k=key: self.regen(k))
+                regen = Gtk.Button(icon_name="view-refresh-symbolic", valign=Gtk.Align.CENTER,
+                                   tooltip_text="Rigenera il profilo dai valori di fabbrica")
+                regen.add_css_class("flat")
+                regen.connect("clicked", lambda *_, k=key: self.regen(k))
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
             g.add(row)

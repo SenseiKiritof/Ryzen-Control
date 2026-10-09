@@ -648,7 +648,7 @@ def cmd_status(ctx, args):
 
 def caps(base, unlock):
     """Intervalli ammessi (min, max) per la GUI: stessa logica di cap_of."""
-    out = {"co": [CO_MIN, CO_MAX], "fan_step_ms": [0, FAN_STEP_MAX_MS]}
+    out = {"co": [CO_MIN, CO_MAX], "fan_step_ms": [0, FAN_STEP_MAX_MS], "fan_step_tol_ms": FAN_STEP_TOL_MS}
     for key, lo in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN), ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
         if key in base:
             out[key] = [lo, cap_of(base, key, unlock)]
@@ -1016,12 +1016,17 @@ def at_params(mode, kvs):
 
 
 def tctl_p95():
-    """p95 dei picchi Tctl su BURSTS raffiche di 2 s (solo k10temp: niente letture PM, scaldano)."""
+    """p95 dei picchi Tctl su BURSTS raffiche di 2 s, metà all-core e metà single-core (solo
+    k10temp: niente letture PM durante la misura, scaldano il die)."""
     if FAKE:
         return FAKE.peak_tctl()
     peaks = []
-    for _ in range(BURSTS):
-        p = subprocess.Popen(["stress-ng", "--cpu", "2", "-t", "2", "-q"])
+    core = best_core()
+    for i in range(BURSTS):
+        # metà raffiche su tutti i core (lo "scatto" all'avvio di un programma pesante), metà su
+        # un solo core al boost massimo: sono i due picchi che fanno partire le ventole
+        args = ["--cpu", "0"] if i % 2 == 0 else ["--cpu", "1", "--taskset", str(core)]
+        p = subprocess.Popen(["stress-ng"] + args + ["-t", "2", "-q"])
         peak = 0.0
         while p.poll() is None:
             peak = max(peak, tctl() or 0.0)
@@ -1275,6 +1280,9 @@ def _autotune(ctx, args):
             if st["mode"] == "eco":
                 st["phase"] = "fmax"
                 st["fmax"]["current"] = base["fmax"]
+                for t in preset_lines("eco", base):    # limiti, Tjmax ed energia eco PRIMA di misurare i picchi
+                    if t.split()[0] in ("ppt", "tdc", "edc", "tjmax", "power"):
+                        run(t.split(), ctx)
             else:
                 st["phase"] = "ppt"
                 st["knee"] = {"ppt": {"current": base["ppt"], "tests": [], "chosen": None},
@@ -2133,6 +2141,7 @@ def selftest():
         if st["phase"] == "done":
             break
     assert steps == 5 + 1 + 7 and st["eta"]["remaining_s"] == 0, steps   # 5 livelli in parallelo, finale, 7 FMax
+    assert run(["status"])["limits"]["ppt"] == 89.0 and run(["status"])["limits"]["tjmax"] == 80.0
     assert st["phase"] == "done" and "error" not in st, st
     # core 7 stabile fino a -15, instabile a -20 → finale -15+5 = -10; gli altri arrivano al limite -25 → -20
     assert st["final"] == [-20] * 7 + [-10] and st["unstable"]["7"]["value"] == -20, st["final"]
