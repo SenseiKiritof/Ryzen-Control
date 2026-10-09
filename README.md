@@ -19,12 +19,12 @@ Ventole, GUI GTK4, calibrazioni e pacchetti deb/Arch seguono (vedi `docs/plans/`
 
 ```sh
 make rpm                                   # richiede rpm-build, rpmdevtools, git
-sudo dnf install dist/ryzen-smu-dkms-*.rpm dist/ryzen-control-*.rpm
+sudo dnf install dist/ryzen-control-*.rpm
 ```
 
-L'installazione fa tutto da sola: `ryzen-smu-dkms` compila il modulo `ryzen_smu` per ogni
-kernel installato (`dkms.service` lo ricompila a ogni aggiornamento) e `ryzen-control` avvia il
-servizio, che carica il modulo e legge la baseline (nessun profilo viene applicato).
+Un solo pacchetto che fa tutto da solo: compila il modulo `ryzen_smu` via DKMS per ogni kernel
+installato (`dkms.service` lo ricompila a ogni aggiornamento) e avvia il servizio, che carica
+il modulo e legge la baseline (nessun profilo viene applicato).
 
 **Secure Boot**: il modulo deve essere firmato con una chiave registrata in MOK. Se sul sistema
 c'è già la chiave akmods registrata (tipico con i driver NVIDIA di RPM Fusion), DKMS la riusa
@@ -135,6 +135,6 @@ Piano, architettura e stato dei lavori: `docs/plans/2026-10-09-ryzen-control.md`
 
 ## Licenza
 
-GPL-3.0-or-later. Il driver vendorizzato in `ryzen_smu/` resta GPL-2.0 (pacchetto
-`ryzen-smu-dkms`); vedi `ryzen_smu/UPSTREAM.md`. Riferimenti tecnici: ryzen_smu (amkillam),
+GPL-3.0-or-later. Il driver vendorizzato in `ryzen_smu/` resta GPL-2.0 (incluso nello stesso
+pacchetto, licenza RPM `GPL-3.0-or-later AND GPL-2.0-only`); vedi `ryzen_smu/UPSTREAM.md`. Riferimenti tecnici: ryzen_smu (amkillam),
 ZenStates-Core (irusanov), gnr-smu (Kyworn, misure sul 9800X3D).

@@ -21,7 +21,8 @@ stesso) → `shaper` è sperimentale, fuori da profili/baseline/hwtest, il sette
 al readback (sicuro per costruzione). Crash-guard verificato su hardware (crash sysrq →
 profilo disattivato + notifica, riattiva, restart, boot pulito, resume). Tag `v0.1.0` su `main`.
 Da fare, in quest'ordine: fase 2 ventole (CLI, `fan autodetect`), fase 3 GUI, fase 4
-calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD.
+calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
+(StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi).
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
 attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
@@ -43,7 +44,8 @@ nella sessione dell'utente.
   involucro che chiama il Makefile, mai un layout duplicato.
 - `data/` — unit systemd (`ryzenctl.service`, `ryzenctl-resume.service`), preset, blacklist
   modprobe, policy polkit, .desktop, icona, metainfo, autostart notify.
-- `packaging/ryzen-control.spec` (RPM: `ryzen-control` + `ryzen-smu-dkms`, entrambi noarch);
+- `packaging/ryzen-control.spec` (RPM: **un solo pacchetto** `ryzen-control`, noarch, con il
+  sorgente DKMS del driver dentro; `Obsoletes: ryzen-smu-dkms` per le release 1-4);
   `packaging/debian/` e `packaging/PKGBUILD` in fase 5.
 
 Vincoli di compatibilità: sintassi Python ≥ 3.9 (nessuna feature più recente), libadwaita ≥ 1.5,
