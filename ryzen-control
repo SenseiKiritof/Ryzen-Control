@@ -17,18 +17,23 @@ from collections import deque
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, GLib, Gtk  # noqa: E402
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 APP_ID = "org.ryzencontrol.RyzenControl"
 DEV_RYZENCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryzenctl")
 RYZENCTL = DEV_RYZENCTL if os.path.exists(DEV_RYZENCTL) else "/usr/bin/ryzenctl"
 POWER = ("power-saver", "balanced", "performance")
+PRESETS = ("quiet", "auto", "boost")
 MODES = (("default", "Default", "Valori di fabbrica (baseline), avvio automatico disattivato"),
          ("quiet", "Quiet", "Silenzio e temperature: limiti ridotti, ventole lente"),
-         ("auto", "Auto", "Prestazioni per watt: punto di ginocchio calibrato su questa CPU"),
+         ("auto", "Auto", "Prestazioni per watt: limiti al ginocchio di efficienza"),
          ("boost", "Boost", "Potenza bruta: limiti massimi consentiti"),
          ("custom", "Custom", "Valori impostati a mano nelle pagine CPU, Curve e Ventole"))
-MISSING_PROFILE = "profilo non ancora creato (calibrazione in arrivo)"
+CPU_PARAMS = (("ppt", "PPT", "W"), ("tdc", "TDC", "A"), ("edc", "EDC", "A"), ("fmax", "FMax", "MHz"), ("tjmax", "Tjmax", "°C"))
+CPU_HELP = ("PPT: potenza massima del package · TDC/EDC: corrente sostenuta/di picco · FMax: frequenza massima di boost · "
+            "Tjmax: temperatura a cui la CPU rallenta. Trascina lo slider o scrivi il numero, poi \"Applica ora\".")
+CO_HELP = ("Curve Optimizer: offset di tensione per core, negativo = meno tensione e calore (troppo basso = instabilità). "
+           "Il Curve Shaper è sperimentale su questa piattaforma: va impostato dal BIOS.")
 UNLOCK_WARNING = ("Verranno ammessi PPT, TDC ed EDC oltre i valori di fabbrica e FMax oltre la baseline "
                   "(fino ai tetti di sblocco di ryzenctl). Più calore e consumo, possibili riavvii "
                   "improvvisi: salva il lavoro. Tjmax resta comunque limitata alla baseline.")
@@ -38,6 +43,12 @@ AUTODETECT_WARNING = ("Ogni canale con giri > 0 viene portato a un PWM ridotto p
 FAN_MISSING_HELP = ("Il chip Super I/O (nct67xx) non è visibile in hwmon. \"Abilita\" carica il modulo nct6775 e lo "
                     "rende permanente; se il chip non compare per un conflitto ACPI, aggiunge il parametro kernel "
                     "acpi_enforce_resources=lax e chiede il riavvio.")
+ROLE_CSS = {"ventola": "success", "pompa": "accent"}
+CSS = """
+.tile { padding: 12px; }
+.chip { padding: 2px 10px; border-radius: 99px; font-weight: bold; background: alpha(currentColor, 0.12); }
+.pad { padding: 6px 12px; }
+"""
 
 
 class HelperError(Exception):
@@ -48,7 +59,6 @@ class Helper:
     """Un solo processo `ryzenctl serve`; chiamate serializzate. `call` blocca: usarla via `bg`."""
 
     def __init__(self, mock):
-        self.mock = mock
         env = dict(os.environ)
         if mock:
             root = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
@@ -108,141 +118,225 @@ def button(label, cb, css=None):
     return b
 
 
-def actions_group(apply_cb, save_cb):
-    g = Adw.PreferencesGroup()
-    box = Gtk.Box(spacing=12, halign=Gtk.Align.END)
-    box.append(button("Salva nel profilo…", save_cb))
-    box.append(button("Applica ora", apply_cb, "suggested-action"))
-    g.add(box)
-    return g
+def label(text="", css=(), xalign=0.0, **kw):
+    lab = Gtk.Label(label=text, xalign=xalign, **kw)
+    for c in css:
+        lab.add_css_class(c)
+    return lab
 
 
-def big_label(title):
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, hexpand=True)
-    value = Gtk.Label(label="—", css_classes=["title-1"])
-    box.append(value)
-    box.append(Gtk.Label(label=title, css_classes=["dim-label"]))
-    return box, value
+def card(orientation=Gtk.Orientation.VERTICAL, spacing=6):
+    return Gtk.Box(orientation=orientation, spacing=spacing, css_classes=["card", "tile"])
+
+
+def summary(lines):
+    """Riassunto di un profilo: 'PPT 89 W · FMax 4825 · balanced · ventole 10 s/5 s'."""
+    out, fan = [], None
+    for t in (l.split() for l in lines):
+        if t[0] == "ppt":
+            out.append("PPT %s W" % t[1])
+        elif t[0] == "fmax":
+            out.append("FMax %s" % t[1])
+        elif t[0] == "tjmax":
+            out.append("Tjmax %s °C" % t[1])
+        elif t[0] == "power":
+            out.append(t[1])
+        elif t[0] == "fan" and len(t) == 5 and t[2] == "step" and fan is None:
+            fan = "ventole %g s/%g s" % (int(t[3]) / 1000, int(t[4]) / 1000)
+    return " · ".join(out + ([fan] if fan else [])) or "profilo vuoto"
+
+
+class Param(Gtk.Box):
+    """Riga parametro: etichetta, info, Scale con marks, SpinButton (stessa Adjustment), 'attuale → nuovo'."""
+
+    def __init__(self, title, unit, info=False):
+        super().__init__(spacing=12)
+        self.unit, self.read = unit, None
+        self.adj = Gtk.Adjustment(lower=0, upper=1, step_increment=1, page_increment=5)
+        self.append(label(title, ["heading"], width_chars=9))
+        self.info = label("", ["dim-label", "numeric"], width_chars=16, visible=info)
+        self.append(self.info)
+        self.scale = Gtk.Scale(adjustment=self.adj, hexpand=True, draw_value=True, digits=0, value_pos=Gtk.PositionType.TOP)
+        self.append(self.scale)
+        self.append(Gtk.SpinButton(adjustment=self.adj, digits=0, valign=Gtk.Align.CENTER))
+        self.delta = label("", ["numeric"], xalign=1.0, width_chars=15)
+        self.append(self.delta)
+        self.adj.connect("value-changed", self.show_delta)
+
+    def setup(self, lo, hi, read, base=None):
+        self.read = read
+        self.adj.set_lower(lo)
+        self.adj.set_upper(hi)
+        self.scale.clear_marks()
+        self.scale.add_mark(lo, Gtk.PositionType.BOTTOM, None)
+        self.scale.add_mark(hi, Gtk.PositionType.BOTTOM, None)
+        if base is not None and lo <= base <= hi:
+            self.scale.add_mark(base, Gtk.PositionType.BOTTOM, "base")
+        self.reset()
+
+    def value(self):
+        return int(round(self.adj.get_value()))
+
+    def changed(self):
+        return self.read is not None and self.value() != self.read
+
+    def reset(self):
+        if self.read is not None:
+            self.adj.set_value(self.read)
+        self.show_delta()
+
+    def show_delta(self, *_):
+        if self.read is None:
+            return
+        if self.changed():
+            self.delta.set_markup("<span alpha='60%%'>%d</span> → <b>%d</b> %s" % (self.read, self.value(), self.unit))
+            self.delta.add_css_class("accent")
+        else:
+            self.delta.set_markup("<span alpha='60%%'>%d %s</span>" % (self.read, self.unit))
+            self.delta.remove_css_class("accent")
+
+
+class Page(Gtk.Box):
+    """Contenuto scorrevole + barra pulsanti fissa in fondo."""
+
+    def __init__(self, win, help_text=None):
+        super().__init__(orientation=Gtk.Orientation.VERTICAL)
+        self.win = win
+        self.body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12,
+                            margin_start=12, margin_end=12)
+        if help_text:
+            self.body.append(label(help_text, ["dim-label"], wrap=True))
+        self.append(Gtk.ScrolledWindow(child=self.body, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        self.bar = Gtk.Box(spacing=12, halign=Gtk.Align.END, css_classes=["toolbar"])
+        self.append(self.bar)
+
+    def buttons(self, *extra):
+        for b in extra:
+            self.bar.append(b)
+        self.bar.append(button("Ripristina valori letti", self.reset))
+        self.bar.append(button("Salva nel profilo…", lambda: self.win.save_profile(self.lines(False))))
+        self.bar.append(button("Applica ora", lambda: self.win.apply_lines(self.lines(True)), "suggested-action"))
+
+    def telemetry(self, t):
+        pass
 
 
 # ---- Pagine ----------------------------------------------------------------------------
-class MonitorPage(Adw.PreferencesPage):
+class MonitorPage(Gtk.Box):
     NAME, TITLE, ICON = "monitor", "Monitor", "utilities-system-monitor-symbolic"
 
     def __init__(self, win):
-        super().__init__()
+        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12,
+                         margin_start=12, margin_end=12)
         self.win = win
-        self.hist = deque(maxlen=60)
-        self.pending = self.failed = False
-        self.fan_rows = {}
-        g = Adw.PreferencesGroup(title="Temperature")
-        box = Gtk.Box(spacing=24, homogeneous=True, margin_bottom=12)
-        tctl, self.tctl = big_label("Tctl")
-        tccd, self.tccd = big_label("Tccd")
-        box.append(tctl)
-        box.append(tccd)
-        g.add(box)
-        self.graph = Gtk.DrawingArea(content_height=150, css_classes=["card"])
-        self.graph.set_draw_func(self.draw)
-        g.add(self.graph)
-        self.add(g)
-        g = Adw.PreferencesGroup(title="Potenza e frequenza")
-        self.bars = {}
-        for key, title in (("ppt", "PPT"), ("tdc", "TDC")):
-            row = Adw.ActionRow(title=title)
-            bar = Gtk.LevelBar(valign=Gtk.Align.CENTER, hexpand=True, width_request=220)
-            row.add_suffix(bar)
-            self.bars[key] = (row, bar)
-            g.add(row)
-        self.fmax = Adw.ActionRow(title="FMax")
-        self.power = Adw.ActionRow(title="Profilo energetico")
-        g.add(self.fmax)
-        g.add(self.power)
-        self.add(g)
-        g = Adw.PreferencesGroup(title="Core")
-        grid = Gtk.Grid(column_spacing=12, row_spacing=12, column_homogeneous=True)
+        self.hist = deque(maxlen=60)   # (tctl, ppt)
+        self.ppt_limit = None
+        self.fan_labels = {}
+        tiles = Gtk.Box(spacing=12, homogeneous=True)
+        self.tiles = {}
+        for key, title in (("tctl", "Tctl"), ("ppt", "PPT"), ("tdc", "TDC"), ("fmax", "FMax")):
+            c = card()
+            value, sub = label("—", ["title-1", "numeric"]), label("", ["dim-label"])
+            c.append(label(title, ["heading"]))
+            c.append(value)
+            c.append(sub)
+            bar = Gtk.LevelBar(visible=key in ("ppt", "tdc"))
+            c.append(bar)
+            self.tiles[key] = (value, sub, bar)
+            tiles.append(c)
+        self.append(tiles)
+        mid = Gtk.Box(spacing=12, vexpand=True)
+        table = card()
+        grid = Gtk.Grid(column_spacing=18, row_spacing=4)
+        for col, h in enumerate(("Core", "MHz", "°C", "CO")):
+            grid.attach(label(h, ["heading"], xalign=1.0 if col else 0.0), col, 0, 1, 1)
         self.cores = []
         for c in range(8):
-            lab = Gtk.Label(label="Core %d\n—" % c, justify=Gtk.Justification.CENTER, css_classes=["card"])
-            lab.set_margin_top(6)
-            lab.set_margin_bottom(6)
-            grid.attach(lab, c % 4, c // 4, 1, 1)
-            self.cores.append(lab)
-        g.add(grid)
-        self.add(g)
-        self.fans = Adw.PreferencesGroup(title="Ventole")
-        self.add(self.fans)
-        GLib.timeout_add_seconds(1, self.tick)
+            row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"], xalign=1.0) for _ in range(3)]
+            for col, lab in enumerate(row):
+                grid.attach(lab, col, c + 1, 1, 1)
+            self.cores.append(row[1:])
+        table.append(grid)
+        mid.append(table)
+        gcard = card()
+        gcard.set_hexpand(True)
+        gcard.append(label("Tctl (°C, sinistra) e PPT (W, destra) · ultimi 60 s", ["heading"]))
+        self.graph = Gtk.DrawingArea(vexpand=True, content_height=150)
+        self.graph.set_draw_func(self.draw)
+        gcard.append(self.graph)
+        mid.append(gcard)
+        self.append(mid)
+        bottom = card(Gtk.Orientation.HORIZONTAL, 18)
+        self.fans = Gtk.Box(spacing=18, hexpand=True)
+        bottom.append(self.fans)
+        self.power = label("", ["dim-label"], xalign=1.0)
+        bottom.append(self.power)
+        self.append(bottom)
 
     def refresh(self, st):
         pass   # il monitor vive di `telemetry`
 
-    def tick(self):
-        if not self.pending and self.get_mapped():
-            self.pending = True
-            bg(lambda: self.win.h.call("telemetry"), self.update, self.fail)
-        return True
-
-    def fail(self, msg):
-        self.pending = False
-        if not self.failed:   # un solo avviso, non uno al secondo
-            self.failed = True
-            self.win.toast("Telemetria: " + msg)
-
-    def update(self, t):
-        self.pending = self.failed = False
-        self.tctl.set_text(fmt(t["tctl"], " °C"))
-        self.tccd.set_text(fmt(t["tccd"], " °C"))
-        if t["tctl"] is not None:
-            self.hist.append(t["tctl"])
-            self.graph.queue_draw()
+    def telemetry(self, t):
+        value, sub, _ = self.tiles["tctl"]
+        value.set_text(fmt(t["tctl"], " °C"))
+        sub.set_text("Tccd " + fmt(t["tccd"], " °C") + " · Tjmax " + fmt(t["tjmax"], " °C"))
         for key, unit in (("ppt", "W"), ("tdc", "A")):
-            row, bar = self.bars[key]
+            value, sub, bar = self.tiles[key]
             v, lim = t[key], t[key + "_limit"]
-            row.set_subtitle("%s / %s" % (fmt(v, " " + unit), fmt(lim, " " + unit)))
+            value.set_text(fmt(v, " " + unit))
+            sub.set_text("limite " + fmt(lim, " " + unit))
             if v is not None and lim:
                 bar.set_max_value(lim)
                 bar.set_value(min(v, lim))
-        self.fmax.set_subtitle(fmt(t["fmax"], " MHz") + "  ·  Tjmax " + fmt(t["tjmax"], " °C"))
-        self.power.set_subtitle(t["power"] or "n/d")
-        for c, lab in enumerate(self.cores):
+        value, sub, _ = self.tiles["fmax"]
+        value.set_text(fmt(t["fmax"], " MHz"))
+        sub.set_text("EDC limite " + fmt(t["edc_limit"], " A"))
+        if t["tctl"] is not None:
+            self.hist.append((t["tctl"], t["ppt"]))
+            self.ppt_limit = t["ppt_limit"]
+            self.graph.queue_draw()
+        for c, labs in enumerate(self.cores):
             d = t["cores"][c] if c < len(t["cores"]) else {}
-            parts = ["Core %d" % c, fmt(d.get("mhz"), " MHz")]
-            if d.get("temp") is not None:
-                parts.append("%g °C" % d["temp"])
-            parts.append("CO %+d" % d["co"] if d.get("co") is not None else "CO n/d")
-            lab.set_text("\n".join(parts))
+            labs[0].set_text(fmt(d.get("mhz")))
+            labs[1].set_text(fmt(d.get("temp")))
+            labs[2].set_text("%+d" % d["co"] if d.get("co") is not None else "n/d")
         for f in t["fans"]:
-            row = self.fan_rows.get(f["canale"])
-            if row is None:
-                row = self.fan_rows[f["canale"]] = Adw.ActionRow()
-                self.fans.add(row)
-            row.set_title(f.get("name") or "Canale %d" % f["canale"])
-            row.set_subtitle("%s · %d giri/min" % (f.get("role", "sconosciuto"), f["rpm"]))
-        self.fans.set_visible(bool(self.fan_rows))
+            lab = self.fan_labels.get(f["canale"])
+            if lab is None:
+                lab = self.fan_labels[f["canale"]] = label("", ["numeric"])
+                self.fans.append(lab)
+            lab.set_text("%s (%s) · %d giri/min" % (f.get("name") or "Canale %d" % f["canale"], f.get("role", "sconosciuto"), f["rpm"]))
+        if not self.fan_labels:
+            self.fans.append(label("Nessuna ventola rilevata", ["dim-label"]))
+            self.fan_labels[0] = None
+        self.power.set_text("Profilo energetico: " + (t["power"] or "n/d"))
 
     def draw(self, area, cr, w, h):
-        lo, hi = 30, 95
-        y_of = lambda t: h - (min(max(t, lo), hi) - lo) / (hi - lo) * h
+        lo, hi, plim = 30, 95, self.ppt_limit or 1
+        y_t = lambda t: h - 14 - (min(max(t, lo), hi) - lo) / (hi - lo) * (h - 18)
+        y_p = lambda p: h - 14 - min(max(p, 0), plim) / plim * (h - 18)
         col = area.get_color()
         cr.set_source_rgba(col.red, col.green, col.blue, 0.35)
         cr.set_line_width(1)
         cr.set_font_size(10)
         for t in (40, 60, 80, 95):
-            cr.move_to(0, y_of(t))
-            cr.line_to(w, y_of(t))
+            cr.move_to(0, y_t(t))
+            cr.line_to(w, y_t(t))
             cr.stroke()
-            cr.move_to(4, y_of(t) + 11)
-            cr.show_text("%d °C" % t)
-        if len(self.hist) < 2:
-            return
-        cr.set_source_rgb(0.21, 0.52, 0.89)
-        cr.set_line_width(2)
+            cr.move_to(4, y_t(t) - 2)
+            cr.show_text("%d" % t)
+            cr.move_to(w - 30, y_t(t) - 2)
+            cr.show_text("%d" % round(plim * (t - lo) / (hi - lo)))
         n = self.hist.maxlen
-        for i, t in enumerate(self.hist):
-            x = w * (n - len(self.hist) + i) / (n - 1)
-            (cr.move_to if i == 0 else cr.line_to)(x, y_of(t))
-        cr.stroke()
+        for idx, rgb in ((0, (0.21, 0.52, 0.89)), (1, (0.90, 0.45, 0.13))):
+            pts = [(w * (n - len(self.hist) + i) / (n - 1), v[idx]) for i, v in enumerate(self.hist) if v[idx] is not None]
+            if len(pts) < 2:
+                continue
+            cr.set_source_rgb(*rgb)
+            cr.set_line_width(2)
+            for i, (x, v) in enumerate(pts):
+                (cr.move_to if i == 0 else cr.line_to)(x, y_t(v) if idx == 0 else y_p(v))
+            cr.stroke()
 
 
 class ModesPage(Adw.PreferencesPage):
@@ -252,7 +346,7 @@ class ModesPage(Adw.PreferencesPage):
         super().__init__()
         self.win = win
         self.loading = False
-        g = Adw.PreferencesGroup(title="Modalità")
+        g = Adw.PreferencesGroup(title="Modalità", description="Quiet, Auto e Boost sono profili generati dai valori di fabbrica di questa CPU")
         self.rows, first = {}, None
         for key, title, sub in MODES:
             row = Adw.ActionRow(title=title, subtitle=sub, activatable=True)
@@ -261,7 +355,11 @@ class ModesPage(Adw.PreferencesPage):
             row.add_prefix(chk)
             row.set_activatable_widget(chk)
             chk.connect("toggled", self.on_mode, key)
-            self.rows[key] = (row, chk)
+            regen = None
+            if key in PRESETS:
+                regen = button("Rigenera dai valori di fabbrica", lambda k=key: self.regen(k))
+                row.add_suffix(regen)
+            self.rows[key] = (row, chk, regen)
             g.add(row)
         self.add(g)
         g = Adw.PreferencesGroup(title="Avvio e limiti")
@@ -269,7 +367,7 @@ class ModesPage(Adw.PreferencesPage):
         self.autostart.connect("notify::active", self.on_autostart)
         self.unlock = Adw.SwitchRow(title="Consenti oltre i valori di fabbrica", subtitle="PPT/TDC/EDC fino ai tetti di sblocco, FMax oltre la baseline")
         self.unlock.connect("notify::active", self.on_unlock)
-        hw = Adw.ActionRow(title="Verifica hardware", subtitle="Scrive e rilegge un valore per ogni comando, poi ripristina la baseline")
+        hw = Adw.ActionRow(title="Verifica hardware", subtitle="Scrive e rilegge un valore per comando, poi ripristina la baseline")
         self.hw_spin = Gtk.Spinner(valign=Gtk.Align.CENTER)
         self.hw_btn = button("Esegui", self.hwtest)
         hw.add_suffix(self.hw_spin)
@@ -281,15 +379,14 @@ class ModesPage(Adw.PreferencesPage):
     def refresh(self, st):
         self.loading = True
         prof = st.get("profile")
-        profiles = st.get("profiles", [])
-        for key, (row, chk) in self.rows.items():
-            if key in ("quiet", "auto", "boost"):
-                ok = key in profiles
-                row.set_sensitive(ok)
-                row.set_subtitle(dict((k, s) for k, _, s in MODES)[key] if ok else MISSING_PROFILE)
-        # Modalità = profilo selezionato (`use`); `default` lo azzera. Un profilo di sole ventole
-        # non tocca la CPU, quindi il marker `active` non basta a dedurla.
-        current = prof if prof in ("quiet", "auto", "boost") else ("custom" if prof else "default")
+        shown = st.get("profile_lines", {})
+        for key, title, sub in MODES:
+            row, chk, regen = self.rows[key]
+            if regen:
+                exists = key in shown
+                regen.set_visible(exists)
+                row.set_subtitle(summary(shown[key]) if exists else sub + " — profilo non ancora creato: clic per crearlo")
+        current = prof if prof in PRESETS else ("custom" if prof else "default")
         self.rows[current][1].set_active(True)
         self.autostart.set_active(bool(st.get("autostart")))
         self.unlock.set_active(bool(st.get("unlock")))
@@ -302,8 +399,26 @@ class ModesPage(Adw.PreferencesPage):
             self.win.run([["default"]], lambda _: self.win.toast("Valori di fabbrica applicati"))
         elif key == "custom":
             self.win.toast("Imposta i valori nelle pagine CPU, Curve e Ventole e usa \"Applica ora\"")
-        else:
+        elif key in self.win.status.get("profile_lines", {}):
             self.win.run([["apply", key], ["use", key]], lambda _: self.win.toast("Profilo '%s' applicato" % key))
+        else:
+            def ask(res):
+                def go(ok):
+                    if ok:
+                        self.win.run([["preset", key], ["apply", key], ["use", key]], lambda _: self.win.toast("Profilo '%s' creato e applicato" % key))
+                    else:
+                        self.win.reload()
+                self.win.confirm("Creare il profilo '%s' con questi valori?" % key, "\n".join(res["lines"]), "Crea e applica", go)
+            bg(lambda: self.win.h.call("preset", key, "show"), ask, lambda m: (self.win.toast(m), self.win.reload()))
+
+    def regen(self, key):
+        def ask(res):
+            def go(ok):
+                if ok:
+                    cmds = [["preset", key]] + ([["apply", key]] if self.win.status.get("profile") == key else [])
+                    self.win.run(cmds, lambda _: self.win.toast("Profilo '%s' rigenerato" % key))
+            self.win.confirm("Rigenerare '%s' dai valori di fabbrica?" % key, "\n".join(res["lines"]), "Rigenera", go, destructive=True)
+        bg(lambda: self.win.h.call("preset", key, "show"), ask, self.win.toast)
 
     def on_autostart(self, row, _):
         if not self.loading:
@@ -337,202 +452,182 @@ class ModesPage(Adw.PreferencesPage):
         bg(lambda: self.win.h.call("hwtest"), done, fail)
 
 
-class CpuPage(Adw.PreferencesPage):
+class CpuPage(Page):
     NAME, TITLE, ICON = "cpu", "CPU", "preferences-system-symbolic"
-    KEYS = (("ppt", "PPT", "W", "Potenza di pacchetto"), ("tdc", "TDC", "A", "Corrente sostenuta"),
-            ("edc", "EDC", "A", "Corrente di picco"), ("fmax", "FMax", "MHz", "Frequenza massima"),
-            ("tjmax", "Tjmax", "°C", "Temperatura massima"))
 
     def __init__(self, win):
-        super().__init__()
-        self.win = win
-        self.read = {}
-        self.group = Adw.PreferencesGroup(title="Limiti")
-        self.rows = {}
-        for key, title, unit, _ in self.KEYS:
-            r = Adw.SpinRow.new_with_range(0, 1, 1)
-            r.set_title("%s (%s)" % (title, unit))
-            self.rows[key] = r
-            self.group.add(r)
-        self.power = Adw.ComboRow(title="Profilo energetico", model=Gtk.StringList.new(list(POWER)))
-        self.group.add(self.power)
-        self.add(self.group)
-        self.add(actions_group(self.apply, self.save))
+        super().__init__(win, CPU_HELP)
+        self.params = {}
+        self.read_power = None
+        for key, title, unit in CPU_PARAMS:
+            p = self.params[key] = Param(title, unit)
+            self.body.append(p)
+        row = Gtk.Box(spacing=12)
+        row.append(label("Energia", ["heading"], width_chars=9))
+        self.power = Gtk.DropDown(model=Gtk.StringList.new(list(POWER)), valign=Gtk.Align.CENTER)
+        row.append(self.power)
+        row.append(label("profilo energetico di sistema (power-profiles-daemon / EPP)", ["dim-label"]))
+        self.body.append(row)
+        self.nocaps = label("Baseline di questo boot assente: nessuna scrittura CPU possibile (ryzenctl.service non l'ha catturata, vedi `ryzenctl status`).",
+                            ["warning"], wrap=True, visible=False)
+        self.body.append(self.nocaps)
+        self.buttons()
 
     def refresh(self, st):
         caps = st.get("caps")
-        self.read = {}
-        self.set_sensitive(bool(caps))
-        self.group.set_description(None if caps else "Baseline di questo boot assente: nessuna scrittura CPU possibile "
-                                   "(ryzenctl.service non l'ha catturata, vedi `ryzenctl status`).")
+        self.nocaps.set_visible(not caps)
+        self.bar.set_sensitive(bool(caps))
         if not caps:
             return
         values = dict(st["limits"])
         values["fmax"] = st["fmax"]
         base = st.get("baseline") or {}
-        for key, _, unit, sub in self.KEYS:
-            r, v = self.rows[key], values.get(key)
-            ok = v is not None and key in caps
-            r.set_sensitive(ok)
-            r.set_subtitle(sub + ("  ·  base %s" % fmt(base.get(key), " " + unit) if key in base else ""))
-            if ok:
-                r.set_range(*caps[key])
-                self.read[key] = int(round(v))
-                r.set_value(self.read[key])
-        self.read["power"] = st.get("power")
-        self.power.set_sensitive(self.read["power"] in POWER)
-        if self.read["power"] in POWER:
-            self.power.set_selected(POWER.index(self.read["power"]))
+        for key, _, _ in CPU_PARAMS:
+            p, v = self.params[key], values.get(key)
+            p.set_visible(v is not None and key in caps)
+            if p.get_visible():
+                p.setup(caps[key][0], caps[key][1], int(round(v)), base.get(key))
+        self.read_power = st.get("power")
+        self.power.set_sensitive(self.read_power in POWER)
+        if self.read_power in POWER:
+            self.power.set_selected(POWER.index(self.read_power))
+
+    def reset(self):
+        for p in self.params.values():
+            p.reset()
+        if self.read_power in POWER:
+            self.power.set_selected(POWER.index(self.read_power))
 
     def lines(self, only_changed):
-        out = []
-        for key, _, _, _ in self.KEYS:
-            r = self.rows[key]
-            v = int(r.get_value())
-            if r.get_sensitive() and (not only_changed or v != self.read.get(key)):
-                out.append("%s %d" % (key, v))
-        p = POWER[self.power.get_selected()]
-        if self.power.get_sensitive() and (not only_changed or p != self.read.get("power")):
-            out.append("power " + p)
+        out = ["%s %d" % (key, p.value()) for key, p in self.params.items() if p.get_visible() and (not only_changed or p.changed())]
+        pw = POWER[self.power.get_selected()]
+        if self.power.get_sensitive() and (not only_changed or pw != self.read_power):
+            out.append("power " + pw)
         return out
 
-    def apply(self):
-        self.win.apply_lines(self.lines(True))
 
-    def save(self):
-        self.win.save_profile(self.lines(False))
-
-
-class CurvePage(Adw.PreferencesPage):
+class CurvePage(Page):
     NAME, TITLE, ICON = "curve", "Curve", "view-list-symbolic"
 
     def __init__(self, win):
-        super().__init__()
-        self.win = win
-        self.read = []
+        super().__init__(win, CO_HELP)
         self.loading = False
-        g = Adw.PreferencesGroup(title="Curve Optimizer", description="Offset di tensione per core (negativo = meno tensione). "
-                                 "Il Curve Shaper è sperimentale su questa piattaforma: va impostato dal BIOS.")
-        self.all = Adw.SpinRow.new_with_range(0, 1, 1)
-        self.all.set_title("Tutti i core")
-        self.all.set_subtitle("Allinea tutte le righe a questo valore")
-        self.all.connect("notify::value", self.on_all)
-        g.add(self.all)
-        self.rows = []
-        for c in range(8):
-            r = Adw.SpinRow.new_with_range(0, 1, 1)
-            r.set_title("Core %d" % c)
-            self.rows.append(r)
-            g.add(r)
-        self.add(g)
-        self.add(actions_group(self.apply, self.save))
+        self.all = Param("Tutti", "")
+        self.all.adj.connect("value-changed", self.on_all)
+        self.body.append(self.all)
+        self.body.append(Gtk.Separator())
+        self.cores = [Param("Core %d" % c, "", info=True) for c in range(8)]
+        for p in self.cores:
+            self.body.append(p)
+        self.buttons()
 
     def refresh(self, st):
         caps = st.get("caps")
+        self.bar.set_sensitive(bool(caps))
         self.set_sensitive(bool(caps))
         if not caps:
             return
         self.loading = True
         lo, hi = caps["co"]
         base = (st.get("baseline") or {}).get("co")
-        self.read = list(st["co"])
-        self.all.set_range(lo, hi)
-        self.all.set_value(self.read[0])
-        for c, r in enumerate(self.rows):
-            r.set_range(lo, hi)
-            r.set_value(self.read[c])
-            r.set_subtitle("base %+d" % base[c] if base else "")
+        for c, p in enumerate(self.cores):
+            p.setup(lo, hi, st["co"][c], base[c] if base else None)
+        self.all.setup(lo, hi, st["co"][0])
         self.loading = False
 
-    def on_all(self, row, _):
+    def telemetry(self, t):
+        for c, p in enumerate(self.cores):
+            d = t["cores"][c] if c < len(t["cores"]) else {}
+            p.info.set_text(fmt(d.get("mhz"), " MHz") + (" · %g °C" % d["temp"] if d.get("temp") is not None else ""))
+
+    def on_all(self, adj):
         if not self.loading:
-            for r in self.rows:
-                r.set_value(row.get_value())
+            for p in self.cores:
+                p.adj.set_value(adj.get_value())
 
-    def apply(self):
-        cmds = [["co", str(c), str(int(r.get_value()))] for c, r in enumerate(self.rows) if int(r.get_value()) != self.read[c]]
-        self.win.apply_lines([" ".join(a) for a in cmds])
+    def reset(self):
+        for p in self.cores:
+            p.reset()
 
-    def save(self):
-        self.win.save_profile(["co " + " ".join(str(int(r.get_value())) for r in self.rows)])
+    def lines(self, only_changed):
+        if only_changed:
+            return ["co %d %d" % (c, p.value()) for c, p in enumerate(self.cores) if p.changed()]
+        return ["co " + " ".join(str(p.value()) for p in self.cores)]
 
 
-class FansPage(Adw.PreferencesPage):
+class FansPage(Page):
     NAME, TITLE, ICON = "fans", "Ventole", "weather-windy-symbolic"
 
     def __init__(self, win):
-        super().__init__()
-        self.win = win
-        self.rows, self.chans, self.expanded = [], {}, set()
-        self.missing = Adw.PreferencesGroup(title="Ventole non disponibili", visible=False)
-        en = Adw.ActionRow(title="Abilita (carica il modulo nct6775)", subtitle="Scrive /etc/modules-load.d/nct6775.conf; eventuale parametro kernel via grubby")
-        en.add_suffix(button("Abilita", lambda: self.win.run([["fan", "enable"]], self.enabled), "suggested-action"))
-        self.missing.add(en)
-        self.add(self.missing)
-        self.group = Adw.PreferencesGroup(title="Canali")
-        hdr = Gtk.Box(spacing=6)
+        super().__init__(win, "Le ventole restano gestite dalla SmartFan del BIOS: qui si cambiano solo i tempi di salita/discesa e i punti "
+                              "curva dei canali riconosciuti come ventola. Pompe e canali non controllabili sono protetti.")
+        self.chans = {}     # n -> (up, down, curve_entry, info)
+        self.cards = []
+        self.missing = card()
+        self.missing.append(label("Ventole non disponibili", ["heading"]))
+        self.missing_text = label("", ["dim-label"], wrap=True)
+        self.missing.append(self.missing_text)
+        self.missing.append(button("Abilita (carica il modulo nct6775)", lambda: self.win.run([["fan", "enable"]], self.enabled), "suggested-action"))
+        self.body.append(self.missing)
         self.spin = Gtk.Spinner(valign=Gtk.Align.CENTER)
         self.detect_btn = button("Rileva ruoli", self.autodetect)
-        hdr.append(self.spin)
-        hdr.append(self.detect_btn)
-        self.group.set_header_suffix(hdr)
-        self.add(self.group)
-        self.actions = actions_group(self.apply, self.save)
-        self.add(self.actions)
+        self.buttons(self.spin, self.detect_btn)
 
     def refresh(self, st):
-        self.st = st
+        self.step_range = st.get("caps", {}).get("fan_step_ms") if st.get("caps") else None
         bg(lambda: self.win.h.call("fan", "status"), self.show, self.show_missing)
 
     def show_missing(self, msg):
-        self.missing.set_description(msg + "\n\n" + FAN_MISSING_HELP)
+        self.missing_text.set_text(msg + "\n\n" + FAN_MISSING_HELP)
         self.missing.set_visible(True)
-        self.group.set_visible(False)
-        self.actions.set_visible(False)
+        self.bar.set_sensitive(False)
+        self.clear()
 
     def enabled(self, res):
         r = res[0] or {}
         self.win.toast("Riavvio necessario: aggiunto acpi_enforce_resources=lax alla riga del kernel" if r.get("riavvio_necessario")
                        else "Chip %s disponibile" % r.get("chip", "?"))
 
+    def clear(self):
+        for c in self.cards:
+            self.body.remove(c)
+        self.cards, self.chans = [], {}
+
     def show(self, fs):
         self.missing.set_visible(False)
-        self.group.set_visible(True)
-        self.actions.set_visible(True)
-        self.group.set_title("Canali (%s)" % fs["chip"])
-        for r in self.rows:
-            self.group.remove(r)
-        self.rows, self.chans = [], {}
+        self.bar.set_sensitive(True)
+        self.clear()
         for c in fs["canali"]:
             n, role, why = c["canale"], c.get("role", "sconosciuto"), c.get("why", "")
-            row = Adw.ExpanderRow(title=c.get("name") or "Canale %d" % n,
-                                  subtitle="%s · %d giri/min · pwm %d" % (role, c["rpm"], c["pwm"]))
-            row.set_expanded(n in self.expanded)
-            row.connect("notify::expanded", lambda r, _, n=n: self.expanded.add(n) if r.get_expanded() else self.expanded.discard(n))
-            name = Adw.EntryRow(title="Nome", text=c.get("name") or "", show_apply_button=True)
-            name.connect("apply", lambda e, n=n: self.win.run([["fan", "name", str(n)] + e.get_text().split()]))
-            row.add_row(name)
-            rr = Adw.ActionRow(title="Ruolo: " + role, subtitle=why or "non rilevato: usa \"Rileva ruoli\"")
-            rr.add_suffix(button("Identifica", lambda n=n: self.identify(n)))
+            box = card()
+            head = Gtk.Box(spacing=12)
+            name = Gtk.Entry(text=c.get("name") or "", placeholder_text="Canale %d" % n, width_chars=14, valign=Gtk.Align.CENTER)
+            name.connect("activate", lambda e, n=n: self.win.run([["fan", "name", str(n)] + e.get_text().split()]))
+            head.append(label("%d" % n, ["title-3"]))
+            head.append(name)
+            chip = label(role, ["chip", ROLE_CSS.get(role, "dim-label")], valign=Gtk.Align.CENTER)
+            head.append(chip)
+            head.append(label("%d giri/min · pwm %d · modo %d" % (c["rpm"], c["pwm"], c["modo"]), ["numeric"], hexpand=True))
+            head.append(button("Identifica", lambda n=n: self.identify(n)))
             for target in ("pompa", "sconosciuto"):
                 if role != target:
-                    rr.add_suffix(button("Segna " + target, lambda n=n, t=target: self.win.run([["fan", "role", str(n), t]])))
-            row.add_row(rr)
-            if role == "ventola":
-                step_lo, step_hi = (self.st.get("caps") or {}).get("fan_step_ms", [0, 60000])
-                up = Adw.SpinRow.new_with_range(step_lo, step_hi, 100)
-                up.set_title("Salita (ms)")
-                up.set_subtitle("Tempo tra un passo PWM e il successivo quando la temperatura sale")
-                up.set_value(c["step_up_ms"])
-                down = Adw.SpinRow.new_with_range(step_lo, step_hi, 100)
-                down.set_title("Discesa (ms)")
-                down.set_value(c["step_down_ms"])
-                curve = Adw.EntryRow(title="Curva  °C:pwm (es. 40:51 60:150 125:255)", text=" ".join(c["curva"]))
-                for w in (up, down, curve):
-                    row.add_row(w)
+                    head.append(button("Segna " + target, lambda n=n, t=target: self.win.run([["fan", "role", str(n), t]])))
+            box.append(head)
+            box.append(label(why or "ruolo non rilevato: usa \"Rileva ruoli\" (nome: Invio per salvare)", ["dim-label", "caption"]))
+            if role == "ventola" and self.step_range:
+                up, down = Param("Salita", "ms"), Param("Discesa", "ms")
+                up.setup(self.step_range[0], self.step_range[1], c["step_up_ms"])
+                down.setup(self.step_range[0], self.step_range[1], c["step_down_ms"])
+                curve = Gtk.Entry(text=" ".join(c["curva"]), hexpand=True)
+                crow = Gtk.Box(spacing=12)
+                crow.append(label("Curva", ["heading"], width_chars=9))
+                crow.append(curve)
+                crow.append(label("°C:pwm crescenti, ultimo pwm 255", ["dim-label"]))
+                for w in (up, down, crow):
+                    box.append(w)
                 self.chans[n] = (up, down, curve, c)
-            self.group.add(row)
-            self.rows.append(row)
+            self.body.append(box)
+            self.cards.append(box)
 
     def identify(self, n):
         self.win.toast("Canale %d al 100 %% per 5 secondi…" % n)
@@ -557,22 +652,21 @@ class FansPage(Adw.PreferencesPage):
             bg(lambda: self.win.h.call("fan", "autodetect"), done, fail)
         self.win.confirm("Rilevare i ruoli dei canali?", AUTODETECT_WARNING, "Avvia", go)
 
+    def reset(self):
+        for up, down, curve, c in self.chans.values():
+            up.reset()
+            down.reset()
+            curve.set_text(" ".join(c["curva"]))
+
     def lines(self, only_changed):
         out = []
         for n, (up, down, curve, c) in sorted(self.chans.items()):
-            step = (int(up.get_value()), int(down.get_value()))
-            if not only_changed or step != (c["step_up_ms"], c["step_down_ms"]):
-                out.append("fan %d step %d %d" % (n, step[0], step[1]))
+            if not only_changed or up.changed() or down.changed():
+                out.append("fan %d step %d %d" % (n, up.value(), down.value()))
             text = " ".join(curve.get_text().split())
             if not only_changed or text != " ".join(c["curva"]):
                 out.append("fan %d curve %s" % (n, text))
         return out
-
-    def apply(self):
-        self.win.apply_lines(self.lines(True))
-
-    def save(self):
-        self.win.save_profile(self.lines(False))
 
 
 # ---- Finestra --------------------------------------------------------------------------
@@ -581,6 +675,7 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title="Ryzen Control", default_width=840, default_height=700)
         self.h = helper
         self.status = {}
+        self.polling = False
         self.stack = Adw.ViewStack()
         self.toasts = Adw.ToastOverlay(child=self.stack)
         self.banner = Adw.Banner(button_label="Decidi…")
@@ -593,40 +688,20 @@ class Window(Adw.ApplicationWindow):
         self.pages = [P(self) for P in (MonitorPage, ModesPage, CpuPage, CurvePage, FansPage)]
         for p in self.pages:
             self.stack.add_titled_with_icon(p, p.NAME, p.TITLE, p.ICON)
-        self.connect("close-request", lambda *_: self.h.close())
+        self.connect("close-request", lambda *_: helper.close())
         self.reload()
+        GLib.timeout_add_seconds(1, self.tick)
 
     # -- helper e ricarica --
     def reload(self):
         def work():
             st = self.h.call("status")
-            st["profiles"] = self.h.call("profile", "list")["profiles"]
+            st["profile_lines"] = {}
+            for name in self.h.call("profile", "list")["profiles"]:
+                if name in PRESETS:
+                    st["profile_lines"][name] = self.h.call("profile", "show", name)["lines"]
             return st
-        bg(work, self.got_status, self.helper_failed)
-
-    def helper_failed(self, msg):
-        """Senza `ryzenctl serve` (autenticazione annullata/fallita) la finestra resta vuota:
-        meglio un dialogo chiaro con Riprova (nuovo pkexec) che un toast che sparisce."""
-        if "non risponde" not in str(msg):
-            self.toast(msg)
-            return
-        d = Adw.AlertDialog(heading="Autenticazione necessaria",
-                            body="Ryzen Control legge e scrive le impostazioni del processore tramite ryzenctl, "
-                                 "che richiede i privilegi di amministratore. L'autenticazione è stata annullata "
-                                 "o è fallita.\n\n" + str(msg))
-        d.add_response("quit", "Chiudi")
-        d.add_response("retry", "Riprova")
-        d.set_default_response("retry")
-        d.set_response_appearance("retry", Adw.ResponseAppearance.SUGGESTED)
-        def resp(_d, r):
-            if r == "retry":
-                self.h.close()
-                self.h = Helper(self.h.mock)
-                self.reload()
-            else:
-                self.get_application().quit()
-        d.connect("response", resp)
-        d.present(self)
+        bg(work, self.got_status, self.toast)
 
     def got_status(self, st):
         self.status = st
@@ -636,6 +711,23 @@ class Window(Adw.ApplicationWindow):
         self.banner.set_revealed(bool(c))
         for p in self.pages:
             p.refresh(st)
+
+    def tick(self):
+        """Telemetria 1 Hz, solo se una pagina che la usa è visibile e nessuna lettura è in corso."""
+        pages = [p for p in self.pages if hasattr(p, "telemetry") and p.get_mapped()]
+        if pages and not self.polling:
+            self.polling = True
+            def done(t):
+                self.polling = False
+                for p in pages:
+                    p.telemetry(t)
+            def fail(msg):
+                self.polling = False
+                if not getattr(self, "poll_failed", False):   # un solo avviso, non uno al secondo
+                    self.poll_failed = True
+                    self.toast("Telemetria: " + msg)
+            bg(lambda: self.h.call("telemetry"), done, fail)
+        return True
 
     def run(self, cmds, done=None):
         """Invia i comandi in sequenza (thread); errore → toast; in ogni caso ricarica lo stato."""
@@ -714,8 +806,15 @@ class App(Adw.Application):
         self.mock = mock
 
     def do_activate(self):
-        win = self.props.active_window or Window(self, Helper(self.mock))
-        win.present()
+        if not self.props.active_window:
+            prov = Gtk.CssProvider()
+            try:
+                prov.load_from_string(CSS)
+            except AttributeError:   # GTK < 4.12
+                prov.load_from_data(CSS.encode())
+            Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            Window(self, Helper(self.mock))
+        self.props.active_window.present()
 
 
 def main():
