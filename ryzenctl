@@ -909,16 +909,50 @@ def mce_since(ts):
     return bool(r.stdout.strip())
 
 
+AT_ABORT_FLAG = RUN + "/autotune-abort"
+_children = set()        # stress-ng in corso: `autotune abort` li termina subito
+
+
+class Aborted(Exception):
+    """Interruzione richiesta durante un passo: il passo torna senza registrare nulla."""
+
+
+def at_request_abort():
+    """Da un altro thread/processo: alza il flag e termina i carichi in corso."""
+    touch_sync(P(AT_ABORT_FLAG))
+    for pr in list(_children):
+        try:
+            pr.terminate()
+        except OSError:
+            pass
+
+
+def check_abort():
+    if os.path.exists(P(AT_ABORT_FLAG)):
+        raise Aborted()
+
+
+def wait_child(pr):
+    """Attende un figlio controllando ogni mezzo secondo la richiesta di interruzione."""
+    try:
+        while pr.poll() is None:
+            if os.path.exists(P(AT_ABORT_FLAG)):
+                pr.terminate()
+                pr.wait()
+                raise Aborted()
+            time.sleep(0.5)
+        return pr.returncode
+    finally:
+        _children.discard(pr)
+
+
 def run_load(args, seconds):
     """stress-ng con argomenti fissi; True se finisce bene e senza errori MCE."""
     if FAKE:
+        check_abort()
         return FAKE.load_ok(args)
     t0 = time.time()
-    try:
-        r = subprocess.run(["stress-ng"] + args + ["-t", str(int(seconds)), "-q"], capture_output=True)
-    except OSError:
-        raise Err("stress-ng non installato: serve per i test di carico")
-    return r.returncode == 0 and not mce_since(t0)
+    return wait_child(spawn_load(args, seconds)) == 0 and not mce_since(t0)
 
 
 def co_test(cores, seconds):
@@ -937,6 +971,7 @@ def co_test_sampled(cores, seconds):
     """Come co_test, ma a metà della fase a pieno carico campiona tensione e MHz per core:
     è la misura di "a cosa corrisponde" un passo di CO. Restituisce (ok, campione)."""
     if FAKE:
+        check_abort()
         return FAKE.load_ok(["--taskset", str(cores[0])] if len(cores) == 1 else []), sample_cores()
     sec = max(1, seconds // 3)
     base = ["--cpu", str(len(cores)), "--cpu-method", "all", "--verify"]
@@ -945,7 +980,7 @@ def co_test_sampled(cores, seconds):
     pr = spawn_load(base, sec)
     time.sleep(max(1, sec // 2))
     sample = sample_cores()
-    if pr.wait() != 0 or mce_since(time.time() - sec - 1):
+    if wait_child(pr) != 0 or mce_since(time.time() - sec - 1):
         return False, sample
     for extra in (["--cpu-load", "50"], ["--cpu-load", "10"]):
         if not run_load(base + extra, sec):
@@ -954,8 +989,13 @@ def co_test_sampled(cores, seconds):
 
 
 def spawn_load(args, seconds):
-    return subprocess.Popen(["stress-ng"] + args + ["-t", str(int(seconds)), "-q"],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        pr = subprocess.Popen(["stress-ng"] + args + ["-t", str(int(seconds)), "-q"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except OSError:
+        raise Err("stress-ng non installato: serve per i test di carico")
+    _children.add(pr)
+    return pr
 
 
 def mce_cores_since(ts, cores):
@@ -976,6 +1016,7 @@ def co_test_parallel(cores, seconds):
     core): pieno carico, poi 50 %, poi raffiche singole a turno per toccare il boost massimo
     di ogni core. Restituisce (core falliti, campione tensioni/MHz a pieno carico)."""
     if FAKE:
+        check_abort()
         return {c for c in cores if not FAKE.load_ok(["--taskset", str(c)])}, sample_cores()
     sec = max(1, seconds // 3)
     failed = set()
@@ -988,7 +1029,7 @@ def co_test_parallel(cores, seconds):
             time.sleep(max(1, sec // 2))
             sample = sample_cores()                    # tensioni a pieno carico a questo livello di CO
         for c, pr in procs.items():
-            if pr.wait() != 0:
+            if wait_child(pr) != 0:
                 failed.add(c)
     burst = max(3, sec // max(1, len(cores)))
     for c in cores:
@@ -1058,6 +1099,7 @@ def tctl_p95():
     """p95 dei picchi Tctl su BURSTS raffiche di 2 s, metà all-core e metà single-core (solo
     k10temp: niente letture PM durante la misura, scaldano il die)."""
     if FAKE:
+        check_abort()
         return FAKE.peak_tctl()
     peaks = []
     core = best_core()
@@ -1065,11 +1107,13 @@ def tctl_p95():
         # metà raffiche su tutti i core (lo "scatto" all'avvio di un programma pesante), metà su
         # un solo core al boost massimo: sono i due picchi che fanno partire le ventole
         args = ["--cpu", "0"] if i % 2 == 0 else ["--cpu", "1", "--taskset", str(core)]
-        p = subprocess.Popen(["stress-ng"] + args + ["-t", "2", "-q"])
+        p = spawn_load(args, 2)
         peak = 0.0
         while p.poll() is None:
+            check_abort()
             peak = max(peak, tctl() or 0.0)
             time.sleep(0.05)
+        _children.discard(p)
         peaks.append(peak)
         time.sleep(3)
     return sorted(peaks)[max(0, int(len(peaks) * 0.95) - 1)]
@@ -1087,6 +1131,7 @@ def rapl_energy():
 def bench(threads, core=None):
     """(bogo-ops/s, W medi) di stress-ng matrixprod per BENCH_SEC secondi; W da RAPL, fallback PM d[3]."""
     if FAKE:
+        check_abort()
         return FAKE.bench(threads)
     args = ["stress-ng", "--cpu", str(threads), "--cpu-method", "matrixprod", "--metrics", "-Y", "/dev/stdout",
             "-t", str(BENCH_SEC), "-q"]
@@ -1096,11 +1141,14 @@ def bench(threads, core=None):
     pm_samples = []
     t0 = time.monotonic()
     p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    _children.add(p)
     while p.poll() is None:
+        check_abort()
         if e0 is None:
             pm_samples.append(read_limits().get("ppt") or 0)
         time.sleep(0.5)
     out = p.stdout.read()
+    _children.discard(p)
     dt = max(0.1, time.monotonic() - t0)
     m = re.search(r"bogo-ops-per-second-real-time:\s*([0-9.]+)", out)
     if not m:
@@ -1230,6 +1278,7 @@ def _autotune(ctx, args):
         if st:
             apply_lines(profile_lines("baseline"), ctx, "cpu")
             rm(marker("active"))                       # stato CPU = baseline
+        rm(P(AT_ABORT_FLAG))
         return {"phase": None, "aborted": bool(st)}
     if args[0] == "start":
         if len(args) < 2 or args[1] not in AT_DEFAULTS:
@@ -1237,6 +1286,7 @@ def _autotune(ctx, args):
         check_cpu()
         load_baseline()
         params = at_params(args[1], args[2:])
+        rm(P(AT_ABORT_FLAG))
         apply_lines(profile_lines("baseline"), ctx, "cpu")      # tutti i core a baseline
         _, ref = co_test_parallel(list(range(CORES)), 9)        # riferimento: tensioni a CO di fabbrica, stesso carico
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
@@ -1254,6 +1304,18 @@ def _autotune(ctx, args):
         raise Err("nessuna calibrazione in corso (autotune start eco|auto)")
     check_cpu()
     base = load_baseline()
+    try:
+        return at_step(ctx, st, base)
+    except Aborted:
+        st = at_load() or st
+        st["in_progress"] = None
+        st["interrupted"] = True          # nessun risultato registrato: `autotune abort` farà il resto
+        at_save(st)
+        return st
+
+
+def at_step(ctx, st, base):
+    st.pop("interrupted", None)
     ip = st.get("in_progress")
     if ip and ip.get("boot_id") != boot_id():          # il passo precedente ha fatto crashare il sistema
         st["resumed_after_crash"] = True
@@ -1866,24 +1928,48 @@ def fmt_hwtest(r):
 SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}   # autotune step è ammesso: la GUI lo pilota
 
 
+def serve_one(line):
+    try:
+        argv = json.loads(line)
+        if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv) or not argv:
+            raise Err("richiesta non valida: atteso un array JSON di stringhe")
+        if argv[0] in SERVE_DENY:
+            raise Err("comando '%s' non disponibile via serve" % argv[0])
+        return {"ok": True, "data": run(argv)}
+    except Err as e:
+        return {"ok": False, "error": str(e)}
+    except Exception as e:  # mai morire su un bug: la GUI mostra l'errore
+        return {"ok": False, "error": "interno: %r" % e}
+
+
 def cmd_serve(ctx, args):
+    """Le richieste si eseguono in ordine su un solo thread (SMU serializzato); il lettore resta
+    libero così `autotune abort` interrompe subito un passo lungo (flag + stress-ng terminati)."""
+    import queue
+    import threading
+    q = queue.Queue()
+
+    def worker():
+        while True:
+            line = q.get()
+            if line is None:
+                return
+            sys.stdout.write(json.dumps(serve_one(line), ensure_ascii=False) + "\n")
+            sys.stdout.flush()
+    t = threading.Thread(target=worker, daemon=True)
+    t.start()
     for line in sys.stdin:
         line = line.strip()
         if not line:
             continue
         try:
-            argv = json.loads(line)
-            if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv) or not argv:
-                raise Err("richiesta non valida: atteso un array JSON di stringhe")
-            if argv[0] in SERVE_DENY:
-                raise Err("comando '%s' non disponibile via serve" % argv[0])
-            reply = {"ok": True, "data": run(argv)}
-        except Err as e:
-            reply = {"ok": False, "error": str(e)}
-        except Exception as e:  # mai morire su un bug: la GUI mostra l'errore
-            reply = {"ok": False, "error": "interno: %r" % e}
-        sys.stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
-        sys.stdout.flush()
+            if json.loads(line) == ["autotune", "abort"]:
+                at_request_abort()
+        except ValueError:
+            pass
+        q.put(line)
+    q.put(None)
+    t.join()
 
 
 # ---- Dispatcher ------------------------------------------------------------------------
@@ -2224,6 +2310,12 @@ def selftest():
     assert st["resumed_after_crash"] and st["unstable"]["0"] == {"value": -10, "why": "crash"} and st["core"] == 1
     assert run(["autotune", "abort"])["aborted"] and run(["autotune", "status"]) == {"phase": None}
     assert run(["status"])["co"] == [0] * CORES          # abort riporta la CPU a baseline
+    # interruzione durante un passo: nessun risultato registrato, abort riporta a baseline e toglie il flag
+    run(["autotune", "start", "eco", "step=9"])
+    at_request_abort()
+    st = run(["autotune", "step"])
+    assert st.get("interrupted") and st["results"] == {} and st["phase"] == "co" and st["value"] == -5, st
+    assert run(["autotune", "abort"])["aborted"] and not os.path.exists(P(AT_ABORT_FLAG))
     # crash in parallelo: tutti i core in prova instabili a quel livello, si passa alla finale
     run(["autotune", "start", "eco", "step=9"])
     st = run(["autotune", "step"])                     # tutti a -5: ok

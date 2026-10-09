@@ -6,6 +6,7 @@ Gira come utente. Ogni lettura e scrittura passa da un unico processo `pkexec ry
 ryzenctl così come arrivano. Nessuna costante hardware qui: i range vengono da `status.caps`.
 `--mock`: avvia `ryzenctl serve` sul backend finto (RYZENCTL_ROOT), senza driver né root.
 """
+import collections
 import json
 import os
 import subprocess
@@ -92,21 +93,41 @@ class Helper:
             cmd = ["pkexec", RYZENCTL, "serve"]
         self.p = subprocess.Popen(cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env, text=True, bufsize=1)
         self.lock = threading.Lock()
+        self.pending = collections.deque()      # richieste in attesa, nell'ordine: serve risponde in ordine
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def _reader(self):
+        for line in self.p.stdout:
+            with self.lock:
+                ev, slot = self.pending.popleft()
+            slot["line"] = line
+            ev.set()
+        with self.lock:                          # processo finito: sveglia chi aspetta
+            while self.pending:
+                ev, slot = self.pending.popleft()
+                ev.set()
 
     def call(self, *argv):
+        """Scrive subito e aspetta la risposta propria: così `autotune abort` parte mentre un
+        passo lungo è ancora in corso (serve lo interrompe)."""
+        ev, slot = threading.Event(), {}
         with self.lock:
+            self.pending.append((ev, slot))
             try:
                 self.p.stdin.write(json.dumps(list(argv)) + "\n")
                 self.p.stdin.flush()
-                line = self.p.stdout.readline()
             except (OSError, ValueError):
-                line = ""
-            if not line:
-                raise HelperError("ryzenctl serve non risponde (pkexec negato o processo terminato): riavvia l'applicazione")
-            r = json.loads(line)
-            if not r.get("ok"):
-                raise HelperError(r.get("error", "errore sconosciuto"))
-            return r.get("data")
+                self.pending.remove((ev, slot))
+                slot["line"] = ""
+                ev.set()
+        ev.wait()
+        line = slot.get("line", "")
+        if not line:
+            raise HelperError("ryzenctl serve non risponde (pkexec negato o processo terminato): riavvia l'applicazione")
+        r = json.loads(line)
+        if not r.get("ok"):
+            raise HelperError(r.get("error", "errore sconosciuto"))
+        return r.get("data")
 
     def close(self):
         try:
@@ -712,7 +733,7 @@ class AutotuneDialog(Adw.Window):
     def abort(self):
         self.aborting = True
         self.abort_btn.set_sensitive(False)
-        self.phase.set_text("Interrompo al termine del test in corso…")
+        self.phase.set_text("Interrompo…")
         self.win.run([["autotune", "abort"]], lambda _: (self.win.toast("Calibrazione annullata, CPU a baseline"), setattr(self, "closable", True), self.close()))
 
     def finish(self):
