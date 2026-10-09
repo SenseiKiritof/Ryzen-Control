@@ -22,34 +22,26 @@ make rpm                                   # richiede rpm-build, rpmdevtools, gi
 sudo dnf install dist/ryzen-smu-dkms-*.rpm dist/ryzen-control-*.rpm
 ```
 
-Il pacchetto `ryzen-smu-dkms` compila il modulo `ryzen_smu` per ogni kernel installato
-(`dkms.service` lo ricompila a ogni aggiornamento). Con **Secure Boot** attivo il modulo deve
-essere firmato con una chiave registrata; DKMS lo firma da solo con la sua chiave, da
-registrare una volta sola:
+L'installazione fa tutto da sola: `ryzen-smu-dkms` compila il modulo `ryzen_smu` per ogni
+kernel installato (`dkms.service` lo ricompila a ogni aggiornamento) e `ryzen-control` avvia il
+servizio, che carica il modulo e legge la baseline (nessun profilo viene applicato).
+
+**Secure Boot**: il modulo deve essere firmato con una chiave registrata in MOK. Se sul sistema
+c'è già la chiave akmods registrata (tipico con i driver NVIDIA di RPM Fusion), DKMS la riusa
+automaticamente: nessun passo manuale. Altrimenti il pacchetto lo dice a fine installazione e
+serve una registrazione, una volta sola — è un limite di Secure Boot (richiede la conferma
+fisica al riavvio), non aggirabile da software:
 
 ```sh
 sudo mokutil --import /var/lib/dkms/mok.pub      # chiede una password temporanea
 sudo reboot                                       # MOK Manager: Enroll MOK → Continue → password
 ```
 
-Alternativa se la chiave akmods è già registrata (sistemi con driver NVIDIA/akmods): far
-firmare DKMS con quella, senza nuove registrazioni:
+Verifica (tutto automatico, reversibile, un paio di secondi):
 
 ```sh
-sudo tee /etc/dkms/framework.conf.d/akmods.conf <<'EOF'
-mok_signing_key=/etc/pki/akmods/private/private_key.priv
-mok_certificate=/etc/pki/akmods/certs/public_key.der
-EOF
-sudo dkms build ryzen_smu/0.1.0 --force && sudo dkms install ryzen_smu/0.1.0 --force
-```
-
-Verifica:
-
-```sh
-dkms status                                 # ryzen_smu/0.1.0, <kernel>: installed
-systemctl status ryzenctl                   # active (exited); carica il modulo e cattura la baseline
-cat /sys/kernel/ryzen_smu_drv/codename      # 23 = Granite Ridge
 sudo ryzenctl status                        # valori del BIOS, "Baseline di questo boot"
+sudo ryzenctl hwtest                        # scrive e rilegge ogni comando vicino alla baseline, poi la ripristina
 ```
 
 ### Altre distribuzioni
@@ -77,6 +69,7 @@ sudo ryzenctl tjmax 85               # temperatura massima (°C), mai sopra la b
 sudo ryzenctl shaper 4 -10 -10 -5    # Curve Shaper: tier 0-4, margini a bassa/media/alta temperatura
 sudo ryzenctl power balanced         # power-saver | balanced | performance
 sudo ryzenctl default                # tutto ai valori di base (BIOS), avvio automatico off
+sudo ryzenctl hwtest                 # prova reversibile di ogni comando con readback
 ```
 
 Profili (`/etc/ryzenctl/profiles/<nome>.conf`, una riga per comando, `#` commenta):
@@ -113,13 +106,11 @@ Oltre i valori di fabbrica (PPT fino a 230 W, TDC 160 A, EDC 230 A, FMax +200 MH
 
 ## Verifica su hardware (checklist fase 1)
 
-1. `dkms status`, `modinfo -F signer ryzen_smu` (chiave dkms o akmods), `lsmod | grep ryzen_smu`
-   vuoto prima di `systemctl start ryzenctl`, pieno dopo; `codename` = 23.
-2. `sudo ryzenctl status` = valori BIOS; `baseline show` coerente.
-3. Scritture minime reversibili: `co 7 -3` → `co 7 0`; `ppt 150` → `ppt 162`; `fmax 5000`
-   (sotto carico `grep MHz /proc/cpuinfo` ≤ 5000) → valore base; `tjmax 85` → base;
-   `shaper 4 -2 -2 -2` → `shaper 4 0 0 0`.
-4. Crash-guard: profilo innocuo (`ppt 150`) con autostart; `sync; echo b | sudo tee
+1. `dkms status` installed; `modinfo -F signer ryzen_smu` (chiave akmods o DKMS registrata);
+   `systemctl status ryzenctl` active; `cat /sys/kernel/ryzen_smu_drv/codename` = 23.
+2. `sudo ryzenctl status` = valori BIOS; `sudo ryzenctl hwtest` con esito `ok` (ogni comando
+   scritto, riletto e riportato alla baseline; il Curve Shaper è il meno certo).
+3. Crash-guard: profilo innocuo (`ppt 150`) con autostart; `sync; echo b | sudo tee
    /proc/sysrq-trigger` → al boot `ryzenctl crashed` valorizzato, `status` = baseline,
    notifica al login; `systemctl restart ryzenctl` → baseline invariata; riavvio pulito →
    profilo applicato; suspend/resume → profilo ancora applicato; boot con `ryzenctl.off` →

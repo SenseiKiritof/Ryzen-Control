@@ -758,6 +758,45 @@ def cmd_notify(ctx, args):
     return {"crashed": info}
 
 
+# ---- hwtest: verifica su hardware automatica e reversibile ------------------------------
+def cmd_hwtest(ctx, args):
+    """Per ogni comando: un valore poco distante dalla baseline, readback, poi il valore
+    baseline. Continua anche se un passo fallisce; alla fine riapplica la baseline."""
+    check_cpu()
+    base = load_baseline()
+    steps = [("co", ["7", str(max(CO_MIN, base["co"][7] - 3))], ["7", str(base["co"][7])]),
+             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])]),
+             ("shaper", ["4", "-2", "-2", "-2"], ["4"] + [str(v) for v in base["shaper"].get(4, [0, 0, 0])])]
+    for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
+        if key in base:
+            steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
+        else:
+            steps.append((key, None, None))
+    results = {}
+    for key, test, restore in steps:
+        if test is None:
+            results[key] = "saltato: nessuna baseline (PM table assente)"
+            continue
+        try:
+            run([key] + test, ctx)
+            run([key] + restore, ctx)
+            results[key] = "ok (%s -> %s)" % (" ".join(test), " ".join(restore))
+        except Err as e:
+            results[key] = "errore: %s" % e
+    try:
+        apply_lines(profile_lines("baseline"), ctx)
+        rm(marker("active"))
+        results["baseline"] = "ripristinata"
+    except Err as e:
+        results["baseline"] = "errore nel ripristino: %s" % e
+    results["esito"] = "ok" if all(v.startswith(("ok", "ripristinata", "saltato")) for v in results.values()) else "FALLITO"
+    return results
+
+
+def fmt_hwtest(r):
+    return "\n".join("%-9s %s" % (k, v) for k, v in r.items())
+
+
 # ---- serve: protocollo per la GUI (una riga JSON per richiesta e per risposta) ---------
 SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}
 
@@ -792,9 +831,9 @@ COMMANDS = {
     "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "unlock": cmd_unlock,
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
-    "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve,
+    "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
 }
-FORMAT = {"status": fmt_status}
+FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest}
 
 
 def run(argv, ctx=None):
@@ -1012,6 +1051,19 @@ def selftest():
     FAKE.save()
     reboot()
     run(["boot"])
+
+    # ---- hwtest: tutto ok, stato finale = baseline, active rimosso ----
+    r = run(["hwtest"])
+    assert r["esito"] == "ok" and r["co"].startswith("ok (7 -3 -> 7 0)") and r["ppt"].startswith("ok (150 -> 162)"), r
+    assert run(["status"])["limits"]["ppt"] == 162.0 and not exists("active")
+    FAKE.s["drop"] = 2                                   # il primo passo (co) fallisce, gli altri continuano
+    FAKE.s["log"] = []
+    FAKE.s["tctl"] = 60.0
+    FAKE.save()
+    r = run(["hwtest"])
+    assert r["esito"] == "FALLITO" and r["co"].startswith("errore") and r["fmax"].startswith("ok"), r
+    assert run(["status"])["co"] == [0] * CORES
+    assert "FALLITO" in fmt_hwtest(r)
 
     # ---- serve ----
     import io

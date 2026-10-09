@@ -1,6 +1,6 @@
 Name:           ryzen-control
 Version:        0.1.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 License:        GPL-3.0-or-later
 Source0:        %{name}-%{version}.tar.gz
@@ -38,8 +38,9 @@ Requires(preun): dkms
 %description -n ryzen-smu-dkms
 Sorgente del modulo kernel ryzen_smu (amkillam/ryzen_smu, con dimensioni
 PM table aggiuntive per Granite Ridge) compilato da DKMS per ogni kernel
-installato. Con Secure Boot attivo va registrata una volta la chiave DKMS:
-mokutil --import /var/lib/dkms/mok.pub
+installato. Con Secure Boot attivo il modulo viene firmato con la chiave
+akmods se e' gia' registrata in MOK, altrimenti con la chiave DKMS, da
+registrare una volta: mokutil --import /var/lib/dkms/mok.pub
 
 %prep
 %autosetup
@@ -49,9 +50,16 @@ mokutil --import /var/lib/dkms/mok.pub
 
 %install
 make install-cli install-dkms-src DESTDIR=%{buildroot} PREFIX=%{_prefix}
+# Creato dal %%post solo quando la chiave akmods e' registrata; qui solo per tracciarlo (%%ghost).
+install -dm755 %{buildroot}%{_sysconfdir}/dkms/framework.conf.d
+touch %{buildroot}%{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %post
 %systemd_post ryzenctl.service ryzenctl-resume.service
+# Avvio subito: carica il modulo e cattura la baseline. Non applica alcun profilo.
+if [ -d /run/systemd/system ]; then
+    systemctl start ryzenctl.service >/dev/null 2>&1 || :
+fi
 
 %preun
 %systemd_preun ryzenctl.service ryzenctl-resume.service
@@ -60,13 +68,23 @@ make install-cli install-dkms-src DESTDIR=%{buildroot} PREFIX=%{_prefix}
 %systemd_postun ryzenctl.service ryzenctl-resume.service
 
 %post -n ryzen-smu-dkms
+# Secure Boot senza passi manuali: se la chiave akmods (NVIDIA ecc.) esiste ed e' gia'
+# registrata in MOK, DKMS firma con quella. Il drop-in vale per ogni modulo DKMS del sistema.
+AKMODS_KEY=/etc/pki/akmods/private/private_key.priv
+AKMODS_CERT=/etc/pki/akmods/certs/public_key.der
+DROPIN=%{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
+if [ ! -s "$DROPIN" ] && [ -f "$AKMODS_KEY" ] && [ -f "$AKMODS_CERT" ] \
+   && mokutil --test-key "$AKMODS_CERT" 2>/dev/null | grep -q 'already enrolled'; then
+    printf 'mok_signing_key=%%s\nmok_certificate=%%s\n' "$AKMODS_KEY" "$AKMODS_CERT" > "$DROPIN"
+fi
 dkms add -m ryzen_smu -v %{version} -q --rpm_safe_upgrade || :
-dkms build -m ryzen_smu -v %{version} -q || :
-dkms install -m ryzen_smu -v %{version} -q || :
-if grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/security/lockdown 2>/dev/null; then
-    echo "ryzen-smu-dkms: Secure Boot attivo. Se non e' gia' registrata, importare la chiave DKMS"
-    echo "  sudo mokutil --import /var/lib/dkms/mok.pub"
-    echo "poi riavviare e confermare in MOK Manager; altrimenti il modulo ryzen_smu non si carica."
+dkms build -m ryzen_smu -v %{version} -q --force || :
+dkms install -m ryzen_smu -v %{version} -q --force || :
+if [ ! -s "$DROPIN" ] && grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/security/lockdown 2>/dev/null \
+   && ! mokutil --test-key /var/lib/dkms/mok.pub 2>/dev/null | grep -q 'already enrolled'; then
+    echo "ryzen-smu-dkms: Secure Boot attivo e chiave DKMS non registrata. Una volta sola:"
+    echo "  sudo mokutil --import /var/lib/dkms/mok.pub   (poi riavvio, MOK Manager -> Enroll MOK)"
+    echo "Fino ad allora il modulo ryzen_smu non puo' essere caricato."
 fi
 
 %preun -n ryzen-smu-dkms
@@ -90,7 +108,12 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %license ryzen_smu/LICENSE
 %doc ryzen_smu/README.md ryzen_smu/UPSTREAM.md
 %{_usrsrc}/ryzen_smu-%{version}/
+%ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-2
+- Firma automatica con la chiave akmods se registrata, rebuild forzato, avvio del servizio
+  all'installazione, comando hwtest
+
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-1
 - Prima versione: ryzenctl, servizi systemd, driver ryzen_smu via DKMS
