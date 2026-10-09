@@ -18,9 +18,10 @@ spec RPM, README). Verificato su hardware (9800X3D, SMU 98.81.0, PM table 0x6201
 firmato automaticamente con la chiave akmods, `hwtest` ok per CO, FMax, PPT, TDC, EDC, Tjmax.
 **Curve Shaper non verificabile**: RSMU 0xA6 risponde OK ma 0x84 restituisce zeri (o l'arg0
 stesso) → `shaper` è sperimentale, fuori da profili/baseline/hwtest, il setter fallisce sempre
-al readback (sicuro per costruzione). Manca il test di crash (sysrq) e il tag `v0.1.0`. Da
-fare, in quest'ordine: fase 2 ventole (CLI, `fan autodetect`), fase 3 GUI, fase 4 calibrazioni
-Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD.
+al readback (sicuro per costruzione). Crash-guard verificato su hardware (crash sysrq →
+profilo disattivato + notifica, riattiva, restart, boot pulito, resume). Tag `v0.1.0` su `main`.
+Da fare, in quest'ordine: fase 2 ventole (CLI, `fan autodetect`), fase 3 GUI, fase 4
+calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD.
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
 attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
