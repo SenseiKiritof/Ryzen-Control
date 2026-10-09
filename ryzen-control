@@ -693,7 +693,8 @@ class AutotuneDialog(Adw.Window):
         grid = Gtk.Grid(column_spacing=14, row_spacing=4, hexpand=True)
         heads = (("Core", None), ("Fabbrica", "CO di fabbrica; sotto, la tensione di riferimento misurata all'avvio con lo stesso carico"),
                  ("In prova", "Livello di CO in prova sul core; sotto, l'ultima tensione misurata a pieno carico e la differenza dal riferimento"),
-                 ("Ultimo stabile", None), ("Instabile a", None), ("Definitivo", None))
+                 ("Ultimo stabile", None), ("Instabile a", None),
+                 ("Definitivo", "limite misurato + margine della modalità + 3 per ogni passata finale fallita"))
         for col, (h, tip) in enumerate(heads):
             grid.attach(label(h, ["heading"], tooltip_text=tip), col, 0, 1, 1)
         self.cells = []
@@ -718,6 +719,8 @@ class AutotuneDialog(Adw.Window):
                           "qui vedi la tensione reale misurata a pieno carico per ogni livello.", ["dim-label", "caption"], wrap=True))
         self.slope = label("", ["numeric"], visible=False)
         body.append(self.slope)
+        self.failures = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)   # passate finali fallite, una riga ciascuna
+        body.append(self.failures)
         self.fmax = label("", ["numeric"], wrap=True)
         body.append(self.fmax)
         self.result = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -787,7 +790,7 @@ class AutotuneDialog(Adw.Window):
             self.phase.set_text("Core %d: provo CO %d…" % (st["core"], st["value"]))
             frac = (st["core"] + min(1.0, st["value"] / p["colimit"] if p.get("colimit") else 0)) / 8
         elif ph == "final":
-            self.phase.set_text("Passata finale su tutti i core (tentativo %d/3)" % (st.get("final_tries", 0) + 1))
+            self.phase.set_text("Passata finale su tutti i core a CO %s (tentativo %d/3)" % (self.co_span(self.final_values(st)), st.get("final_tries", 0) + 1))
             frac = AT_PHASES["co"] + (AT_PHASES["final"] - AT_PHASES["co"]) * min(1.0, st.get("final_tries", 0) / 3)
         elif ph == "fmax":
             f, tests = st["fmax"].get("current"), st["fmax"].get("tests", [])
@@ -838,6 +841,12 @@ class AutotuneDialog(Adw.Window):
                                    (cell["final"], "%d" % fin[c] if fin else None, "success")):
                 lab.set_markup("<b>%s</b>" % text if text and lab is cell["final"] else (text or "—"))
                 (lab.add_css_class if text else lab.remove_css_class)(cls)
+        fails = st.get("final_failures") or []
+        while self.failures.get_first_child():
+            self.failures.remove(self.failures.get_first_child())
+        for f in fails:
+            self.failures.append(label("Passata finale fallita a CO %s (%s): +3 su tutti i core e nuovo tentativo" % (self.co_span(f.get("values") or [0]), f.get("why", "?")),
+                                       ["warning"], wrap=True))
         slope = st.get("mv_per_step")          # mediana delle pendenze per livello, calcolata da ryzenctl
         self.slope.set_visible(slope is not None)
         if slope is not None:
@@ -851,6 +860,16 @@ class AutotuneDialog(Adw.Window):
                     text += ("\n" if text else "") + "Sweep %s:\n" % key.upper() + "\n".join(
                         "%s %s → %.0f op/s, %.0f W" % (t[0], unit, t[1], t[2]) for t in knee[key]["tests"])
         self.fmax.set_text(text)
+
+    @staticmethod
+    def final_values(st):
+        """CO della passata finale: limite misurato + margine della modalità + 3 per ogni passata fallita (come at_final_values)."""
+        m = st.get("params", {}).get("margin", 0) + 3 * st.get("final_tries", 0)
+        return [min(0, st.get("results", {}).get(str(c), 0) + m) for c in range(8)]
+
+    @staticmethod
+    def co_span(vals):
+        return "%d" % vals[0] if min(vals) == max(vals) else "%d … %d" % (min(vals), max(vals))
 
     @staticmethod
     def load_method(st):
@@ -874,6 +893,10 @@ class AutotuneDialog(Adw.Window):
     def done(self, st):
         if st.get("error"):
             self.result.append(label(st["error"], ["warning"], wrap=True))
+        tries = st.get("final_tries", 0)
+        if tries and st.get("final"):
+            self.result.append(label("Il margine finale è +%d perché la passata combinata è fallita %d volt%s" % (
+                st.get("params", {}).get("margin", 0) + 3 * tries, tries, "a" if tries == 1 else "e"), ["warning"], wrap=True))
         if st.get("final"):   # per core: CO fabbrica → definitivo e ΔV misurata (campione al livello definitivo o al più vicino)
             base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
             ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
