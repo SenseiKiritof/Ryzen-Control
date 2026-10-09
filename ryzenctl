@@ -656,6 +656,19 @@ def caps(base, unlock):
 
 
 PM_CORE_TEMP = 317   # 0x620105: temperature per core d[317..324] (gnr-smu, CONFIRMED)
+PM_CORE_VOLT = 309   # 0x620105: tensione per core d[309..316] (gnr-smu, CONFIRMED)
+PM_CORE_MHZ = 325    # 0x620105: frequenza per core d[325..332] (gnr-smu, CONFIRMED)
+
+
+def sample_cores():
+    """Tensione (V) e frequenza (MHz) per core dalla PM table, solo 0x620105; altrimenti None."""
+    if FAKE:
+        return {"volt": [round(1.25 + c * 0.003, 3) for c in FAKE.s["co"]], "mhz": [FAKE.s["fmax"] - 50] * CORES}
+    version, t = pm_table()
+    if t is None or version != 0x620105 or len(t) <= PM_CORE_MHZ + CORES:
+        return None
+    return {"volt": [round(t[PM_CORE_VOLT + c], 3) for c in range(CORES)],
+            "mhz": [int(t[PM_CORE_MHZ + c] * 1000) if t[PM_CORE_MHZ + c] < 100 else int(t[PM_CORE_MHZ + c]) for c in range(CORES)]}
 
 
 def cmd_telemetry(ctx, args):
@@ -672,8 +685,10 @@ def cmd_telemetry(ctx, args):
         temp = round(t[PM_CORE_TEMP + c], 1) if t is not None and version == 0x620105 and len(t) > PM_CORE_TEMP + c else None
         cores.append({"mhz": mhz, "temp": temp})
     co = read_co()
+    sample = sample_cores()
     for c in range(CORES):
         cores[c]["co"] = co[c]
+        cores[c]["volt"] = sample["volt"][c] if sample else None
     tccd = None
     if FAKE:
         tccd = round(FAKE.s["tctl"] - 15, 1)
@@ -918,6 +933,26 @@ def co_test(cores, seconds):
     return True
 
 
+def co_test_sampled(cores, seconds):
+    """Come co_test, ma a metà della fase a pieno carico campiona tensione e MHz per core:
+    è la misura di "a cosa corrisponde" un passo di CO. Restituisce (ok, campione)."""
+    if FAKE:
+        return FAKE.load_ok(["--taskset", str(cores[0])] if len(cores) == 1 else []), sample_cores()
+    sec = max(1, seconds // 3)
+    base = ["--cpu", str(len(cores)), "--cpu-method", "all", "--verify"]
+    if len(cores) == 1:
+        base += ["--taskset", str(cores[0])]
+    pr = spawn_load(base, sec)
+    time.sleep(max(1, sec // 2))
+    sample = sample_cores()
+    if pr.wait() != 0 or mce_since(time.time() - sec - 1):
+        return False, sample
+    for extra in (["--cpu-load", "50"], ["--cpu-load", "10"]):
+        if not run_load(base + extra, sec):
+            return False, sample
+    return True, sample
+
+
 def spawn_load(args, seconds):
     return subprocess.Popen(["stress-ng"] + args + ["-t", str(int(seconds)), "-q"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -939,15 +974,19 @@ def mce_cores_since(ts, cores):
 def co_test_parallel(cores, seconds):
     """Tutti i core insieme, un worker per core (così l'instabilità software resta attribuita al
     core): pieno carico, poi 50 %, poi raffiche singole a turno per toccare il boost massimo
-    di ogni core. Restituisce l'insieme dei core falliti."""
+    di ogni core. Restituisce (core falliti, campione tensioni/MHz a pieno carico)."""
     if FAKE:
-        return {c for c in cores if not FAKE.load_ok(["--taskset", str(c)])}
+        return {c for c in cores if not FAKE.load_ok(["--taskset", str(c)])}, sample_cores()
     sec = max(1, seconds // 3)
     failed = set()
+    sample = None
     t0 = time.time()
     for extra in ([], ["--cpu-load", "50"]):
         procs = {c: spawn_load(["--cpu", "1", "--taskset", str(c), "--cpu-method", "all", "--verify"] + extra, sec)
                  for c in cores if c not in failed}
+        if not extra:
+            time.sleep(max(1, sec // 2))
+            sample = sample_cores()                    # tensioni a pieno carico a questo livello di CO
         for c, pr in procs.items():
             if pr.wait() != 0:
                 failed.add(c)
@@ -955,7 +994,7 @@ def co_test_parallel(cores, seconds):
     for c in cores:
         if c not in failed and not run_load(["--cpu", "1", "--taskset", str(c), "--cpu-method", "all", "--verify"], burst):
             failed.add(c)
-    return failed | mce_cores_since(t0, cores)
+    return failed | mce_cores_since(t0, cores), sample
 
 
 def at_total_estimate(mode, p):
@@ -1199,7 +1238,9 @@ def _autotune(ctx, args):
         load_baseline()
         params = at_params(args[1], args[2:])
         apply_lines(profile_lines("baseline"), ctx, "cpu")      # tutti i core a baseline
+        _, ref = co_test_parallel(list(range(CORES)), 9)        # riferimento: tensioni a CO di fabbrica, stesso carico
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
+              "samples": {"0": ref},
               "parallel": bool(params["parallel"]), "active_cores": list(range(CORES)),
               "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
               "fmax": {"current": None, "tests": [], "chosen": None},
@@ -1235,8 +1276,10 @@ def _autotune(ctx, args):
         at_save(st)
         for c in cores:
             run(["co", str(c), str(v)], ctx)
-        failed = co_test_parallel(cores, st["params"]["step"])
+        failed, sample = co_test_parallel(cores, st["params"]["step"])
         st["in_progress"] = None
+        if sample:
+            st.setdefault("samples", {})[str(v)] = sample
         for c in cores:
             if c in failed:
                 st["unstable"][str(c)] = {"value": v, "why": "instabile"}
@@ -1256,8 +1299,12 @@ def _autotune(ctx, args):
         st["in_progress"] = {"kind": "co", "core": c, "value": v, "boot_id": boot_id()}
         at_save(st)
         run(["co", str(c), str(v)], ctx)
-        ok = co_test([c], st["params"]["step"])
+        ok, sample = co_test_sampled([c], st["params"]["step"])
         st["in_progress"] = None
+        if sample:
+            st.setdefault("samples", {}).setdefault(str(v), {"volt": [None] * CORES, "mhz": [None] * CORES})
+            st["samples"][str(v)]["volt"][c] = sample["volt"][c]
+            st["samples"][str(v)]["mhz"][c] = sample["mhz"][c]
         if ok:
             st["results"][str(c)] = v
             if v - CO_STEP < st["params"]["colimit"]:
@@ -2141,6 +2188,8 @@ def selftest():
         if st["phase"] == "done":
             break
     assert steps == 5 + 1 + 7 and st["eta"]["remaining_s"] == 0, steps   # 5 livelli in parallelo, finale, 7 FMax
+    assert st["samples"]["0"]["volt"][0] == 1.25 and st["samples"]["-20"]["volt"][0] == 1.19, st["samples"]   # −20 ≈ −60 mV nel finto
+    assert run(["telemetry"])["cores"][0]["volt"] is not None
     assert run(["status"])["limits"]["ppt"] == 89.0 and run(["status"])["limits"]["tjmax"] == 80.0
     assert st["phase"] == "done" and "error" not in st, st
     # core 7 stabile fino a -15, instabile a -20 → finale -15+5 = -10; gli altri arrivano al limite -25 → -20
