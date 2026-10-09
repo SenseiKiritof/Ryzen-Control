@@ -31,6 +31,16 @@ UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC = 230, 160, 230
 READBACK_TOL = 0.6             # W/A: i limiti tornano come float dalla PM table
 READBACK_WAIT = 1.0            # s: l'SMU aggiorna la PM table col suo passo, non subito
 READBACK_POLL = 0.02
+# Ventole (nct6775). Autodetect: canale al 40 % per 20 s sotto carico; la pompa alza Tctl di
+# gradi in secondi, una ventola del radiatore scalda il liquido lentamente.
+# ponytail: soglie tarate su un AIO 360; ritoccare se un radiatore piccolo le sfiora.
+FAN_TEST_PWM, FAN_TEST_MIN_PWM, FAN_TEST_SEC = 102, 51, 20   # prova al 60 % del pwm attuale, tra 20 % e 40 %
+FAN_PUMP_DT, FAN_FAN_DT, FAN_PUMP_RPM = 2.0, 1.0, 1500
+FAN_ABORT_TCTL, FAN_ABORT_DT = 80.0, 8.0
+FAN_RPM_CHANGE = 0.05          # sotto: il canale non risponde al PWM
+FAN_STEP_MAX_MS, FAN_STEP_TOL_MS = 60000, 200
+FAN_PWM_MIN, FAN_CURVE_LAST_TEMP_MAX = 51, 125    # 51 = 20 %, minimo delle curve BIOS; 125 = loro ultimo punto
+FAN_ROLES = ("ventola", "pompa", "non-controllabile", "sconosciuto")
 POWER_PROFILES = ("power-saver", "balanced", "performance")
 
 # ---- Percorsi ------------------------------------------------------------------------
@@ -146,11 +156,52 @@ class Fake:
     DEFAULT = {"codename": GRANITE_RIDGE, "co": [0] * CORES, "fmax": 5225,
                "ppt": 162.0, "tdc": 120.0, "edc": 180.0, "thm": 95.0,
                "shaper": [0x80 | t for t in range(5)], "tctl": 52.0, "power": "performance",
-               "pm_version": 0x620105, "drop": 0, "log": []}
+               "pm_version": 0x620105, "drop": 0, "log": [], "tctl_base": 52.0, "cmdline": "quiet",
+               # ventole simulate: 1 ventola radiatore, 2 pompa AIO, 3 ventola 3 pin (non risponde al PWM)
+               "fans": {"1": {"kind": "fan", "rpm": 1200}, "2": {"kind": "pump", "rpm": 2800},
+                        "3": {"kind": "uncontrollable", "rpm": 900}}}
+    FAN_DIR = HWMON + "/hwmon0"
 
     def __init__(self):
         self.path = P("/fake_smu.json")
         self.s = json.loads(open(self.path).read() if os.path.exists(self.path) else json.dumps(self.DEFAULT))
+        if not os.path.exists(P(self.FAN_DIR + "/name")):
+            self._make_hwmon()
+
+    def _make_hwmon(self):
+        d = P(self.FAN_DIR)
+        os.makedirs(d, exist_ok=True)
+        files = {"name": "nct6798"}
+        for n, f in self.s["fans"].items():
+            files.update({"fan%s_input" % n: f["rpm"], "pwm%s" % n: 153, "pwm%s_enable" % n: 5,
+                          "pwm%s_step_up_time" % n: 400, "pwm%s_step_down_time" % n: 400})
+            for k, (t, pw) in enumerate(((40, 77), (50, 110), (60, 150), (70, 200), (80, 255)), 1):
+                files["pwm%s_auto_point%d_temp" % (n, k)] = t * 1000
+                files["pwm%s_auto_point%d_pwm" % (n, k)] = pw
+        for name, v in files.items():
+            with open("%s/%s" % (d, name), "w") as fh:
+                fh.write(str(v))
+
+    def after_fan_write(self, path, value):
+        """Fisica finta: in manuale la ventola segue il PWM e scalda poco, la pompa rallentata
+        alza Tctl di 5 °C, il canale 3 pin ignora il PWM."""
+        m = re.search(r"/pwm(\d+)(_enable)?$", path)
+        if not m:
+            return
+        n = m.group(1)
+        kind = self.s["fans"][n]["kind"]
+        d = P(self.FAN_DIR)
+        enable = int(open("%s/pwm%s_enable" % (d, n)).read())
+        pwm = int(open("%s/pwm%s" % (d, n)).read())
+        rpm, tctl_now = self.s["fans"][n]["rpm"], self.s["tctl_base"]
+        if enable == 1 and kind == "fan":
+            rpm, tctl_now = int(1500 * pwm / 255), self.s["tctl_base"] + (0.3 if pwm < 200 else 0)
+        elif enable == 1 and kind == "pump":
+            rpm, tctl_now = 1500 + int(1300 * pwm / 255), self.s["tctl_base"] + (5.0 if pwm < 200 else 0)
+        with open("%s/fan%s_input" % (d, n), "w") as fh:
+            fh.write(str(rpm))
+        self.s["tctl"] = tctl_now
+        self.save()
 
     def save(self):
         write_atomic(self.path, json.dumps(self.s))
@@ -365,6 +416,7 @@ def capture_lines():
     power = power_get()
     if power:
         lines.append("power " + power)
+    lines += fan_capture_lines()   # solo canali già classificati "ventola"
     return lines
 
 
@@ -596,7 +648,8 @@ def fmt_status(st):
 
 
 # ---- Profili -----------------------------------------------------------------------------
-PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power"}  # + fan (fase 2); shaper: sperimentale
+PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "fan"}  # shaper: sperimentale, fuori
+FAN_PROFILE_SUBCMDS = ("step", "curve")   # in un profilo: `fan <N> step …` | `fan <N> curve …`
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 
@@ -625,8 +678,8 @@ def apply_lines(lines, ctx, part=None):
         is_fan = t[0] == "fan"
         if part == "fan" and not is_fan or part == "cpu" and is_fan:
             continue
-        if t[0] not in PROFILE_CMDS:
-            raise Err("riga %d: '%s' non ammesso in un profilo" % (n, t[0]))
+        if t[0] not in PROFILE_CMDS or (is_fan and (len(t) < 3 or t[2] not in FAN_PROFILE_SUBCMDS)):
+            raise Err("riga %d: '%s' non ammesso in un profilo" % (n, " ".join(t[:3])))
         try:
             run(t, ctx)
         except Err as e:
@@ -792,6 +845,314 @@ def cmd_notify(ctx, args):
     return {"crashed": info}
 
 
+# ---- Ventole (nct6775 via hwmon) ----------------------------------------------------------
+def pause(seconds):
+    if not FAKE:
+        time.sleep(seconds)
+
+
+def fans_dir():
+    """Directory hwmon del Super I/O Nuvoton, o None."""
+    try:
+        for d in sorted(os.listdir(P(HWMON))):
+            try:
+                if read_text("%s/%s/name" % (HWMON, d)).startswith("nct6"):
+                    return HWMON + "/" + d
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return None
+
+
+def hw_read(path):
+    return int(read_text(path))
+
+
+def hw_write(path, value):
+    with open(P(path), "w") as f:
+        f.write(str(int(value)))
+    if FAKE:
+        FAKE.after_fan_write(path, int(value))
+
+
+def fan_channels(d):
+    """Indici N con pwmN e fanN_input presenti."""
+    out = []
+    for f in sorted(os.listdir(P(d))):
+        if re.fullmatch(r"pwm\d+", f) and os.path.exists(P("%s/fan%s_input" % (d, f[3:]))):
+            out.append(int(f[3:]))
+    return sorted(out)
+
+
+def fan_points(d, n):
+    k = 1
+    while os.path.exists(P("%s/pwm%d_auto_point%d_temp" % (d, n, k))):
+        k += 1
+    return k - 1
+
+
+def fan_roles():
+    return load_settings().get("fans", {})
+
+
+def fan_role(n):
+    return fan_roles().get(str(n), {}).get("role", "sconosciuto")
+
+
+def fan_set_role(n, role, why=""):
+    s = load_settings()
+    s.setdefault("fans", {}).setdefault(str(n), {})
+    s["fans"][str(n)].update({"role": role, "why": why})
+    save_settings(s)
+
+
+def fan_require_writable(n):
+    if fan_role(n) != "ventola":
+        raise Err("canale %d non scrivibile: ruolo '%s' (solo 'ventola', assegnato da `fan autodetect`)" % (n, fan_role(n)))
+
+
+def fan_info(d, n):
+    info = {"canale": n, "rpm": hw_read("%s/fan%d_input" % (d, n)), "pwm": hw_read("%s/pwm%d" % (d, n)),
+            "modo": hw_read("%s/pwm%d_enable" % (d, n)),
+            "step_up_ms": hw_read("%s/pwm%d_step_up_time" % (d, n)),
+            "step_down_ms": hw_read("%s/pwm%d_step_down_time" % (d, n)),
+            "curva": ["%d:%d" % (hw_read("%s/pwm%d_auto_point%d_temp" % (d, n, k)) // 1000,
+                                 hw_read("%s/pwm%d_auto_point%d_pwm" % (d, n, k))) for k in range(1, fan_points(d, n) + 1)]}
+    info.update(fan_roles().get(str(n), {"role": "sconosciuto"}))
+    return info
+
+
+def fan_capture_lines():
+    d = fans_dir()
+    if not d:
+        return []
+    lines = []
+    for n in fan_channels(d):
+        if fan_role(n) == "ventola":
+            i = fan_info(d, n)
+            lines.append("fan %d step %d %d" % (n, i["step_up_ms"], i["step_down_ms"]))
+            lines.append("fan %d curve %s" % (n, " ".join(i["curva"])))
+    return lines
+
+
+def fan_need(d_or_none):
+    if not d_or_none:
+        raise Err("nessun chip nct67xx in hwmon: `fan enable` (modulo nct6775, eventuale parametro kernel)")
+    return d_or_none
+
+
+def median(values):
+    v = sorted(values)
+    return v[len(v) // 2]
+
+
+def tctl_median(seconds):
+    if FAKE:
+        return tctl()
+    samples = []
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        samples.append(tctl())
+        time.sleep(0.25)
+    return median(samples)
+
+
+def cmd_fan_autodetect(ctx, d):
+    """Ruoli dal comportamento fisico, senza intervento umano (vedi costanti FAN_*)."""
+    channels = [n for n in fan_channels(d) if hw_read("%s/fan%d_input" % (d, n)) > 0]
+    if not channels:
+        raise Err("nessun canale con giri > 0")
+    load = None
+    if not FAKE:
+        try:
+            load = subprocess.Popen(["stress-ng", "--cpu", "4", "--quiet"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            raise Err("stress-ng non installato: serve per il carico di prova")
+    results = {}
+    try:
+        pause(10)   # carico a regime
+        for n in channels:
+            enable, pwm = hw_read("%s/pwm%d_enable" % (d, n)), hw_read("%s/pwm%d" % (d, n))
+            rpm0 = hw_read("%s/fan%d_input" % (d, n))
+            t0 = tctl_median(5)
+            peak, aborted = 0.0, False
+            test_pwm = max(FAN_TEST_MIN_PWM, min(FAN_TEST_PWM, int(pwm * 0.6)))
+            try:
+                hw_write("%s/pwm%d_enable" % (d, n), 1)
+                hw_write("%s/pwm%d" % (d, n), test_pwm)
+                end = time.monotonic() + (0 if FAKE else FAN_TEST_SEC)
+                while True:
+                    t = tctl()
+                    peak = max(peak, t - t0)
+                    if t > FAN_ABORT_TCTL or peak > FAN_ABORT_DT:
+                        aborted = True
+                        break
+                    if time.monotonic() >= end:
+                        break
+                    time.sleep(0.5)
+                rpm1 = hw_read("%s/fan%d_input" % (d, n))
+                dt = max(peak, tctl_median(5) - t0) if not aborted else peak
+            finally:
+                hw_write("%s/pwm%d" % (d, n), pwm)
+                hw_write("%s/pwm%d_enable" % (d, n), enable)
+            rpm_changed = abs(rpm1 - rpm0) >= FAN_RPM_CHANGE * max(rpm0, 1)
+            if aborted or dt >= FAN_PUMP_DT:
+                role = "pompa"
+            elif not rpm_changed:
+                role = "non-controllabile"     # ventola 3 pin o pompa a 12 V fissi: protetto
+            elif rpm1 >= FAN_PUMP_RPM:
+                role = "pompa"
+            elif dt < FAN_FAN_DT:
+                role = "ventola"
+            else:
+                role = "sconosciuto"
+            why = "ΔTctl %.1f °C, giri %d→%d al %d%%%s" % (dt, rpm0, rpm1, test_pwm * 100 // 255, ", interrotto" if aborted else "")
+            fan_set_role(n, role, why)
+            results[n] = {"ruolo": role, "perché": why}
+            pause(10)   # torna a regime prima del canale successivo
+    finally:
+        if load:
+            load.terminate()
+            load.wait()
+    return results
+
+
+def cmd_fan(ctx, args):
+    """fan status | autodetect | identify N | role N pompa|sconosciuto | name N <nome> |
+    enable | disable | <N> step <su_ms> <giù_ms> | <N> curve t:pwm …"""
+    if not args:
+        raise Err("uso: fan status|autodetect|identify N|role N pompa|sconosciuto|name N <nome>|enable|disable|<N> step <su> <giù>|<N> curve t:pwm …")
+    if args[0] == "enable":
+        return fan_enable(ctx)
+    if args[0] == "disable":
+        return fan_disable(ctx)
+    d = fan_need(fans_dir())
+    if args == ["status"]:
+        return {"chip": read_text(d + "/name"), "canali": [fan_info(d, n) for n in fan_channels(d)]}
+    if args == ["autodetect"]:
+        if ctx.get("dry"):
+            return {}
+        return cmd_fan_autodetect(ctx, d)
+    if len(args) == 2 and args[0] == "identify":
+        n = to_int(args[1], "canale")
+        enable, pwm = hw_read("%s/pwm%d_enable" % (d, n)), hw_read("%s/pwm%d" % (d, n))
+        try:
+            hw_write("%s/pwm%d_enable" % (d, n), 1)
+            hw_write("%s/pwm%d" % (d, n), 255)
+            pause(5)
+            rpm = hw_read("%s/fan%d_input" % (d, n))
+        finally:
+            hw_write("%s/pwm%d" % (d, n), pwm)
+            hw_write("%s/pwm%d_enable" % (d, n), enable)
+        return {"canale": n, "rpm_al_100": rpm}
+    if len(args) == 3 and args[0] == "role":
+        n = to_int(args[1], "canale")
+        if args[2] not in ("pompa", "sconosciuto"):
+            raise Err("a mano si può solo declassare: role N pompa|sconosciuto ('ventola' solo da autodetect)")
+        fan_set_role(n, args[2], "impostato a mano")
+        return {"canale": n, "ruolo": args[2]}
+    if len(args) >= 3 and args[0] == "name":
+        n = to_int(args[1], "canale")
+        s = load_settings()
+        s.setdefault("fans", {}).setdefault(str(n), {"role": "sconosciuto"})["name"] = " ".join(args[2:])
+        save_settings(s)
+        return {"canale": n, "nome": " ".join(args[2:])}
+    n = to_int(args[0], "canale")
+    if n not in fan_channels(d):
+        raise Err("canale %d inesistente (%s)" % (n, ", ".join(str(c) for c in fan_channels(d))))
+    if len(args) == 4 and args[1] == "step":
+        up, down = to_int(args[2], "step up"), to_int(args[3], "step down")
+        check_range("step up", up, 0, FAN_STEP_MAX_MS, " ms")
+        check_range("step down", down, 0, FAN_STEP_MAX_MS, " ms")
+        fan_require_writable(n)
+        if ctx.get("dry"):
+            return {"canale": n, "step": [up, down]}
+        for attr, v in (("step_up_time", up), ("step_down_time", down)):
+            hw_write("%s/pwm%d_%s" % (d, n, attr), v)
+            got = hw_read("%s/pwm%d_%s" % (d, n, attr))
+            if abs(got - v) > FAN_STEP_TOL_MS:
+                raise Err("fan %d %s: scritto %d ma riletto %d" % (n, attr, v, got))
+        return {"canale": n, "step": [hw_read("%s/pwm%d_step_up_time" % (d, n)), hw_read("%s/pwm%d_step_down_time" % (d, n))]}
+    if len(args) >= 3 and args[1] == "curve":
+        pts = []
+        for p in args[2:]:
+            try:
+                t, pw = (int(x) for x in p.split(":"))
+            except ValueError:
+                raise Err("punto curva '%s': atteso temperatura:pwm (es. 60:150)" % p)
+            pts.append((t, pw))
+        k = fan_points(d, n)
+        if not 1 <= len(pts) <= k:
+            raise Err("curva: da 1 a %d punti per il canale %d" % (k, n))
+        for i, (t, pw) in enumerate(pts):
+            check_range("pwm", pw, FAN_PWM_MIN, 255)
+            if i and (t <= pts[i - 1][0] or pw < pts[i - 1][1]):
+                raise Err("curva: temperature crescenti e pwm non decrescenti")
+        if pts[-1][1] != 255 or pts[-1][0] > FAN_CURVE_LAST_TEMP_MAX:
+            raise Err("curva: l'ultimo punto deve essere pwm 255 a <= %d °C" % FAN_CURVE_LAST_TEMP_MAX)
+        fan_require_writable(n)
+        if ctx.get("dry"):
+            return {"canale": n, "curva": ["%d:%d" % p for p in pts]}
+        while len(pts) < k:   # punti rimanenti: pieno regime, un grado oltre
+            pts.append((pts[-1][0] + 1, 255))
+        for i, (t, pw) in enumerate(pts, 1):
+            hw_write("%s/pwm%d_auto_point%d_temp" % (d, n, i), t * 1000)
+            hw_write("%s/pwm%d_auto_point%d_pwm" % (d, n, i), pw)
+        return {"canale": n, "curva": fan_info(d, n)["curva"]}
+    raise Err("uso: fan <N> step <su_ms> <giù_ms> | fan <N> curve t:pwm …")
+
+
+def fan_enable(ctx):
+    """Carica nct6775 e lo rende permanente; se il chip non appare, aggiunge il parametro
+    kernel acpi_enforce_resources=lax (grubby) e chiede il riavvio."""
+    write_atomic(P("/etc/modules-load.d/nct6775.conf"), "nct6775\n")
+    out = {"modules-load": True}
+    if FAKE:
+        FAKE.s["modprobe"] = "nct6775"
+        FAKE.save()
+    else:
+        subprocess.run(["modprobe", "nct6775"], capture_output=True)
+    if fans_dir():
+        out["chip"] = read_text(fans_dir() + "/name")
+        return out
+    cmdline = FAKE.s.get("cmdline", "") if FAKE else read_text("/proc/cmdline")
+    if "acpi_enforce_resources=lax" in cmdline:
+        raise Err("nct6775 caricato ma nessun chip nct67xx in hwmon: Super I/O non raggiungibile via LPC")
+    if FAKE:
+        FAKE.s["cmdline"] += " acpi_enforce_resources=lax"
+        FAKE.save()
+        out["grubby"] = True
+    elif subprocess.run(["grubby", "--update-kernel=ALL", "--args=acpi_enforce_resources=lax"], capture_output=True).returncode == 0:
+        out["grubby"] = True
+    else:
+        raise Err("conflitto ACPI: aggiungere acpi_enforce_resources=lax alla riga del kernel (GRUB_CMDLINE_LINUX_DEFAULT) e riavviare")
+    out["riavvio_necessario"] = True
+    return out
+
+
+def fan_disable(ctx):
+    rm(P("/etc/modules-load.d/nct6775.conf"))
+    if FAKE:
+        FAKE.s["cmdline"] = FAKE.s.get("cmdline", "").replace(" acpi_enforce_resources=lax", "")
+        FAKE.save()
+    else:
+        subprocess.run(["grubby", "--update-kernel=ALL", "--remove-args=acpi_enforce_resources=lax"], capture_output=True)
+    return {"modules-load": False, "grubby": False}
+
+
+def fmt_fan(r):
+    if "canali" not in r:
+        return json.dumps(r, ensure_ascii=False)
+    lines = ["Chip %s" % r["chip"]]
+    for c in r["canali"]:
+        lines.append("pwm%-2d %-17s %5d giri  pwm %3d  modo %d  step %d/%d ms  curva %s%s" % (
+            c["canale"], c.get("role", "sconosciuto") + (" (%s)" % c["name"] if c.get("name") else ""),
+            c["rpm"], c["pwm"], c["modo"], c["step_up_ms"], c["step_down_ms"], " ".join(c["curva"]),
+            "  [%s]" % c["why"] if c.get("why") else ""))
+    return "\n".join(lines)
+
+
 # ---- hwtest: verifica su hardware automatica e reversibile ------------------------------
 def cmd_hwtest(ctx, args):
     """Per ogni comando: un valore poco distante dalla baseline, readback, poi il valore
@@ -865,8 +1226,9 @@ COMMANDS = {
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
+    "fan": cmd_fan,
 }
-FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest}
+FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest, "fan": fmt_fan}
 
 
 def run(argv, ctx=None):
@@ -994,6 +1356,7 @@ def selftest():
         FAKE.s["co"] = list(Fake.DEFAULT["co"])
         FAKE.s["shaper"] = list(Fake.DEFAULT["shaper"])
         FAKE.save()
+        FAKE._make_hwmon()                             # il BIOS riprogramma la SmartFan a ogni boot
 
     def exists(name):
         return os.path.exists(marker(name))
@@ -1090,6 +1453,53 @@ def selftest():
     FAKE.save()
     reboot()
     run(["boot"])
+
+    # ---- ventole ----
+    st = run(["fan", "status"])
+    assert st["chip"] == "nct6798" and [c["canale"] for c in st["canali"]] == [1, 2, 3]
+    assert all(c["role"] == "sconosciuto" for c in st["canali"]) and "pwm2" in fmt_fan(st)
+    expect_err(["fan", "1", "step", "10000", "5000"], "non scrivibile")
+    expect_err(["fan", "role", "1", "ventola"], "declassare")
+    r = run(["fan", "autodetect"])
+    assert [r[n]["ruolo"] for n in (1, 2, 3)] == ["ventola", "pompa", "non-controllabile"], r
+    assert FAKE.s["tctl"] == FAKE.s["tctl_base"] and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 5   # tutto ripristinato
+    assert run(["fan", "1", "step", "10000", "5000"]) == {"canale": 1, "step": [10000, 5000]}
+    expect_err(["fan", "2", "step", "10000", "5000"], "pompa")
+    expect_err(["fan", "1", "step", "70000", "5000"], "fuori")
+    expect_err(["fan", "1", "curve", "40:50", "75:255"], "fuori")
+    expect_err(["fan", "1", "curve", "40:77", "75:200"], "ultimo punto")
+    expect_err(["fan", "1", "curve", "40:120", "50:100", "75:255"], "non decrescenti")
+    expect_err(["fan", "1", "curve", "40:77", "130:255"], "ultimo punto")
+    assert run(["fan", "1", "curve", "40:77", "60:150", "75:255"])["curva"] == ["40:77", "60:150", "75:255", "76:255", "77:255"]
+    r = run(["fan", "identify", "2"])
+    assert r["rpm_al_100"] == 2800 and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 5
+    run(["fan", "role", "1", "pompa"])
+    expect_err(["fan", "1", "step", "10000", "5000"], "pompa")
+    assert run(["fan", "autodetect"])[1]["ruolo"] == "ventola"
+    assert run(["fan", "name", "1", "radiatore alto"])["nome"] == "radiatore alto"
+    expect_err(["profile", "save", "f", "fan autodetect"], "non ammesso")
+    expect_err(["profile", "save", "f", "fan 2 step 10000 5000"], "pompa")
+    assert run(["profile", "save", "f", "fan 1 step 12000 6000", "ppt 150"])["lines"] == 2
+    assert run(["apply", "f", "fan"])["applied"] == ["fan 1 step 12000 6000"]
+    assert run(["fan", "enable"])["chip"] == "nct6798" and os.path.exists(P("/etc/modules-load.d/nct6775.conf"))
+    run(["fan", "disable"])
+    assert not os.path.exists(P("/etc/modules-load.d/nct6775.conf"))
+    # baseline con le righe fan dei canali "ventola"; il boot dopo un crash applica comunque le ventole
+    run(["use", "f"])
+    run(["autostart", "on"])
+    reboot()
+    hw_write(Fake.FAN_DIR + "/pwm1_step_up_time", 400)
+    out = run(["boot"])
+    base = run(["baseline", "show"])
+    assert "fan" in " ".join(" ".join(t) for t in profile_lines("baseline"))
+    assert out["applied"]["fan"] == ["fan 1 step 12000 6000"] and hw_read(Fake.FAN_DIR + "/pwm1_step_up_time") == 12000
+    reboot()                                           # crash: la parte CPU no, le ventole sì
+    out = run(["boot"])
+    assert out["crashed"] and out["applied"]["fan"] and "crash" in out["errors"]["cpu"]
+    run(["crashed", "clear"])
+    run(["default"])
+    assert hw_read(Fake.FAN_DIR + "/pwm1_step_up_time") == 400
+    run(["profile", "delete", "f"])
 
     # ---- hwtest: tutto ok, stato finale = baseline, active rimosso ----
     r = run(["hwtest"])

@@ -18,9 +18,15 @@ spec RPM, README). Verificato su hardware (9800X3D, SMU 98.81.0, PM table 0x6201
 firmato automaticamente con la chiave akmods, `hwtest` ok per CO, FMax, PPT, TDC, EDC, Tjmax.
 **Curve Shaper non verificabile**: RSMU 0xA6 risponde OK ma 0x84 restituisce zeri (o l'arg0
 stesso) → `shaper` è sperimentale, fuori da profili/baseline/hwtest, il setter fallisce sempre
-al readback (sicuro per costruzione). Manca il test di crash (sysrq) e il tag `v0.1.0`. Da
-fare, in quest'ordine: fase 2 ventole (CLI, `fan autodetect`), fase 3 GUI, fase 4 calibrazioni
-Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD.
+al readback (sicuro per costruzione). Crash-guard verificato su hardware (crash sysrq →
+profilo disattivato + notifica, riattiva, restart, boot pulito, resume). Tag `v0.1.0` su `main`.
+**Fase 2 (ventole) verificata su hardware** (NCT6799D, nessun conflitto ACPI, nessun parametro
+kernel): `fan enable/status/autodetect/step/curve/identify` ok; autodetect ha dato pwm2 pompa
+(2125→1898 giri al 21 %), pwm5/pwm6 ventola, pwm7 (100 %, senza tachimetro) non testabile e
+protetto; step 10 s/5 s sui canali ventola elimina gli scatti sui picchi (3 s di carico pieno,
+giri fermi). Il chip arrotonda gli step a ~200 ms. Tag `v0.2.0`. Poi: fase 3 GUI, fase 4
+calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
+(StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi).
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
 attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
@@ -42,7 +48,11 @@ nella sessione dell'utente.
   involucro che chiama il Makefile, mai un layout duplicato.
 - `data/` — unit systemd (`ryzenctl.service`, `ryzenctl-resume.service`), preset, blacklist
   modprobe, policy polkit, .desktop, icona, metainfo, autostart notify.
-- `packaging/ryzen-control.spec` (RPM: `ryzen-control` + `ryzen-smu-dkms`, entrambi noarch);
+- `packaging/ryzen-control.spec` (RPM: **un solo pacchetto** `ryzen-control`, noarch, con il
+  sorgente DKMS del driver dentro; `Obsoletes: ryzen-smu-dkms` per le release 1-4). Il `%post`
+  ricompila il modulo solo se manca per il kernel in uso o cambia la chiave: **quando cambia il
+  sorgente in `ryzen_smu/` va bumpata `VERSION`** (Makefile + spec), altrimenti dkms tiene il
+  modulo vecchio;
   `packaging/debian/` e `packaging/PKGBUILD` in fase 5.
 
 Vincoli di compatibilità: sintassi Python ≥ 3.9 (nessuna feature più recente), libadwaita ≥ 1.5,
@@ -105,8 +115,10 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   punti curva se richiesto) della SmartFan già programmata dal BIOS. Ruoli assegnati da
   `fan autodetect` (test fisico: canale al 40 % per 20 s sotto carico, ΔTctl distingue la pompa);
   a mano si può solo declassare, mai promuovere a "ventola". `pwmN_enable` non si tocca mai
-  fuori dai test (ripristino in `finally`). Il parametro kernel `acpi_enforce_resources=lax` è
-  un passo manuale: il pacchetto non tocca il bootloader.
+  fuori dai test (ripristino in `finally`). Il parametro kernel `acpi_enforce_resources=lax` lo
+  mette `ryzenctl fan enable` (azione esplicita dell'utente, grubby), mai il pacchetto.
+  Il backend finto simula l'hwmon con file veri sotto `$ROOT/sys/class/hwmon/hwmon0` e la
+  fisica in `Fake.after_fan_write`.
 
 ## Invarianti hardware (non negoziabili)
 

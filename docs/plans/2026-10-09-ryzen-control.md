@@ -12,6 +12,10 @@ hwtest` automatizza la verifica reversibile su hardware. Resta manuale solo ciò
 impone (registrazione MOK al riavvio, se nessuna chiave è già registrata) e il test di crash.
 In fase 2 `ryzenctl fan enable` imposterà da sé il parametro kernel (grubby / /etc/default/grub)
 con conferma esplicita, reversibile con `fan disable`.
+Revisione 7 (2026-10-09): curva ventole per modalità (Quiet dal target, Auto step moderato).
+Revisione 6 (2026-10-09): fase 1 verificata su hardware e taggata `v0.1.0`; un solo pacchetto
+di installazione (driver DKMS dentro `ryzen-control`); nuova fase 6: icona nel vassoio di
+sistema con comandi rapidi.
 
 ## Context
 
@@ -134,22 +138,22 @@ Layout installato:
 ```
 
 1. **RPM — `packaging/ryzen-control.spec`** (Fedora/RHEL/openSUSE), `BuildArch: noarch`,
-   un tarball dal repo, due pacchetti:
-   - `ryzen-control`: `Requires: python3 ≥ 3.9, python3-gobject, gtk4, libadwaita ≥ 1.5,
-     polkit, systemd, ryzen-smu-dkms`; `Recommends: stress-ng, libnotify`.
-     Scriptlet `%systemd_post/%preun/%postun` per le unit (non abilita nulla da sola: lo fa
-     l'utente dallo switch "Applica all'avvio" → `systemctl enable`).
-   - `ryzen-smu-dkms` (License GPL-2.0, come upstream): copia `ryzen_smu/*.c *.h Makefile
-     dkms.conf` in `%{_usrsrc}/ryzen_smu-%{version}` sostituendo `@VERSION@`/`@CFLGS@`;
-     `Requires: dkms, kernel-devel`; `%post`: `dkms add/build/install --rpm_safe_upgrade`
-     (non fatale); `%preun`: `dkms remove --all`. Al primo `%post` stampa l'avviso Secure Boot
-     (`mokutil --import /var/lib/dkms/mok.pub`).
-   - Build: `rpmbuild -ba` locale oppure COPR (spec COPR-ready: noarch, nessuna rete al build
+   un tarball dal repo, **un solo pacchetto** `ryzen-control` (rev. 6, richiesta utente;
+   `License: GPL-3.0-or-later AND GPL-2.0-only` per il driver incluso; `Obsoletes/Provides:
+   ryzen-smu-dkms` per chi ha installato la 0.1.0-1…4):
+   - app: `Requires: python3 ≥ 3.9, python3-gobject, gtk4, libadwaita ≥ 1.5, polkit, systemd`;
+     `Recommends: stress-ng, libnotify`. Preset systemd abilita i servizi (non applicano nulla
+     senza autostart); `%post` avvia il servizio.
+   - driver: copia `ryzen_smu/*.c *.h Makefile dkms.conf` in `%{_usrsrc}/ryzen_smu-%{version}`
+     sostituendo `@VERSION@`/`@CFLGS@`; `Requires: dkms, kernel-devel, gcc, make`; `%post`:
+     drop-in chiave akmods se registrata, `dkms add/build/install --force --rpm_safe_upgrade`
+     (non fatale), avviso Secure Boot solo se nessuna chiave registrata; `%preun`: `dkms
+     remove --all`.
+   - Build: `make rpm` locale oppure COPR (spec COPR-ready: noarch, nessuna rete al build
      grazie al driver vendorizzato).
-2. **Debian/Ubuntu — `packaging/debian/`**: `control` (2 binari), `rules` (`dh $@ --with
-   dkms`), `ryzen-smu-dkms.dkms`, `*.install`, `changelog`, `copyright`.
-3. **Arch — `packaging/PKGBUILD`**: `pkgbase` con `package_ryzen-control()` e
-   `package_ryzen-smu-dkms()`.
+2. **Debian/Ubuntu — `packaging/debian/`**: `control` (1 binario), `rules` (`dh $@ --with
+   dkms`), `ryzen-control.dkms`, `install`, `changelog`, `copyright`.
+3. **Arch — `packaging/PKGBUILD`**: un solo `package()`, dkms via hook di pacman.
 4. **Qualsiasi altra distro**: `sudo make install && sudo make dkms` (ultima spiaggia
    documentata nel README).
 
@@ -336,6 +340,12 @@ campiona solo k10temp a 20 Hz (niente letture PM durante la misura: scaldano il 
 p95 dei picchi; primo FMax con p95 ≤ target → profilo Quiet. `# ponytail:` euristica, la
 temperatura del liquido deriva nel tempo.
 
+Ventole nelle modalità (rev. 7, solo canali classificati "ventola"; pompa mai toccata):
+- **Quiet**: curva ricavata dal target: pwm minimo della curva BIOS fino a `target − 10 °C`,
+  salita lineare al 100 % a `Tjmax − 5 °C`; step 10 s / 5 s.
+- **Auto**: curva del BIOS, step 3 s / 2 s (toglie i picchi senza ritardare troppo).
+- **Boost / Default**: curva e step del BIOS.
+
 ### Calibrazione Auto (in GUI, sicura: abbassa solo limiti)
 
 Trova il punto in cui *questa* CPU rende di più per watt. Parametro unico esposto come slider:
@@ -433,6 +443,24 @@ in Quiet/Auto/Boost.
 |---|---|---|
 | 18 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
 | 19 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
+
+### Fase 6 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.6.0`
+Richiesta utente (rev. 6). Icona `StatusNotifierItem` (protocollo nativo di KDE Plasma, su
+GNOME serve l'estensione AppIndicator) con menu `com.canonical.dbusmenu`, implementati
+direttamente su D-Bus con `Gio` di PyGObject: nessuna dipendenza nuova, funziona su Wayland
+(GTK4 non ha più la StatusIcon). È lo stesso processo `ryzen-control` avviato con `--tray`
+dall'autostart al login (finestra nascosta, un solo processo: l'autostart `ryzenctl-notify`
+viene assorbito, il banner crash diventa voce del menu).
+- Menu rapido: modalità **Default / Quiet / Auto / Boost** (spunta su quella attiva),
+  **Applica all'avvio** on/off, **Apri Ryzen Control**, **Esci**; dopo un crash in testa la voce
+  "Profilo disattivato dopo un crash: Riattiva / Resta su Default".
+- Tooltip e icona di stato: Tctl e PPT attuali aggiornati ogni 2 s (icona normale /
+  attenzione se Tctl > target Quiet); nessun polling SMU senza `serve` attivo: finché non
+  si fa un'azione privilegiata si legge solo k10temp.
+- Prima azione privilegiata della sessione → un solo prompt pkexec (come la GUI).
+| # | Commit | Verifica |
+|---|---|---|
+| 20 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
 
 ## Verifica
 
