@@ -27,11 +27,17 @@ PRESETS = ("quiet", "eco", "auto", "boost")
 CALIBRATED = ("eco", "auto")   # si adattano all'hardware con test di carico; gli altri sono preset fissi
 MODES = (("default", "Default", "Valori di fabbrica (baseline), avvio automatico disattivato"),
          ("quiet", "Quiet", "Preset fisso: limiti ridotti, FMax −400, ventole lente"),
-         ("eco", "Eco", "Si adatta all'hardware (test di carico): undervolt discreto misurato, FMax per il silenzio, ventole lente"),
-         ("auto", "Auto", "Si adatta all'hardware (test di carico): undervolt misurato e limiti al ginocchio prestazioni/watt"),
+         ("eco", "Eco", "Calibrata con test di carico: undervolt misurato, FMax per il silenzio, ventole lente"),
+         ("auto", "Auto", "Calibrata con test di carico: undervolt misurato, PPT e FMax al ginocchio prestazioni/watt"),
          ("boost", "Boost", "Preset fisso: valori di fabbrica, energia al massimo"),
          ("custom", "Custom", "Valori impostati a mano nelle pagine CPU, Curve e Ventole"))
 CPU_PARAMS = (("ppt", "PPT", "W"), ("tdc", "TDC", "A"), ("edc", "EDC", "A"), ("fmax", "FMax", "MHz"), ("tjmax", "Tjmax", "°C"))
+PARAM_HELP = {"ppt": "Potenza massima del package (Package Power Tracking): più bassa = meno calore e consumo, meno boost sotto carico pieno",
+              "tdc": "Corrente massima sostenuta (Thermal Design Current) fornita dai VRM",
+              "edc": "Corrente massima di picco (Electrical Design Current) fornita dai VRM",
+              "fmax": "Frequenza massima di boost: abbassarla taglia i picchi di temperatura con poca perdita",
+              "tjmax": "Temperatura a cui la CPU rallenta per restare entro il limite",
+              "co": "Curve Optimizer: offset di tensione del core, negativo = meno tensione e calore; troppo negativo = instabilità"}
 CPU_HELP = ("PPT: potenza massima del package · TDC/EDC: corrente sostenuta/di picco · FMax: frequenza massima di boost · "
             "Tjmax: temperatura a cui la CPU rallenta. Trascina lo slider o scrivi il numero, poi \"Applica ora\".")
 CO_HELP = ("Curve Optimizer: offset di tensione per core, negativo = meno tensione e calore (troppo basso = instabilità). "
@@ -119,7 +125,7 @@ def bg(work, done, fail):
 
 
 def fmt(v, unit=""):
-    return "n/d" if v is None else "%g%s" % (v, unit)
+    return "n/d" if v is None else ("%g%s" if isinstance(v, (int, float)) else "%s%s") % (v, unit)
 
 
 def button(label, cb, css=None):
@@ -141,28 +147,102 @@ def card(orientation=Gtk.Orientation.VERTICAL, spacing=6):
     return Gtk.Box(orientation=orientation, spacing=spacing, css_classes=["card", "tile"])
 
 
-def summary(lines):
-    """Riassunto di un profilo: 'PPT 89 W · FMax 4825 · balanced · ventole 10 s/5 s'."""
-    out, fan = [], None
+def diff_label(base, new, unit="", lower_is_better=True):
+    """Etichetta 'fabbrica → nuovo Δ': verde se più conservativo della baseline, rosso se più spinto, grigio se uguale."""
+    def num(v):
+        if isinstance(v, str) and v in POWER:
+            return POWER.index(v)
+        return v if isinstance(v, (int, float)) else None
+    u = (" " + unit) if unit else ""
+    if base is None or base == new:
+        return label(fmt(new, u), ["numeric", "dim-label"])
+    b, n = num(base), num(new)
+    text, css = "%s → %s" % (fmt(base), fmt(new, u)), "accent"
+    if b is not None and n is not None:
+        d = n - b
+        if unit in ("W", "A") and b:
+            text += "  %+.0f %%" % (d * 100.0 / b)
+        elif isinstance(base, (int, float)):
+            text += "  %+g" % d
+        css = "success" if (d < 0) == lower_is_better else "error"
+    lab = label("", ["numeric", css])
+    lab.set_markup("<b>%s</b>" % GLib.markup_escape_text(text))
+    return lab
+
+
+def values_of(lines):
+    """Righe di profilo → {ppt, tdc, edc, fmax, tjmax, power, co: [8], fan: {n: {step: (su, giù), curve: str}}}."""
+    v = {"fan": {}}
     for t in (l.split() for l in lines):
-        if t[0] == "ppt":
-            out.append("PPT %s W" % t[1])
-        elif t[0] == "fmax":
-            out.append("FMax %s" % t[1])
-        elif t[0] == "tjmax":
-            out.append("Tjmax %s °C" % t[1])
-        elif t[0] == "power":
-            out.append(t[1])
-        elif t[0] == "fan" and len(t) == 5 and t[2] == "step" and fan is None:
-            fan = "ventole %g s/%g s" % (int(t[3]) / 1000, int(t[4]) / 1000)
-    return " · ".join(out + ([fan] if fan else [])) or "profilo vuoto"
+        try:
+            if t[0] == "co":
+                if len(t) == 9:
+                    v["co"] = [int(x) for x in t[1:]]
+                elif len(t) == 3:
+                    co = v.setdefault("co", [None] * 8)
+                    for c in (range(8) if t[1] == "all" else [int(t[1])]):
+                        co[c] = int(t[2])
+            elif t[0] == "fan" and len(t) >= 4:
+                f = v["fan"].setdefault(int(t[1]), {})
+                if t[2] == "step":
+                    f["step"] = (int(t[3]), int(t[4]))
+                elif t[2] == "curve":
+                    f["curve"] = " ".join(t[3:])
+            elif t[0] == "power":
+                v["power"] = t[1]
+            elif len(t) == 2:
+                v[t[0]] = int(t[1])
+        except (ValueError, IndexError):
+            pass   # riga non riconosciuta: la valida ryzenctl, qui si mostra solo
+    return v
+
+
+def profile_table(lines, st):
+    """Tabella 'parametro · fabbrica → profilo' colorata (baseline da status, ventole da fan status)."""
+    v, base = values_of(lines), st.get("baseline") or {}
+    fans = {c["canale"]: c for c in (st.get("fans") or {}).get("canali", [])}
+    rows = [(title, diff_label(base.get(key), v[key], unit)) for key, title, unit in CPU_PARAMS if key in v]
+    if "power" in v:
+        rows.append(("Energia", diff_label(base.get("power"), v["power"])))
+    if "co" in v:
+        chips, bco = Gtk.Box(spacing=4), base.get("co") or [None] * 8
+        for c in range(8):
+            if v["co"][c] is not None:
+                chip = diff_label(bco[c], v["co"][c])
+                chip.set_text("%+d" % v["co"][c])
+                chip.set_tooltip_text("core %d: fabbrica %s" % (c, fmt(bco[c])))
+                chip.add_css_class("chip")
+                chips.append(chip)
+        rows.append(("CO per core", chips))
+    for n, f in sorted(v["fan"].items()):
+        cur = fans.get(n, {})
+        if "step" in f:
+            rows.append(("Ventola %d salita" % n, diff_label(cur.get("step_up_ms"), f["step"][0], "ms", lower_is_better=False)))
+            rows.append(("Ventola %d discesa" % n, diff_label(cur.get("step_down_ms"), f["step"][1], "ms", lower_is_better=False)))
+        if "curve" in f:
+            rows.append(("Ventola %d curva" % n, diff_label(" ".join(cur["curva"]) if cur.get("curva") else None, f["curve"])))
+    grid = Gtk.Grid(column_spacing=18, row_spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
+    for i, (title, w) in enumerate(rows):
+        grid.attach(label(title, ["dim-label"]), 0, i, 1, 1)
+        grid.attach(w, 1, i, 1, 1)
+    if not rows:
+        grid.attach(label("profilo vuoto", ["dim-label"]), 0, 0, 1, 1)
+    return grid
+
+
+def profile_view(lines, st):
+    """Tabella colorata + righe grezze in un expander (per i dialoghi)."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+    box.append(profile_table(lines, st))
+    box.append(Gtk.Expander(label="Righe del profilo", child=label("\n".join(lines), ["numeric", "dim-label"], selectable=True, margin_top=6)))
+    return box
 
 
 class Param(Gtk.Box):
     """Riga parametro: etichetta, info, Scale con marks, SpinButton (stessa Adjustment), 'attuale → nuovo'."""
 
-    def __init__(self, title, unit, info=False):
-        super().__init__(spacing=12)
+    def __init__(self, title, unit, info=False, tooltip=None):
+        super().__init__(spacing=12, tooltip_text=tooltip)
         self.unit, self.read = unit, None
         self.adj = Gtk.Adjustment(lower=0, upper=1, step_increment=1, page_increment=5)
         self.append(label(title, ["heading"], width_chars=9))
@@ -180,10 +260,10 @@ class Param(Gtk.Box):
         self.adj.set_lower(lo)
         self.adj.set_upper(hi)
         self.scale.clear_marks()
-        self.scale.add_mark(lo, Gtk.PositionType.BOTTOM, None)
-        self.scale.add_mark(hi, Gtk.PositionType.BOTTOM, None)
-        if base is not None and lo <= base <= hi:
-            self.scale.add_mark(base, Gtk.PositionType.BOTTOM, "base")
+        self.scale.add_mark(lo, Gtk.PositionType.BOTTOM, "%d" % lo)
+        self.scale.add_mark(hi, Gtk.PositionType.BOTTOM, "%d" % hi)
+        if base is not None and lo < base < hi:
+            self.scale.add_mark(base, Gtk.PositionType.BOTTOM, "fabbrica %d" % base)
         self.reset()
 
     def value(self):
@@ -377,7 +457,7 @@ class AutotuneDialog(Adw.Dialog):
         body.append(grid)
         self.fmax = label("", ["numeric"], wrap=True)
         body.append(self.fmax)
-        self.result = label("", ["numeric"], wrap=True, selectable=True)
+        self.result = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         body.append(self.result)
         bar = Gtk.Box(spacing=12, halign=Gtk.Align.END, css_classes=["toolbar"])
         self.abort_btn = button("Interrompi", self.abort, "destructive-action")
@@ -452,9 +532,11 @@ class AutotuneDialog(Adw.Dialog):
         self.progress.set_fraction(max(0.0, min(1.0, frac)))
         res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
         for c, cells in enumerate(self.cells):
-            cells[0].set_text("%d" % res[str(c)] if str(c) in res else "—")
-            cells[1].set_text("%d (%s)" % (uns[str(c)]["value"], uns[str(c)]["why"]) if str(c) in uns else "—")
-            cells[2].set_text("%d" % fin[c] if fin else "—")
+            for lab, text, css in ((cells[0], "%d" % res[str(c)] if str(c) in res else None, "success"),
+                                   (cells[1], "%d (%s)" % (uns[str(c)]["value"], uns[str(c)]["why"]) if str(c) in uns else None, "error"),
+                                   (cells[2], "%d" % fin[c] if fin else None, "success")):
+                lab.set_markup("<b>%s</b>" % text if text and lab is cells[2] else (text or "—"))
+                (lab.add_css_class if text else lab.remove_css_class)(css)
         tests = st.get("fmax", {}).get("tests", [])
         text = "Test FMax:\n" + "\n".join("%d MHz → picco Tctl %.1f °C" % tuple(t) for t in tests) if tests else ""
         knee = st.get("knee")
@@ -466,16 +548,20 @@ class AutotuneDialog(Adw.Dialog):
         self.fmax.set_text(text)
 
     def done(self, st):
-        lines = ["CO definitivo: " + " ".join("%+d" % v for v in st["final"])] if st.get("final") else []
-        if st.get("fmax", {}).get("chosen"):
-            lines.append("FMax scelta: %d MHz" % st["fmax"]["chosen"])
+        if st.get("error"):
+            self.result.append(label(st["error"], ["warning"], wrap=True))
         if st.get("profile_lines"):
-            lines.append("Profilo %s:\n  " % self.mode + "\n  ".join(st["profile_lines"]))
+            self.result.append(label("Profilo %s: fabbrica → calibrato" % self.mode, ["heading"]))
+            self.result.append(profile_view(st["profile_lines"], self.win.status))
+        elif st.get("final"):
+            self.result.append(label("CO definitivo (fabbrica → calibrato)", ["heading"]))
+            self.result.append(profile_table(["co " + " ".join(str(v) for v in st["final"])], self.win.status))
+        if st.get("fmax", {}).get("chosen") and not st.get("profile_lines"):
+            self.result.append(label("FMax scelta: %d MHz" % st["fmax"]["chosen"], ["numeric"]))
         knee = st.get("knee")
         if knee and knee["ppt"].get("chosen"):
-            lines.append("Ginocchio prestazioni/watt: PPT %d W, FMax %d MHz (perdita massima %d %%)" % (
-                knee["ppt"]["chosen"], knee["fmax"]["chosen"] or 0, st.get("params", {}).get("loss", 0)))
-        self.result.set_text("\n".join(lines))
+            self.result.append(label("Ginocchio prestazioni/watt: PPT %d W, FMax %d MHz (perdita massima %d %%)" % (
+                knee["ppt"]["chosen"], knee["fmax"]["chosen"] or 0, st.get("params", {}).get("loss", 0)), ["numeric"], wrap=True))
         self.abort_btn.set_visible(False)
         self.close_btn.set_visible(True)
         self.set_can_close(True)
@@ -500,12 +586,17 @@ class ModesPage(Adw.PreferencesPage):
         self.loading = False
         g = Adw.PreferencesGroup(title="Modalità", description="Eco, Auto e Boost sono profili generati dai valori di fabbrica di questa CPU (la calibrazione li misurerà)")
         self.rows, first = {}, None
+        self.tables = {}
         for key, title, sub in MODES:
-            row = Adw.ActionRow(title=title, subtitle=sub, activatable=True)
+            if key in PRESETS:   # espandibile: sotto la riga la tabella fabbrica → profilo
+                row = Adw.ExpanderRow(title=title, subtitle=sub, expanded=True)
+            else:
+                row = Adw.ActionRow(title=title, subtitle=sub, activatable=True)
             chk = Gtk.CheckButton(valign=Gtk.Align.CENTER, group=first)
             first = first or chk
             row.add_prefix(chk)
-            row.set_activatable_widget(chk)
+            if key not in PRESETS:
+                row.set_activatable_widget(chk)
             chk.connect("toggled", self.on_mode, key)
             regen = None
             if key in PRESETS:
@@ -544,7 +635,13 @@ class ModesPage(Adw.PreferencesPage):
             if regen:
                 exists = key in shown
                 regen.set_visible(exists)
-                row.set_subtitle(summary(shown[key]) if exists else sub + " — profilo non ancora creato: clic per crearlo")
+                row.set_subtitle(sub if exists else sub + " — profilo non ancora creato: spunta per crearlo")
+                if key in self.tables:
+                    row.remove(self.tables.pop(key))
+                if exists:   # ListBoxRow esplicita: così `row.remove` la ritrova al prossimo refresh
+                    self.tables[key] = Gtk.ListBoxRow(child=profile_table(shown[key], st), activatable=False, selectable=False)
+                    row.add_row(self.tables[key])
+                    row.set_expanded(True)
         current = prof if prof in PRESETS else ("custom" if prof else "default")
         self.rows[current][1].set_active(True)
         self.autostart.set_active(bool(st.get("autostart")))
@@ -567,10 +664,29 @@ class ModesPage(Adw.PreferencesPage):
                         self.win.run([["preset", key], ["apply", key], ["use", key]], lambda _: self.win.toast("Profilo '%s' creato e applicato" % key))
                     else:
                         self.win.reload()
-                self.win.confirm("Creare il profilo '%s' con questi valori?" % key, "\n".join(res["lines"]), "Crea e applica", go)
+                self.win.confirm("Creare il profilo '%s'?" % key, "Valori di fabbrica → profilo (verde = più conservativo, rosso = più spinto):",
+                                 "Crea e applica", go, extra=profile_view(res["lines"], self.win.status))
             bg(lambda: self.win.h.call("preset", key, "show"), ask, lambda m: (self.win.toast(m), self.win.reload()))
 
     def calibrate(self, mode):
+        """Prima una scelta semplice: automatica con i default di AT_PARAMS, oppure i parametri a mano."""
+        dflt = {key: d[mode] for key, _, _, _, d in AT_PARAMS}
+        d = Adw.AlertDialog(heading="Calibrare la modalità %s?" % mode.capitalize(),
+                            body="Automatica: Tctl obiettivo %d °C, CO fino a %d con margine %d, %d s per test, durata stimata 25–40 min.\n\n%s"
+                                 % (dflt["target"], dflt["colimit"], dflt["margin"], dflt["step"], AT_WARNING))
+        d.add_response("cancel", "Annulla")
+        d.add_response("custom", "Scegli i valori…")
+        d.add_response("auto", "Automatica (consigliata)")
+        d.set_response_appearance("auto", Adw.ResponseAppearance.SUGGESTED)
+        def resp(_d, r):
+            if r == "auto":
+                AutotuneDialog(self.win, mode).start(dflt)
+            elif r == "custom":
+                self.calibrate_params(mode)
+        d.connect("response", resp)
+        d.present(self.win)
+
+    def calibrate_params(self, mode):
         """Parametri (range dalla tabella AT_PARAMS) → autotune start → finestra di avanzamento."""
         group = Adw.PreferencesGroup()
         spins = {}
@@ -580,7 +696,7 @@ class ModesPage(Adw.PreferencesPage):
             r.set_value(defaults[mode])
             spins[key] = r
             group.add(r)
-        d = Adw.AlertDialog(heading="Calibrare la modalità %s?" % mode.capitalize(), body=AT_WARNING, extra_child=group)
+        d = Adw.AlertDialog(heading="Parametri della calibrazione %s" % mode.capitalize(), body=AT_WARNING, extra_child=group)
         d.add_response("cancel", "Annulla")
         d.add_response("start", "Avvia")
         d.set_response_appearance("start", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -596,7 +712,8 @@ class ModesPage(Adw.PreferencesPage):
                 if ok:
                     cmds = [["preset", key]] + ([["apply", key]] if self.win.status.get("profile") == key else [])
                     self.win.run(cmds, lambda _: self.win.toast("Profilo '%s' rigenerato" % key))
-            self.win.confirm("Rigenerare '%s' dai valori di fabbrica?" % key, "\n".join(res["lines"]), "Rigenera", go, destructive=True)
+            self.win.confirm("Rigenerare '%s' dai valori di fabbrica?" % key, "Il profilo attuale viene sostituito da questi valori (verde = più conservativo, rosso = più spinto):",
+                             "Rigenera", go, destructive=True, extra=profile_view(res["lines"], self.win.status))
         bg(lambda: self.win.h.call("preset", key, "show"), ask, self.win.toast)
 
     def on_autostart(self, row, _):
@@ -639,7 +756,7 @@ class CpuPage(Page):
         self.params = {}
         self.read_power = None
         for key, title, unit in CPU_PARAMS:
-            p = self.params[key] = Param(title, unit)
+            p = self.params[key] = Param(title, unit, tooltip=PARAM_HELP[key])
             self.body.append(p)
         row = Gtk.Box(spacing=12)
         row.append(label("Energia", ["heading"], width_chars=9))
@@ -695,7 +812,7 @@ class CurvePage(Page):
         self.all.adj.connect("value-changed", self.on_all)
         self.body.append(self.all)
         self.body.append(Gtk.Separator())
-        self.cores = [Param("Core %d" % c, "", info=True) for c in range(8)]
+        self.cores = [Param("Core %d" % c, "", info=True, tooltip=PARAM_HELP["co"]) for c in range(8)]
         for p in self.cores:
             self.body.append(p)
         self.buttons()
@@ -754,7 +871,10 @@ class FansPage(Page):
 
     def refresh(self, st):
         self.step_range = st.get("caps", {}).get("fan_step_ms") if st.get("caps") else None
-        bg(lambda: self.win.h.call("fan", "status"), self.show, self.show_missing)
+        if st.get("fans"):
+            self.show(st["fans"])
+        else:
+            self.show_missing(st.get("fans_error", "stato ventole non disponibile"))
 
     def show_missing(self, msg):
         self.missing_text.set_text(msg + "\n\n" + FAN_MISSING_HELP)
@@ -880,6 +1000,10 @@ class Window(Adw.ApplicationWindow):
                 if name in PRESETS:
                     st["profile_lines"][name] = self.h.call("profile", "show", name)["lines"]
             st["autotune"] = self.h.call("autotune", "status")
+            try:
+                st["fans"] = self.h.call("fan", "status")
+            except HelperError as e:   # chip assente: la pagina Ventole mostra il messaggio
+                st["fans"], st["fans_error"] = None, str(e)
             return st
         bg(work, self.got_status, self.toast)
 
@@ -973,8 +1097,8 @@ class Window(Adw.ApplicationWindow):
         d.add_response("close", "Chiudi")
         d.present(self)
 
-    def confirm(self, heading, body, label, cb, destructive=False):
-        d = Adw.AlertDialog(heading=heading, body=body)
+    def confirm(self, heading, body, label, cb, destructive=False, extra=None):
+        d = Adw.AlertDialog(heading=heading, body=body, extra_child=extra)
         d.add_response("cancel", "Annulla")
         d.add_response("ok", label)
         d.set_response_appearance("ok", Adw.ResponseAppearance.DESTRUCTIVE if destructive else Adw.ResponseAppearance.SUGGESTED)
@@ -1003,7 +1127,7 @@ class Window(Adw.ApplicationWindow):
 
 class App(Adw.Application):
     def __init__(self, mock):
-        super().__init__(application_id=APP_ID)
+        super().__init__(application_id=APP_ID + (".Mock" if mock else ""))   # il mock non deve attivare l'istanza reale
         self.mock = mock
 
     def do_activate(self):

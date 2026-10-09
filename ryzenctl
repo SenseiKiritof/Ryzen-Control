@@ -829,7 +829,7 @@ PRESETS = {
 
 def preset_lines(name, base):
     pr = PRESETS[name]
-    lines = []
+    lines = ["co " + " ".join(str(v) for v in base.get("co", [0] * CORES))]   # i preset non toccano il CO
     for key, floor in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
         if key in base:
             lines.append("%s %d" % (key, max(floor, round(base[key] * pr[key]))))
@@ -1046,9 +1046,9 @@ def at_finish_auto(ctx, st, base):
     co = "co " + " ".join(str(v) for v in st["final"])
     lines = [co] + ["%s %d" % (key, lim[key]) for key in ("ppt", "tdc", "edc") if lim[key] is not None]
     lines.append("fmax %d" % k["fmax"]["chosen"])
-    lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("ppt", "tdc", "edc", "fmax")]
+    lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax")]
     cmd_profile(ctx, ["save", "auto"] + lines)
-    cmd_profile(ctx, ["save", "boost", co] + preset_lines("boost", base))
+    cmd_profile(ctx, ["save", "boost", co] + [l for l in preset_lines("boost", base) if not l.startswith("co ")])
     run(["apply", "auto"], ctx)
     run(["use", "auto"], ctx)
     st["phase"] = "done"
@@ -1198,7 +1198,7 @@ def at_final_failed(st):
 def at_finish_eco(ctx, st, base):
     """Profilo eco dalle misure: CO finale, FMax scelto, limiti eco, ventole lente + curva dal target."""
     lines = ["co " + " ".join(str(v) for v in st["final"]), "fmax %d" % st["fmax"]["chosen"]]
-    lines += [l for l in preset_lines("eco", base) if not l.startswith("fmax ")]
+    lines += [l for l in preset_lines("eco", base) if l.split()[0] not in ("co", "fmax")]
     d = fans_dir()
     if d:
         tj = min(base.get("tjmax", TJMAX_ABS_MAX), PRESETS["eco"]["tjmax"])
