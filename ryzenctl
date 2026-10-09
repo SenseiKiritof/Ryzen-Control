@@ -838,6 +838,9 @@ PRESETS = {
     # eco: stessi valori di quiet finché `autotune eco` non li sostituisce con misure (CO, FMax, curva)
     "eco": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
     "auto": {"ppt": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
+    "performance": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
+    # boost: stessi valori di performance finché `autotune boost` non li sostituisce (CO spinto, limiti e
+    # FMax ai tetti consentiti, verifica di stabilità e guadagno misurato)
     "boost": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
 }
 
@@ -867,9 +870,9 @@ def preset_lines(name, base):
 
 
 def cmd_preset(ctx, args):
-    """`preset quiet|eco|auto|boost [show]`: crea (o rigenera) il profilo dalla baseline; `show` solo elenca."""
+    """`preset quiet|performance|eco|auto|boost [show]`: crea (o rigenera) il profilo dalla baseline; `show` solo elenca."""
     if not args or args[0] not in PRESETS or len(args) > 2 or (len(args) == 2 and args[1] != "show"):
-        raise Err("uso: preset quiet|eco|auto|boost [show]")
+        raise Err("uso: preset quiet|performance|eco|auto|boost [show]")
     lines = preset_lines(args[0], load_baseline())
     if len(args) == 2:
         return {"profile": args[0], "lines": lines}
@@ -879,7 +882,9 @@ def cmd_preset(ctx, args):
 # ---- Autotune: macchina a passi (Eco/Auto), stato su disco, ripresa dopo crash ----------
 AT_PATH = STATE + "/autotune.json"
 AT_DEFAULTS = {"eco": {"target": 70, "colimit": -25, "margin": 5, "step": 90, "parallel": 1},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1}}
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1},
+               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1}}
+BOOST_BENCHES = 4   # MT e ST a fabbrica e in boost: il guadagno misurato
 # parallel=1 (default): tutti i core insieme a ogni livello di CO, un worker per core (8x più
 # veloce); parallel=0: un core alla volta (attribuisce con certezza anche un crash).
 AT_FMAX_TESTS_EST, AT_PPT_TESTS_EST, AT_FKNEE_TESTS_EST, BURST_SEC = 5, 5, 6, 5   # per le stime di durata
@@ -1049,8 +1054,10 @@ def at_total_estimate(mode, p):
     t = levels * p["step"] * (1 if p.get("parallel", 1) else CORES) + FINAL_SEC
     if mode == "eco":
         t += AT_FMAX_TESTS_EST * BURSTS * BURST_SEC
-    else:
+    elif mode == "auto":
         t += AT_PPT_TESTS_EST * (5 + BENCH_SEC) + AT_FKNEE_TESTS_EST * (3 + BENCH_SEC)
+    else:
+        t += BOOST_BENCHES * (5 + BENCH_SEC)
     return int(t)
 
 
@@ -1073,6 +1080,8 @@ def at_estimate(st):
             possible = max(1, (st["fmax"]["current"] - FMAX_SWEEP_MIN) // FMAX_STEP + 1)
             n = min(possible, max(1, AT_FMAX_TESTS_EST - len(st["fmax"]["tests"])))   # scende a ogni test
         rem += n * BURSTS * BURST_SEC
+    if st["mode"] == "boost" and ph in ("co", "final", "bench"):
+        rem += BOOST_BENCHES * (5 + BENCH_SEC)
     if st["mode"] == "auto" and ph in ("co", "final", "ppt", "fmax_knee"):
         knee = st.get("knee", {})
         if ph != "fmax_knee":
@@ -1093,7 +1102,8 @@ def at_params(mode, kvs):
     check_range("colimit", params["colimit"], CO_MIN, 0)
     check_range("margin", params["margin"], 0, 20)
     check_range("step", params["step"], 3, 3600, " s")
-    check_range("target", params["target"], 50, 90, " °C")
+    if "target" in params:
+        check_range("target", params["target"], 50, 90, " °C")
     check_range("parallel", params["parallel"], 0, 1)
     if "loss" in params:
         check_range("loss", params["loss"], 1, 50, " %")
@@ -1236,8 +1246,40 @@ def at_knee_step(ctx, st, base):
         at_finish_auto(ctx, st, base)
 
 
+def boost_lines(st, base):
+    """Boost: CO trovato, limiti e FMax ai tetti consentiti (fabbrica, o sblocco), energia
+    performance, ventole BIOS."""
+    unlock = load_settings()["unlock"]
+    lines = ["co " + " ".join(str(v) for v in st["final"])]
+    for key in ("ppt", "tdc", "edc", "fmax"):
+        if key in base:
+            lines.append("%s %d" % (key, cap_of(base, key, unlock)))
+    lines += [l for l in preset_lines("boost", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax")]
+    return lines
+
+
+def at_boost_bench(ctx, st, base):
+    """Un solo passo: prestazioni MT e ST a fabbrica e con il profilo boost → guadagno misurato;
+    poi il profilo boost viene scritto e applicato."""
+    core = best_core()
+    apply_lines(profile_lines("baseline"), ctx, "cpu")
+    pause(5)
+    fab = {"mt": bench(CORES * 2), "st": bench(1, core)}
+    lines = boost_lines(st, base)
+    apply_lines([l.split() for l in lines], ctx)
+    pause(5)
+    bst = {"mt": bench(CORES * 2), "st": bench(1, core)}
+    st["bench"] = {"fabbrica": fab, "boost": bst,
+                   "gain_mt_pct": round((bst["mt"][0] / fab["mt"][0] - 1) * 100, 1) if fab["mt"][0] else None,
+                   "gain_st_pct": round((bst["st"][0] / fab["st"][0] - 1) * 100, 1) if fab["st"][0] else None}
+    cmd_profile(ctx, ["save", "boost"] + lines)
+    run(["use", "boost"], ctx)
+    st["phase"] = "done"
+    st["profile_lines"] = lines
+
+
 def at_finish_auto(ctx, st, base):
-    """Profili auto (CO, limiti e FMax al ginocchio, ventole 3 s/2 s) e boost (fabbrica + CO)."""
+    """Profilo auto: CO, limiti e FMax al ginocchio, ventole 3 s/2 s."""
     k = st["knee"]
     lim = at_scaled_limits(base, k["ppt"]["chosen"])
     co = "co " + " ".join(str(v) for v in st["final"])
@@ -1245,7 +1287,6 @@ def at_finish_auto(ctx, st, base):
     lines.append("fmax %d" % k["fmax"]["chosen"])
     lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax")]
     cmd_profile(ctx, ["save", "auto"] + lines)
-    cmd_profile(ctx, ["save", "boost", co] + [l for l in preset_lines("boost", base) if not l.startswith("co ")])
     run(["apply", "auto"], ctx)
     run(["use", "auto"], ctx)
     st["phase"] = "done"
@@ -1399,6 +1440,8 @@ def at_step(ctx, st, base):
                 for t in preset_lines("eco", base):    # limiti, Tjmax ed energia eco PRIMA di misurare i picchi
                     if t.split()[0] in ("ppt", "tdc", "edc", "tjmax", "power"):
                         run(t.split(), ctx)
+            elif st["mode"] == "boost":
+                st["phase"] = "bench"
             else:
                 st["phase"] = "ppt"
                 st["knee"] = {"ppt": {"current": base["ppt"], "tests": [], "chosen": None},
@@ -1421,6 +1464,10 @@ def at_step(ctx, st, base):
         return st
     if st["phase"] in ("ppt", "fmax_knee"):
         at_knee_step(ctx, st, base)
+        at_save(st)
+        return st
+    if st["phase"] == "bench":
+        at_boost_bench(ctx, st, base)
         at_save(st)
         return st
     raise Err("fase sconosciuta: %s" % st["phase"])
@@ -2271,8 +2318,9 @@ def selftest():
     assert "fan 1 step 10000 5000" in pl and not any(l.startswith("fan 2") for l in pl)
     assert run(["preset", "auto"])["saved"] == "auto" and "auto" in run(["profile", "list"])["profiles"]
     assert "ppt 143" in run(["profile", "show", "auto"])["lines"]
-    bl = run(["preset", "boost", "show"])["lines"]
+    bl = run(["preset", "performance", "show"])["lines"]
     assert "ppt 162" in bl and "power performance" in bl and "fan 1 step 400 400" in bl, bl
+    assert run(["preset", "boost", "show"])["lines"] == bl        # boost = performance finché non calibrato
     expect_err(["preset", "turbo"], "uso")
     run(["profile", "delete", "auto"])
 
@@ -2348,11 +2396,23 @@ def selftest():
     assert st["knee"]["fmax"]["chosen"] == 4725, st["knee"]["fmax"]
     auto = run(["profile", "show", "auto"])["lines"]
     assert "ppt 114" in auto and "tdc 84" in auto and "edc 127" in auto and "fmax 4725" in auto and "power balanced" in auto, auto
-    assert "co -37 -37 -37 -37 -37 -37 -37 -37" in run(["profile", "show", "boost"])["lines"]
     assert run(["status"])["profile"] == "auto" and run(["status"])["limits"]["ppt"] == 114.0
     run(["default"])
-    for n in ("auto", "boost"):
-        run(["profile", "delete", n])
+    run(["profile", "delete", "auto"])
+    # ---- autotune boost: CO spinto + limiti/FMax ai tetti + guadagno misurato ----
+    est = run(["autotune", "estimate", "boost"])
+    assert "target" not in est["params"] and est["parallel_total_s"] == 8 * 90 + 300 + 4 * 20, est
+    st = run(["autotune", "start", "boost", "step=3"])
+    for _ in range(300):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and st["final"] == [-37] * CORES and st["bench"]["gain_mt_pct"] is not None, st
+    bl = run(["profile", "show", "boost"])["lines"]
+    assert "co -37 -37 -37 -37 -37 -37 -37 -37" in bl and "ppt 162" in bl and "fmax 5225" in bl and "power performance" in bl, bl
+    assert run(["status"])["profile"] == "boost" and run(["status"])["co"] == [-37] * CORES
+    run(["default"])
+    run(["profile", "delete", "boost"])
     FAKE.s["co_limits"] = {"7": -15, "3": -25}
     FAKE.save()
 
