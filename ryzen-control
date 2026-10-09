@@ -45,6 +45,16 @@ AUTODETECT_WARNING = ("Ogni canale con giri > 0 viene portato a un PWM ridotto p
 FAN_MISSING_HELP = ("Il chip Super I/O (nct67xx) non è visibile in hwmon. \"Abilita\" carica il modulo nct6775 e lo "
                     "rende permanente; se il chip non compare per un conflitto ACPI, aggiunge il parametro kernel "
                     "acpi_enforce_resources=lax e chiede il riavvio.")
+# Parametri della calibrazione (autotune): chiave, titolo, unità, range ammesso, default per modalità
+AT_PARAMS = (("target", "Tctl obiettivo", "°C", (50, 90), {"eco": 70, "auto": 70}),
+             ("colimit", "Limite CO", "", (-50, 0), {"eco": -25, "auto": -40}),
+             ("margin", "Margine di sicurezza", "", (0, 20), {"eco": 5, "auto": 3}),
+             ("step", "Durata di ogni test", "s", (30, 600), {"eco": 90, "auto": 90}))
+AT_WARNING = ("Durata stimata 25–40 minuti (Eco). Ogni core viene portato a CO sempre più negativo sotto carico "
+              "(stress-ng) finché resta stabile; poi una passata finale su tutti i core e, per Eco, la ricerca della "
+              "FMax che tiene Tctl sotto l'obiettivo. Un CO instabile può riavviare il PC all'improvviso: salva tutto "
+              "prima di iniziare. La macchina resta usabile ma rallentata; la calibrazione riprende da dove era.")
+AT_PHASES = {"co": 0.6, "final": 0.7, "fmax": 1.0, "ppt": 0.85, "fmax_knee": 1.0}   # quota della barra a fine fase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 CSS = """
 .tile { padding: 12px; }
@@ -341,6 +351,146 @@ class MonitorPage(Gtk.Box):
             cr.stroke()
 
 
+class AutotuneDialog(Adw.Dialog):
+    """Avanzamento della calibrazione: un `autotune step` alla volta finché phase == done."""
+
+    def __init__(self, win, mode):
+        super().__init__(title="Calibrazione %s" % mode.capitalize(), content_width=620, content_height=560, can_close=False)
+        self.win, self.mode = win, mode
+        self.running = self.aborting = False
+        self.connect("close-attempt", lambda *_: self.win.toast("Calibrazione in corso: usa \"Interrompi\""))
+        body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
+        self.phase = label("Avvio…", ["title-3"], wrap=True)
+        self.progress = Gtk.ProgressBar(show_text=True)
+        self.note = label("", ["warning"], wrap=True, visible=False)
+        for w in (self.phase, self.progress, self.note):
+            body.append(w)
+        grid = Gtk.Grid(column_spacing=18, row_spacing=4)
+        for col, h in enumerate(("Core", "Ultimo stabile", "Instabile a", "Definitivo")):
+            grid.attach(label(h, ["heading"]), col, 0, 1, 1)
+        self.cells = []
+        for c in range(8):
+            row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"]) for _ in range(3)]
+            for col, lab in enumerate(row):
+                grid.attach(lab, col, c + 1, 1, 1)
+            self.cells.append(row[1:])
+        body.append(grid)
+        self.fmax = label("", ["numeric"], wrap=True)
+        body.append(self.fmax)
+        self.result = label("", ["numeric"], wrap=True, selectable=True)
+        body.append(self.result)
+        bar = Gtk.Box(spacing=12, halign=Gtk.Align.END, css_classes=["toolbar"])
+        self.abort_btn = button("Interrompi", self.abort, "destructive-action")
+        self.close_btn = button("Chiudi", self.finish, "suggested-action")
+        self.close_btn.set_visible(False)
+        bar.append(self.abort_btn)
+        bar.append(self.close_btn)
+        tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=body, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        tv.add_top_bar(Adw.HeaderBar())
+        tv.add_bottom_bar(bar)
+        self.set_child(tv)
+        self.present(win)
+
+    def start(self, params):
+        argv = ["autotune", "start", self.mode] + ["%s=%d" % kv for kv in params.items()]
+        bg(lambda: self.win.h.call(*argv), self.got, self.fail)
+
+    def loop(self):
+        if self.running or self.aborting:
+            return
+        self.running = True
+        bg(lambda: self.win.h.call("autotune", "step"), self.got, self.fail)
+
+    def got(self, st):
+        self.running = False
+        self.show(st)
+        if st.get("phase") == "done":
+            self.done(st)
+        else:
+            self.loop()
+
+    def fail(self, msg):
+        self.running = False
+        self.phase.set_text("Errore: " + msg)
+        self.abort_btn.set_visible(False)
+        self.close_btn.set_visible(True)
+        self.set_can_close(True)
+
+    def show(self, st):
+        ph, p = st.get("phase"), st.get("params", {})
+        if st.get("resumed_after_crash"):
+            self.note.set_text("Il sistema si è riavviato durante un test: quel passo è stato marcato instabile e la calibrazione è ripresa dal successivo.")
+            self.note.set_visible(True)
+        if ph == "co":
+            self.phase.set_text("Core %d: provo CO %d…" % (st["core"], st["value"]))
+            frac = (st["core"] + min(1.0, st["value"] / p["colimit"] if p.get("colimit") else 0)) / 8
+        elif ph == "final":
+            self.phase.set_text("Passata finale su tutti i core (tentativo %d/3)" % (st.get("final_tries", 0) + 1))
+            frac = AT_PHASES["co"] + (AT_PHASES["final"] - AT_PHASES["co"]) * min(1.0, st.get("final_tries", 0) / 3)
+        elif ph == "fmax":
+            f, tests = st["fmax"].get("current"), st["fmax"].get("tests", [])
+            last = tests[-1] if tests else None
+            self.phase.set_text("FMax %d MHz: picco Tctl %.1f °C > %d → provo %s MHz…" % (last[0], last[1], p["target"], f) if last
+                                else "FMax %s MHz: misuro il picco Tctl…" % f)
+            first = tests[0][0] if tests else f
+            frac = AT_PHASES["final"] + (AT_PHASES["fmax"] - AT_PHASES["final"]) * ((first - f) / max(1, first - 4000) if f else 0)
+        elif ph in ("ppt", "fmax_knee"):          # Auto: ginocchio prestazioni/watt
+            k = st.get("knee", {}).get("ppt" if ph == "ppt" else "fmax", {})
+            tests, cur = k.get("tests", []), k.get("current")
+            unit = "W" if ph == "ppt" else "MHz"
+            if tests:
+                last = tests[-1]
+                self.phase.set_text("%s %s %s: %.0f op/s a %.0f W → provo %s %s…" % (
+                    "PPT" if ph == "ppt" else "FMax", last[0], unit, last[1], last[2], cur, unit))
+            else:
+                self.phase.set_text("%s %s %s: misuro prestazioni e potenza…" % ("PPT" if ph == "ppt" else "FMax", cur, unit))
+            lo, hi = (AT_PHASES["final"], AT_PHASES["ppt"]) if ph == "ppt" else (AT_PHASES["ppt"], AT_PHASES["fmax_knee"])
+            frac = lo + (hi - lo) * min(1.0, len(tests) / 6.0)
+        else:
+            self.phase.set_text("Calibrazione completata" if not st.get("error") else "Calibrazione terminata: " + st["error"])
+            frac = 1.0
+        self.progress.set_fraction(max(0.0, min(1.0, frac)))
+        res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
+        for c, cells in enumerate(self.cells):
+            cells[0].set_text("%d" % res[str(c)] if str(c) in res else "—")
+            cells[1].set_text("%d (%s)" % (uns[str(c)]["value"], uns[str(c)]["why"]) if str(c) in uns else "—")
+            cells[2].set_text("%d" % fin[c] if fin else "—")
+        tests = st.get("fmax", {}).get("tests", [])
+        text = "Test FMax:\n" + "\n".join("%d MHz → picco Tctl %.1f °C" % tuple(t) for t in tests) if tests else ""
+        knee = st.get("knee")
+        if knee:
+            for key, unit in (("ppt", "W"), ("fmax", "MHz")):
+                if knee[key]["tests"]:
+                    text += ("\n" if text else "") + "Sweep %s:\n" % key.upper() + "\n".join(
+                        "%s %s → %.0f op/s, %.0f W" % (t[0], unit, t[1], t[2]) for t in knee[key]["tests"])
+        self.fmax.set_text(text)
+
+    def done(self, st):
+        lines = ["CO definitivo: " + " ".join("%+d" % v for v in st["final"])] if st.get("final") else []
+        if st.get("fmax", {}).get("chosen"):
+            lines.append("FMax scelta: %d MHz" % st["fmax"]["chosen"])
+        if st.get("profile_lines"):
+            lines.append("Profilo %s:\n  " % self.mode + "\n  ".join(st["profile_lines"]))
+        knee = st.get("knee")
+        if knee and knee["ppt"].get("chosen"):
+            lines.append("Ginocchio prestazioni/watt: PPT %d W, FMax %d MHz (perdita massima %d %%)" % (
+                knee["ppt"]["chosen"], knee["fmax"]["chosen"] or 0, st.get("params", {}).get("loss", 0)))
+        self.result.set_text("\n".join(lines))
+        self.abort_btn.set_visible(False)
+        self.close_btn.set_visible(True)
+        self.set_can_close(True)
+
+    def abort(self):
+        self.aborting = True
+        self.abort_btn.set_sensitive(False)
+        self.phase.set_text("Interrompo al termine del test in corso…")
+        self.win.run([["autotune", "abort"]], lambda _: (self.win.toast("Calibrazione annullata, CPU a baseline"), self.set_can_close(True), self.close()))
+
+    def finish(self):
+        self.close()
+        self.win.reload()
+
+
 class ModesPage(Adw.PreferencesPage):
     NAME, TITLE, ICON = "modes", "Modalità", "emblem-default-symbolic"
 
@@ -364,7 +514,7 @@ class ModesPage(Adw.PreferencesPage):
                 tag.add_css_class("success" if key in CALIBRATED else "dim-label")
                 row.add_suffix(tag)
                 if key in CALIBRATED:
-                    cal = button("Calibra…", lambda k=key: self.win.toast("Calibrazione %s in arrivo (autotune): test di carico su questa CPU" % k))
+                    cal = button("Calibra…", lambda k=key: self.calibrate(k))
                     row.add_suffix(cal)
                 regen = button("Rigenera dai valori di fabbrica", lambda k=key: self.regen(k))
                 row.add_suffix(regen)
@@ -419,6 +569,26 @@ class ModesPage(Adw.PreferencesPage):
                         self.win.reload()
                 self.win.confirm("Creare il profilo '%s' con questi valori?" % key, "\n".join(res["lines"]), "Crea e applica", go)
             bg(lambda: self.win.h.call("preset", key, "show"), ask, lambda m: (self.win.toast(m), self.win.reload()))
+
+    def calibrate(self, mode):
+        """Parametri (range dalla tabella AT_PARAMS) → autotune start → finestra di avanzamento."""
+        group = Adw.PreferencesGroup()
+        spins = {}
+        for key, title, unit, (lo, hi), defaults in AT_PARAMS:
+            r = Adw.SpinRow.new_with_range(lo, hi, 1)
+            r.set_title(title + (" (%s)" % unit if unit else ""))
+            r.set_value(defaults[mode])
+            spins[key] = r
+            group.add(r)
+        d = Adw.AlertDialog(heading="Calibrare la modalità %s?" % mode.capitalize(), body=AT_WARNING, extra_child=group)
+        d.add_response("cancel", "Annulla")
+        d.add_response("start", "Avvia")
+        d.set_response_appearance("start", Adw.ResponseAppearance.DESTRUCTIVE)
+        def resp(_d, r):
+            if r == "start":
+                AutotuneDialog(self.win, mode).start({k: int(s.get_value()) for k, s in spins.items()})
+        d.connect("response", resp)
+        d.present(self.win)
 
     def regen(self, key):
         def ask(res):
@@ -709,6 +879,7 @@ class Window(Adw.ApplicationWindow):
             for name in self.h.call("profile", "list")["profiles"]:
                 if name in PRESETS:
                     st["profile_lines"][name] = self.h.call("profile", "show", name)["lines"]
+            st["autotune"] = self.h.call("autotune", "status")
             return st
         bg(work, self.got_status, self.toast)
 
@@ -720,6 +891,27 @@ class Window(Adw.ApplicationWindow):
         self.banner.set_revealed(bool(c))
         for p in self.pages:
             p.refresh(st)
+        at = st.get("autotune") or {}
+        if at.get("phase") not in (None, "done") and not getattr(self, "at_asked", False):
+            self.at_asked = True   # una sola volta per sessione
+            self.ask_resume(at)
+
+    def ask_resume(self, at):
+        d = Adw.AlertDialog(heading="Calibrazione interrotta",
+                            body="Una calibrazione %s iniziata il %s è rimasta a metà (fase %s, core %s). Riprenderla da dove era "
+                                 "o annullarla riportando la CPU ai valori di fabbrica?" % (at.get("mode", "?").capitalize(), at.get("started", "?"), at.get("phase"), at.get("core")))
+        d.add_response("abort", "Annulla calibrazione")
+        d.add_response("resume", "Riprendi")
+        d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)
+        def resp(_d, r):
+            if r == "resume":
+                dlg = AutotuneDialog(self, at.get("mode", "eco"))
+                dlg.show(at)
+                dlg.loop()
+            else:
+                self.run([["autotune", "abort"]], lambda _: self.toast("Calibrazione annullata, CPU a baseline"))
+        d.connect("response", resp)
+        d.present(self)
 
     def tick(self):
         """Telemetria 1 Hz, solo se una pagina che la usa è visibile e nessuna lettura è in corso."""
