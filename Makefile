@@ -19,10 +19,10 @@ STATEDIR := $(DESTDIR)/var/lib/ryzenctl
 DKMS_SRC := $(DESTDIR)$(PREFIX)/src/ryzen_smu-$(VERSION)
 TMPROOT := $(or $(TMPDIR),/tmp)/ryzen-control-check
 
-.PHONY: all install install-cli install-gui install-dkms-src dkms uninstall check driver-check
+.PHONY: all install install-cli install-gui install-dkms-src dkms uninstall check driver-check dist rpm
 
 all:
-	@echo "Target: install [DESTDIR=…] (install-cli install-gui install-dkms-src), dkms, uninstall, check, driver-check"
+	@echo "Target: install [DESTDIR=…] (install-cli install-gui install-dkms-src), dkms, uninstall, check, driver-check, dist, rpm"
 
 install: install-cli $(if $(wildcard ryzen-control),install-gui) install-dkms-src
 
@@ -68,6 +68,19 @@ check:
 	systemd-analyze --root="$(TMPROOT)" verify --recursive-errors=no ryzenctl.service ryzenctl-resume.service
 	desktop-file-validate data/ryzenctl-notify.desktop data/$(APPID).desktop
 	-appstreamcli validate --no-net data/$(APPID).metainfo.xml
+
+# Tarball dal commit corrente (HEAD): i pacchetti si costruiscono da ciò che è versionato.
+dist:
+	mkdir -p dist
+	git archive --format=tar.gz --prefix=ryzen-control-$(VERSION)/ -o dist/ryzen-control-$(VERSION).tar.gz HEAD
+
+# RPM nell'albero standard ~/rpmbuild (niente spazi nei percorsi); risultato copiato in dist/.
+rpm: dist
+	rpmdev-setuptree
+	cp dist/ryzen-control-$(VERSION).tar.gz "$$HOME/rpmbuild/SOURCES/"
+	rpmbuild -ba packaging/ryzen-control.spec
+	cp "$$HOME"/rpmbuild/RPMS/noarch/ryzen-control-$(VERSION)-*.rpm "$$HOME"/rpmbuild/RPMS/noarch/ryzen-smu-dkms-$(VERSION)-*.rpm dist/
+	ls -1 dist/
 
 # kbuild non accetta spazi nel percorso: compila una copia del driver fuori dal repo.
 driver-check:
