@@ -1572,13 +1572,24 @@ def fan_require_writable(n):
         raise Err("canale %d non scrivibile: ruolo '%s' (solo 'ventola', assegnato da `fan autodetect`)" % (n, fan_role(n)))
 
 
+def fan_curve_compact(points):
+    """I punti di riempimento oltre il primo a pwm 255 (scritti da `fan curve` per completare la
+    SmartFan) non aggiungono informazione: la curva torna nella forma in cui è stata scritta."""
+    out = []
+    for t, pw in points:
+        out.append("%d:%d" % (t, pw))
+        if pw == 255:
+            break
+    return out
+
+
 def fan_info(d, n):
     info = {"canale": n, "rpm": hw_read("%s/fan%d_input" % (d, n)), "pwm": hw_read("%s/pwm%d" % (d, n)),
             "modo": hw_read("%s/pwm%d_enable" % (d, n)),
             "step_up_ms": hw_read("%s/pwm%d_step_up_time" % (d, n)),
             "step_down_ms": hw_read("%s/pwm%d_step_down_time" % (d, n)),
-            "curva": ["%d:%d" % (hw_read("%s/pwm%d_auto_point%d_temp" % (d, n, k)) // 1000,
-                                 hw_read("%s/pwm%d_auto_point%d_pwm" % (d, n, k))) for k in range(1, fan_points(d, n) + 1)]}
+            "curva": fan_curve_compact([(hw_read("%s/pwm%d_auto_point%d_temp" % (d, n, k)) // 1000,
+                                         hw_read("%s/pwm%d_auto_point%d_pwm" % (d, n, k))) for k in range(1, fan_points(d, n) + 1)])}
     info.update(fan_roles().get(str(n), {"role": "sconosciuto"}))
     return info
 
@@ -2132,7 +2143,7 @@ def selftest():
     expect_err(["fan", "1", "curve", "40:77", "75:200"], "ultimo punto")
     expect_err(["fan", "1", "curve", "40:120", "50:100", "75:255"], "non decrescenti")
     expect_err(["fan", "1", "curve", "40:77", "130:255"], "ultimo punto")
-    assert run(["fan", "1", "curve", "40:77", "60:150", "75:255"])["curva"] == ["40:77", "60:150", "75:255", "76:255", "77:255"]
+    assert run(["fan", "1", "curve", "40:77", "60:150", "75:255"])["curva"] == ["40:77", "60:150", "75:255"]   # riempimento nascosto
     r = run(["fan", "identify", "2"])
     assert r["rpm_al_100"] == 2800 and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 5
     run(["fan", "role", "1", "pompa"])
