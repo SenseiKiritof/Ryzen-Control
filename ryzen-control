@@ -15,6 +15,11 @@ import tempfile
 import threading
 from collections import deque
 
+# Renderer software: con il driver NVIDIA su Wayland il renderer GL di GTK4 lascia frammenti
+# del fotogramma precedente (regioni di danno parziali); cairo è impeccabile e per questa
+# interfaccia costa nulla. GSK_RENDERER impostato dall'esterno ha la precedenza.
+os.environ.setdefault("GSK_RENDERER", "cairo")
+
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
