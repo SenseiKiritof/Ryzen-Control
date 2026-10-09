@@ -110,16 +110,26 @@ di fabbrica con energia al massimo. Modalità **calibrate sull'hardware** con te
 
 ```sh
 sudo ryzenctl preset quiet|eco|auto|boost        # crea il profilo dai valori di fabbrica (segnaposto)
-sudo ryzenctl autotune start eco [target=70 colimit=-25 margin=5 step=90]
+sudo ryzenctl autotune estimate eco              # durata stimata (parallelo e core per core)
+sudo ryzenctl autotune start eco [target=70 colimit=-25 margin=5 step=90 parallel=1]
 sudo ryzenctl autotune step                      # un test alla volta; ripetere finché phase == done
-sudo ryzenctl autotune status | abort
+sudo ryzenctl autotune status | abort            # abort interrompe subito anche un passo in corso
 ```
 
-- **Eco**: per ogni core cerca il Curve Optimizer negativo stabile (passi di −5 fino a `colimit`,
-  tre fasi di carico: pieno con verifica, 50 %, 10 %; controllo errori MCE) e tiene l'ultimo
-  stabile + `margin` (undervolt *discreto*); passata finale su tutti i core; poi abbassa FMax di
-  100 MHz alla volta finché il 95° percentile dei picchi di Tctl sotto raffiche resta sotto
+Dalla GUI: Modalità → "Calibra…" su Eco o Auto, poi "Automatica" (valori di default) o "Scegli i
+valori…". Di default i core si provano **tutti insieme** a ogni livello di CO (un worker per
+core, ~8× più veloce; `parallel=0` = un core alla volta, che attribuisce con certezza anche un
+riavvio). Durante i test la GUI mostra il tempo rimanente stimato, la tensione reale misurata
+per core a ogni livello e quanti mV vale un passo di CO su questa CPU.
+
+- **Eco**: cerca il Curve Optimizer negativo stabile (passi di −5 fino a `colimit`, tre fasi di
+  carico: pieno con verifica, 50 %, 10 %, più raffiche singole per il boost massimo; controllo
+  errori MCE) e tiene l'ultimo stabile + `margin` (undervolt *discreto*); passata finale su tutti
+  i core; poi, con i limiti eco già applicati, abbassa FMax di 100 MHz alla volta finché il 95°
+  percentile dei picchi di Tctl sotto raffiche miste (tutti i core / un core) resta sotto
   `target`; scrive il profilo `eco` con limiti Quiet, ventole lente e curva dal target.
+  Esito sul 9800X3D di sviluppo: tutti i core stabili fino a −25 → CO −20, ≈ 3,4 mV per passo
+  (−69 mV reali a pieno carico), FMax invariata (picco 64 °C < 70 con il profilo eco).
 - **Auto**: stessa ricerca CO ma più spinta (−40, margine 3), poi il ginocchio prestazioni/watt:
   sweep di PPT (multi-thread) e FMax (single-thread) misurando bogo-ops/s di stress-ng e potenza
   RAPL, scegliendo il valore più basso che perde al massimo `loss` % (default 10) rispetto al
