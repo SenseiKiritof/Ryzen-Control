@@ -25,13 +25,14 @@ APP_ID = "org.ryzencontrol.RyzenControl"
 DEV_RYZENCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryzenctl")
 RYZENCTL = DEV_RYZENCTL if os.path.exists(DEV_RYZENCTL) else "/usr/bin/ryzenctl"
 POWER = ("power-saver", "balanced", "performance")
-PRESETS = ("quiet", "eco", "auto", "boost")
-CALIBRATED = ("eco", "auto")   # si adattano all'hardware con test di carico; gli altri sono preset fissi
+PRESETS = ("quiet", "performance", "eco", "auto", "boost")
+CALIBRATED = ("eco", "auto", "boost")   # si adattano all'hardware con test di carico; gli altri sono preset fissi
 MODES = (("default", "Default", "Valori di fabbrica (baseline), avvio automatico disattivato"),
          ("quiet", "Quiet", "Preset fisso: limiti ridotti, FMax −400, ventole lente"),
+         ("performance", "Performance", "Preset fisso: valori di fabbrica, energia al massimo"),
          ("eco", "Eco", "Calibrata con test di carico: undervolt misurato, FMax per il silenzio, ventole lente"),
          ("auto", "Auto", "Calibrata con test di carico: undervolt misurato, PPT e FMax al ginocchio prestazioni/watt"),
-         ("boost", "Boost", "Preset fisso: valori di fabbrica, energia al massimo"),
+         ("boost", "Boost", "Calibrata con test di carico, potenza massima: undervolt spinto misurato, limiti e FMax ai tetti consentiti, guadagno misurato"),
          ("custom", "Custom", "Valori impostati a mano nelle pagine CPU, Curve e Ventole"))
 CPU_PARAMS = (("ppt", "PPT", "W"), ("tdc", "TDC", "A"), ("edc", "EDC", "A"), ("fmax", "FMax", "MHz"), ("tjmax", "Tjmax", "°C"))
 PARAM_HELP = {"ppt": "Potenza massima del package (Package Power Tracking): più bassa = meno calore e consumo, meno boost sotto carico pieno",
@@ -62,11 +63,12 @@ AT_PARAMS = (("target", "Tctl obiettivo", "°C", (50, 90)),
              ("margin", "Margine di sicurezza", "", (0, 20)),
              ("step", "Durata di ogni test", "s", (30, 600)))
 AT_WARNING = ("Ogni core viene portato a CO (Curve Optimizer) sempre più negativo sotto carico (stress-ng) finché resta "
-              "stabile; poi una passata finale su tutti i core e, per Eco, la ricerca della FMax che tiene Tctl sotto "
-              "l'obiettivo. Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. "
+              "stabile, poi una passata finale su tutti i core; infine, per Eco la ricerca della FMax che tiene Tctl sotto "
+              "l'obiettivo, per Auto il ginocchio prestazioni/watt, per Boost la misura del guadagno (MT e ST) rispetto alla "
+              "fabbrica. Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. "
               "La macchina resta usabile ma rallentata; la calibrazione riprende da dove era.")
 AT_PARALLEL_SUB = "Spento: un core alla volta, più lento (%s) ma attribuisce con certezza anche un riavvio"
-AT_PHASES = {"co": 0.6, "final": 0.7, "fmax": 1.0, "ppt": 0.85, "fmax_knee": 1.0}   # quota della barra a fine fase
+AT_PHASES = {"co": 0.6, "final": 0.7, "fmax": 1.0, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # quota della barra a fine fase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 CSS = """
 .tile { padding: 12px; }
@@ -640,6 +642,9 @@ class AutotuneDialog(Adw.Window):
                                 else "FMax %s MHz: misuro il picco Tctl…" % f)
             first = tests[0][0] if tests else f
             frac = AT_PHASES["final"] + (AT_PHASES["fmax"] - AT_PHASES["final"]) * ((first - f) / max(1, first - 4000) if f else 0)
+        elif ph == "bench":                       # Boost: un solo passo, prestazioni a fabbrica e in boost
+            self.phase.set_text("Misuro le prestazioni a fabbrica e in boost (MT e ST)…")
+            frac = (AT_PHASES["final"] + AT_PHASES["bench"]) / 2
         elif ph in ("ppt", "fmax_knee"):          # Auto: ginocchio prestazioni/watt
             k = st.get("knee", {}).get("ppt" if ph == "ppt" else "fmax", {})
             tests, cur = k.get("tests", []), k.get("current")
@@ -721,6 +726,14 @@ class AutotuneDialog(Adw.Window):
                 grid.attach(lab, 2, c + 1, 1, 1)
             self.result.append(label("CO (Curve Optimizer) per core: fabbrica → definitivo, con la tensione misurata", ["heading"], tooltip_text=CO_TIP))
             self.result.append(grid)
+        bench = st.get("bench")
+        if bench and bench.get("gain_mt_pct") is not None:
+            pct = lambda v: ("%+.1f %%" % v).replace(".", ",") if v is not None else "n/d"
+            ops = lambda d: ("%.0f" % (d or {}).get("mt", [0])[0])
+            g = bench["gain_mt_pct"]
+            self.result.append(label("Guadagno misurato: multi-thread %s (%s → %s op/s), single-thread %s" % (
+                pct(g), ops(bench.get("fabbrica")), ops(bench.get("boost")), pct(bench.get("gain_st_pct"))),
+                ["numeric", "success" if g > 0 else ("error" if g < 0 else "dim-label")], wrap=True))
         if st.get("profile_lines"):
             self.result.append(label("Profilo %s: fabbrica → calibrato" % self.mode, ["heading"]))
             self.result.append(profile_view(st["profile_lines"], self.win.status))
@@ -752,7 +765,7 @@ class ModesPage(Adw.PreferencesPage):
         super().__init__()
         self.win = win
         self.loading = False
-        g = Adw.PreferencesGroup(title="Modalità", description="Eco, Auto e Boost sono profili generati dai valori di fabbrica di questa CPU (la calibrazione li misurerà)")
+        g = Adw.PreferencesGroup(title="Modalità", description="Quiet e Performance sono preset fissi dai valori di fabbrica; Eco, Auto e Boost si calibrano con test di carico su questa CPU")
         self.rows, first = {}, None
         self.tables = {}
         for key, title, sub in MODES:
@@ -849,10 +862,11 @@ class ModesPage(Adw.PreferencesPage):
         """Prima la stima (`autotune estimate`), poi una scelta semplice: automatica con i default di ryzenctl, o i parametri a mano."""
         def ask(est):
             p = est["params"]
+            target = "Tctl obiettivo %d °C, " % p["target"] if "target" in p else ""   # Boost: nessun obiettivo termico
             d = Adw.AlertDialog(heading="Calibrare la modalità %s?" % mode.capitalize(),
-                                body="Automatica (consigliata): tutti i core insieme, %s — Tctl obiettivo %d °C, CO (Curve Optimizer) fino a %d "
+                                body="Automatica (consigliata): tutti i core insieme, %s — %sCO (Curve Optimizer) fino a %d "
                                      "con margine %d, %d s per test.\n\n%s\n\n%s"
-                                     % (mins(est["parallel_total_s"]), p["target"], p["colimit"], p["margin"], p["step"], AT_WARNING, CO_TIP))
+                                     % (mins(est["parallel_total_s"]), target, p["colimit"], p["margin"], p["step"], AT_WARNING, CO_TIP))
             d.add_response("cancel", "Annulla")
             d.add_response("custom", "Scegli i valori…")
             d.add_response("auto", "Automatica (consigliata)")
@@ -871,6 +885,8 @@ class ModesPage(Adw.PreferencesPage):
         group = Adw.PreferencesGroup()
         spins = {}
         for key, title, unit, (lo, hi) in AT_PARAMS:
+            if key not in est["params"]:   # es. Boost non ha `target`
+                continue
             r = Adw.SpinRow.new_with_range(lo, hi, 1)
             r.set_title(title + (" (%s)" % unit if unit else ""))
             r.set_value(est["params"][key])
