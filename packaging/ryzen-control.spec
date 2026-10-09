@@ -74,6 +74,7 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 
 %files
 %license LICENSE
+%doc README.md
 %{_bindir}/ryzenctl
 %{_unitdir}/ryzenctl.service
 %{_unitdir}/ryzenctl-resume.service

@@ -7,24 +7,33 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 "Ryzen Control": controllo stile Ryzen Master (Curve Optimizer, Curve Shaper, PBO, FMax/Tjmax,
 ventole) per un Ryzen 7 9800X3D su Linux, GUI GTK4/libadwaita + helper root, pacchetti RPM/deb/Arch.
 
-Il codice non esiste ancora. La fonte di verità è il piano
-`docs/plans/2026-10-09-ryzen-control.md` (rev. 3): architettura, tabella comandi SMU, range di
-validazione, formato profili, crash-guard, fasi e commit previsti. Leggerlo prima di toccare
-qualcosa; questo file ne riassume solo l'essenziale. I piani futuri vanno nella stessa cartella
-(`docs/plans/YYYY-MM-DD-<argomento>.md`). Lingua di piano, README e messaggi di commit: italiano.
+La fonte di verità è il piano `docs/plans/2026-10-09-ryzen-control.md` (rev. 4): architettura,
+tabella comandi SMU, range di validazione, formato profili, crash-guard, fasi e commit previsti.
+Leggerlo prima di toccare qualcosa; questo file ne riassume solo l'essenziale. I piani futuri
+vanno nella stessa cartella (`docs/plans/YYYY-MM-DD-<argomento>.md`). Lingua di piano, README e
+messaggi di commit: italiano.
 
-## Layout previsto
+Fatto: **fase 1** (`ryzenctl` completo per la parte CPU, unit systemd, driver vendorizzato,
+spec RPM, README) in attesa di verifica su hardware. Da fare, in quest'ordine: fase 2 ventole
+(CLI, `fan autodetect`), fase 3 GUI, fase 4 calibrazioni Quiet/Auto e auto-tuning CO, fase 5
+deb/PKGBUILD.
 
-- `ryzenctl` — Python stdlib, unico punto privilegiato (CLI, `serve`, `selftest`), ~350 righe.
-- `ryzen-control` — GUI Python/PyGObject (GTK4, libadwaita ≥ 1.5), gira come utente, ~700 righe.
-- `ryzen_smu/` — driver upstream vendorizzato con `git subtree` (amkillam/ryzen_smu, commit
-  d298366) + patch locale in `smu.c` (dimensioni PM table 0x6211xx/0x6212xx).
-- `Makefile` — unica fonte del layout installato (`install`/`uninstall`/`dkms`, `DESTDIR`,
-  `PREFIX`, `APPID=org.ryzencontrol.RyzenControl`). Ogni pacchetto è un involucro che chiama
-  `make install DESTDIR=…`, mai un layout duplicato.
-- `data/` — unit systemd, policy polkit, .desktop, icona, metainfo, autostart.
-- `packaging/ryzen-control.spec` (RPM, due sottopacchetti `ryzen-control` e `ryzen-smu-dkms`),
-  `packaging/debian/`, `packaging/PKGBUILD`.
+## Layout
+
+- `ryzenctl` — Python stdlib, unico punto privilegiato (CLI, `serve`, `selftest`).
+- `ryzen-control` — GUI Python/PyGObject (GTK4, libadwaita ≥ 1.5), gira come utente. Non esiste
+  ancora; il Makefile la installa solo se presente (`install-gui`).
+- `ryzen_smu/` — driver upstream (amkillam/ryzen_smu, commit d298366) **copiato**, non subtree
+  (git-subtree non è installato): origine, file esclusi, modifica locale a `smu.c` (PM table
+  0x6211xx/0x6212xx) e procedura di aggiornamento in `ryzen_smu/UPSTREAM.md`.
+- `Makefile` — unica fonte del layout installato (`install` = `install-cli` + `install-gui` se
+  c'è + `install-dkms-src`; `DESTDIR`, `PREFIX`; `APPID` serve solo per i nomi dei file in
+  `data/`, l'id `org.ryzencontrol.RyzenControl` è scritto nei file). Ogni pacchetto è un
+  involucro che chiama il Makefile, mai un layout duplicato.
+- `data/` — unit systemd (`ryzenctl.service`, `ryzenctl-resume.service`), preset, blacklist
+  modprobe, policy polkit, .desktop, icona, metainfo, autostart notify.
+- `packaging/ryzen-control.spec` (RPM: `ryzen-control` + `ryzen-smu-dkms`, entrambi noarch);
+  `packaging/debian/` e `packaging/PKGBUILD` in fase 5.
 
 Vincoli di compatibilità: sintassi Python ≥ 3.9 (nessuna feature più recente), libadwaita ≥ 1.5,
 niente dipendenze Python oltre PyGObject, nessun framework di test.
@@ -34,25 +43,16 @@ niente dipendenze Python oltre PyGObject, nessun framework di test.
 Senza hardware né root (si eseguono prima di ogni commit):
 
 ```sh
-python3 ryzenctl selftest                       # backend SMU finto; copre codifiche, validazione, profili, baseline, crash-guard
-RYZENCTL_ROOT=/tmp/fake python3 ryzenctl status # CLI sul backend finto (stesso del selftest)
-python3 ryzen-control --mock                    # GUI senza driver né pkexec
-make -C ryzen_smu                               # compila il driver con gli header del kernel corrente
-make install DESTDIR=/tmp/x && find /tmp/x      # verifica il layout installato
-systemd-analyze verify data/*.service
-desktop-file-validate data/*.desktop
-appstreamcli validate data/*.metainfo.xml
-rpmbuild -ba packaging/ryzen-control.spec       # rpmdevtools presente; rpmlint NON installato
+python3 ryzenctl selftest       # backend finto; codifiche, validazione, tetti, profili, baseline, crash-guard, serve
+make check                      # selftest + layout in radice temporanea + systemd-analyze verify + desktop-file-validate + appstreamcli
+make driver-check               # compila il driver in una copia fuori dal repo (kbuild NON accetta spazi nel percorso: `make -C ryzen_smu` fallisce qui)
+make rpm                        # tarball da HEAD (solo ciò che è committato) + RPM in dist/; rpmlint NON installato
+RYZENCTL_ROOT=/tmp/fake python3 ryzenctl boot   # CLI sul backend finto (stato in $ROOT/fake_smu.json)
+python3 ryzen-control --mock    # GUI senza driver né pkexec (fase 3)
 ```
 
-Su hardware (li esegue l'utente, con `! comando`; si committa dopo il suo esito):
-
-```sh
-sudo ryzenctl status                            # deve coincidere con i valori BIOS
-sudo ryzenctl co 7 -3 && sudo ryzenctl co 7 0   # scrittura minima reversibile con readback
-dkms status; modinfo -F signer ryzen_smu
-cat /sys/kernel/ryzen_smu_drv/codename          # 23 = Granite Ridge
-```
+Su hardware (li esegue l'utente, con `! comando`; si committa dopo il suo esito): checklist in
+README "Verifica su hardware".
 
 Non testabili su questa macchina: `dpkg-buildpackage`, `namcap`, `stress-ng` (mancanti).
 I pacchetti deb/Arch vanno marcati "non testati" nel README.
@@ -62,54 +62,69 @@ I pacchetti deb/Arch vanno marcati "non testati" nel README.
 ```
 ryzen-control (GUI, utente) ──pkexec──▶ ryzenctl serve (root, valida TUTTO)
                                           ├─ /sys/kernel/ryzen_smu_drv/*   (SMU)
-CLI: sudo ryzenctl …  ────────────────────┤─ /sys/class/hwmon/nct67xx/*    (ventole)
-systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /var/lib/ryzenctl
+CLI: sudo ryzenctl …  ────────────────────┤─ /sys/class/hwmon/nct67xx/*    (ventole, fase 2)
+systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /var/lib/ryzenctl, /run/ryzenctl
 ```
 
-- **Una sola grammatica di comandi** (`co 7 -3`, `ppt 88`, `fmax 4800`, `fan 2 step 10000 5000`,
-  …) usata identica da CLI, righe dei file profilo e protocollo `serve` (una riga JSON-array per
-  richiesta, una riga JSON di risposta). Un nuovo comando si aggiunge in un solo posto.
+- **Una sola grammatica di comandi** (`co 7 -3`, `ppt 88`, `fmax 4800`, `shaper 4 -5 -5 0`,
+  `power balanced`, …) usata identica da CLI, righe dei file profilo e protocollo `serve` (una
+  riga JSON-array per richiesta, una riga `{"ok":…}` di risposta; `boot/shutdown/resume/serve`
+  negati via serve). Un nuovo comando = una funzione `cmd_*` + voce in `COMMANDS` (+ in
+  `PROFILE_CMDS` se ammesso nei profili) + caso nel selftest.
 - **`ryzenctl` è il confine di fiducia**: la GUI non valida nulla di definitivo, invia e mostra
   gli errori. `serve` viene avviato una volta per sessione (un solo prompt pkexec).
-- **Backend finto condiviso**: `selftest`, `RYZENCTL_ROOT` e `--mock` usano lo stesso backend
-  (monkeypatch di due funzioni + radice filesystem da env). Nuova logica = caso nel selftest.
-- **Baseline** (`/var/lib/ryzenctl/baseline.conf`, stesso formato dei profili): catturata a ogni
-  boot prima di applicare qualsiasi cosa. "Default" = `apply baseline` + autostart off. Tetto di
-  ogni valore = baseline, salvo sblocco esplicito (`unlock on`, con avvertenza).
-- **Crash-guard** (requisito esplicito dell'utente): `boot` trova `dirty` **e** `active` →
-  scrive `crashed`, NON riapplica la parte CPU (ventole sì); `shutdown` pulito rimuove `dirty`;
-  `active` nasce da qualsiasi scrittura non-baseline. Via di fuga: parametro kernel `ryzenctl.off`.
+- **Backend finto** (`class Fake`, attivo con `RYZENCTL_ROOT`): simula SMU, PM table, k10temp,
+  profilo energetico; `drop` ignora le prossime scritture (prova del readback), `log` registra
+  quali marker esistevano a ogni scrittura (prova dell'ordine). Nuova logica = caso nel selftest.
+- **Baseline** (`/var/lib/ryzenctl/baseline.conf`, stesso formato dei profili): catturata da
+  `boot` una volta per boot (`/run/ryzenctl/booted`), mai se `active` esiste. Tetto di ogni
+  valore; senza baseline di questo boot (`/run/ryzenctl/baseline-done`) nessuna scrittura CPU.
+  Tjmax ≤ baseline sempre; PPT/TDC/EDC ≤ baseline e FMax ≤ baseline salvo `unlock on`
+  (tetti 230 W / 160 A / 230 A, FMax +200 MHz, avvertenza stampata).
+- **Crash-guard** (requisito esplicito dell'utente), marker in `/var/lib/ryzenctl` con fsync:
+  `boot` → se `dirty` ∧ `active` scrive `crashed {ora, profilo}`; rimuove `active`; scrive
+  `dirty`; cattura baseline; applica ventole; applica CPU solo se autostart ∧ ¬crashed. `active`
+  viene scritto da `write_verify` **prima** della scrittura SMU di un valore ≠ baseline.
+  `shutdown` (ExecStop) toglie `dirty`. Restart nello stesso boot (`booted` presente) rimette
+  solo `dirty`. `boot` non solleva mai eccezioni (la unit deve restare attiva perché ExecStop
+  giri). Via di fuga: parametro kernel `ryzenctl.off` + modulo in blacklist (lo carica solo il
+  servizio con modprobe esplicito).
 - **Modalità** statiche (nessun demone, il dinamismo lo fa PBO): Default / Quiet / Auto / Boost /
-  Custom. Quiet e Auto si ottengono da calibrazioni in GUI che abbassano solo limiti.
-- **Ventole**: nessun demone; si cambiano solo `pwmN_step_up_time`/`step_down_time` (e punti
-  curva se richiesto) della SmartFan già programmata dal BIOS. `pwmN_enable` non si tocca mai
-  (eccezione "Identifica", ripristino in `finally`). Il parametro kernel
-  `acpi_enforce_resources=lax` è un passo manuale mostrato in GUI: il pacchetto non tocca il
-  bootloader.
+  Custom. Quiet e Auto si ottengono da calibrazioni in GUI che abbassano solo limiti (fase 4).
+- **Ventole** (fase 2): nessun demone; si cambiano solo `pwmN_step_up_time`/`step_down_time` (e
+  punti curva se richiesto) della SmartFan già programmata dal BIOS. Ruoli assegnati da
+  `fan autodetect` (test fisico: canale al 40 % per 20 s sotto carico, ΔTctl distingue la pompa);
+  a mano si può solo declassare, mai promuovere a "ventola". `pwmN_enable` non si tocca mai
+  fuori dai test (ripristino in `finally`). Il parametro kernel `acpi_enforce_resources=lax` è
+  un passo manuale: il pacchetto non tocca il bootloader.
 
 ## Invarianti hardware (non negoziabili)
 
-- Allowlist SMU rigida (tabella nel piano): CO MP1 0x35, PPT/TDC/EDC MP1 0x3E/0x3C/0x3D, FMax
-  RSMU 0x70/0x6E, Tjmax RSMU 0x59, Shaper RSMU 0xA6/0x84. Nessun altro ID viene inviato.
-  Mai MP1 0x58–0x6F (congela l'SMU sul 9800X3D) né MP1 0x10 (spegne il display).
-- Gate: `codename` deve essere Granite Ridge, altrimenti rifiuto totale.
-- Ogni transazione SMU sotto `flock(/run/ryzenctl.lock)` (`smu_args` del driver è globale).
-- Ogni scrittura è seguita da readback; discrepanza = errore, nessun fallback automatico.
+- Allowlist SMU rigida (`CMD` in testa a `ryzenctl`): CO MP1 0x35, PPT/TDC/EDC MP1
+  0x3E/0x3C/0x3D, FMax RSMU 0x70/0x6E, Tjmax RSMU 0x59, Shaper RSMU 0xA6/0x84, CO get RSMU
+  0xD5. Nessun altro ID viene inviato. Mai MP1 0x58–0x6F (congela l'SMU sul 9800X3D) né MP1
+  0x10 (spegne il display). Mai comandi di tensione, OC mode (RSMU 0x5D), VID fisso (0x61),
+  PBO scalar (0x5B), scritture `smn`, FCLK/memoria.
+- Gate: `codename` deve essere 23 (Granite Ridge), altrimenti rifiuto totale.
+- Ogni transazione SMU sotto `flock(/run/ryzenctl/lock)` (`smu_args` del driver è globale).
+- Ogni scrittura è seguita da readback; discrepanza → una ripetizione → ripristino del valore
+  baseline → errore. Nessun fallback automatico su altri ID.
 - Floor: PPT ≥ 45 W, TDC ≥ 30 A, EDC ≥ 45 A (PPT 0 blocca la CPU a 606 MHz). CO/Shaper −50..+30,
-  FMax 3000..baseline, Tjmax 60..baseline. Le costanti di validazione stanno in testa a
-  `ryzenctl` e sono manopole di calibrazione, non da sparpagliare.
-- Valori dalla PM table letti solo se `pm_table_version>>16 == 0x62`.
-- Nomi profilo solo `[a-z0-9_-]`.
+  FMax 3000..baseline(+200 sbloccato), Tjmax 60..min(baseline, 95). Le costanti stanno in testa
+  a `ryzenctl` e sono manopole di calibrazione, non da sparpagliare.
+- Valori dalla PM table letti solo se `pm_table_version>>16 == 0x62`; PM table assente →
+  PPT/TDC/EDC/Tjmax rifiutati (fail closed), CO/FMax/Shaper ok.
+- Nomi profilo solo `[a-z0-9_-]{1,32}`, `baseline` riservato. File di stato scritti in modo
+  atomico (`write_atomic`).
 
 ## Flusso di lavoro
 
-- Repo git personale locale, branch `main`, nessun remote finché l'utente non ne indica uno.
-  Oggi il repo non è ancora inizializzato: il primo commit previsto è `chore: init repo, plan,
-  README stub`.
+- Repo git locale, branch `main` (solo init) e `dev` (sviluppo), nessun remote finché l'utente
+  non ne indica uno.
 - Sviluppo a passi seguendo la tabella "Fasi e commit" del piano: un commit per passo, **solo
-  dopo la verifica** del passo. Verifica fallita → si corregge, niente commit.
-- Prefisso convenzionale (`feat/fix/build/docs/chore/test`), messaggio in prosa italiana.
+  dopo la verifica** del passo (`make check` almeno). Verifica fallita → si corregge, niente commit.
+- Prefisso convenzionale (`feat/fix/build/docs/chore/test`), messaggio in prosa italiana, riga
+  `Co-Authored-By` richiesta dall'ambiente.
 - Tag `v0.1.0`, `v0.2.0`, … a fine di ogni fase verificata su hardware; la versione del tag è
-  quella della spec RPM.
-- Le semplificazioni deliberate con un tetto noto si marcano con un commento `# ponytail:`
-  (già previsti nel piano: euristica famiglia PM table, calibrazioni a misura singola).
+  quella di `VERSION` nel Makefile e della spec RPM (da tenere allineate).
+- Le semplificazioni deliberate con un tetto noto si marcano con un commento `# ponytail:`.
