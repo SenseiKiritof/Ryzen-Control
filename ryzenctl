@@ -514,6 +514,7 @@ def cmd_shaper(ctx, args):
         out["dopo_1s"] = raw()
         smu("shaper_set", shaper_arg(4, *base["shaper"].get(4, [0, 0, 0])))
         out["ripristino"] = raw()
+        out["per_tier_arg0"] = ["0x%08X" % smu("shaper_get", t)[0] for t in range(5)]   # 0x84 con arg0 = tier
         return out
     if len(args) != 4:
         raise Err("uso: shaper <tier 0-4> <bassaT> <mediaT> <altaT> | shaper raw | shaper probe")
@@ -609,9 +610,12 @@ def profile_path(name):
 
 def profile_lines(name):
     try:
-        return parse_lines(open(profile_path(name)).read())
+        lines = parse_lines(open(profile_path(name)).read())
     except OSError:
         raise Err("profilo '%s' inesistente" % name)
+    if name == "baseline":  # scritta da noi: una versione precedente può avere righe oggi escluse (shaper)
+        lines = [t for t in lines if t[0] in PROFILE_CMDS]
+    return lines
 
 
 def apply_lines(lines, ctx, part=None):
@@ -1056,6 +1060,8 @@ def selftest():
     run(["crashed", "clear"])
     # 7. default: tutto a baseline, active via, autostart off; un crash dopo non è colpa nostra
     run(["apply", "quiet"])
+    with open(P(STATE + "/baseline.conf"), "a") as f:   # baseline di una versione vecchia con riga shaper
+        f.write("shaper 4 0 0 0\n")
     out = run(["default"])
     assert not out["autostart"] and not exists("active")
     st = run(["status"])
