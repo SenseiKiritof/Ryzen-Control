@@ -863,8 +863,11 @@ def cmd_preset(ctx, args):
 
 # ---- Autotune: macchina a passi (Eco/Auto), stato su disco, ripresa dopo crash ----------
 AT_PATH = STATE + "/autotune.json"
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -25, "margin": 5, "step": 90},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10}}
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -25, "margin": 5, "step": 90, "parallel": 1},
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1}}
+# parallel=1 (default): tutti i core insieme a ogni livello di CO, un worker per core (8x più
+# veloce); parallel=0: un core alla volta (attribuisce con certezza anche un crash).
+AT_FMAX_TESTS_EST, AT_PPT_TESTS_EST, AT_FKNEE_TESTS_EST, BURST_SEC = 5, 5, 6, 5   # per le stime di durata
 PPT_SWEEP_STEP, PPT_SWEEP_MIN, BENCH_SEC, FMAX_KNEE_SPAN = 0.10, 0.50, 15, 800   # Auto: ginocchio prestazioni/W
 CO_STEP, FINAL_SEC, FINAL_RETRIES = 5, 300, 3
 FMAX_STEP, FMAX_SWEEP_MIN, BURSTS = 100, 4000, 12
@@ -913,6 +916,102 @@ def co_test(cores, seconds):
         if not run_load(base + extra, sec):
             return False
     return True
+
+
+def spawn_load(args, seconds):
+    return subprocess.Popen(["stress-ng"] + args + ["-t", str(int(seconds)), "-q"],
+                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+
+def mce_cores_since(ts, cores):
+    """Core con errori MCE dal timestamp; se la riga non dice la CPU, tutti (prudenza)."""
+    r = subprocess.run(["journalctl", "-k", "-q", "--since", "@%d" % int(ts), "-g", "mce|Hardware Error"],
+                       capture_output=True, text=True)
+    if not r.stdout.strip():
+        return set()
+    cpus = re.findall(r"CPU[ :]+(\d+)", r.stdout)
+    if not cpus:
+        return set(cores)
+    # ponytail: cpu logica → core fisico = cpu % CORES (su questa topologia cpuN e cpuN+8 sono il core N)
+    return {int(c) % CORES for c in cpus} & set(cores)
+
+
+def co_test_parallel(cores, seconds):
+    """Tutti i core insieme, un worker per core (così l'instabilità software resta attribuita al
+    core): pieno carico, poi 50 %, poi raffiche singole a turno per toccare il boost massimo
+    di ogni core. Restituisce l'insieme dei core falliti."""
+    if FAKE:
+        return {c for c in cores if not FAKE.load_ok(["--taskset", str(c)])}
+    sec = max(1, seconds // 3)
+    failed = set()
+    t0 = time.time()
+    for extra in ([], ["--cpu-load", "50"]):
+        procs = {c: spawn_load(["--cpu", "1", "--taskset", str(c), "--cpu-method", "all", "--verify"] + extra, sec)
+                 for c in cores if c not in failed}
+        for c, pr in procs.items():
+            if pr.wait() != 0:
+                failed.add(c)
+    burst = max(3, sec // max(1, len(cores)))
+    for c in cores:
+        if c not in failed and not run_load(["--cpu", "1", "--taskset", str(c), "--cpu-method", "all", "--verify"], burst):
+            failed.add(c)
+    return failed | mce_cores_since(t0, cores)
+
+
+def at_total_estimate(mode, p):
+    """Durata stimata (s) di una calibrazione completa con questi parametri (massimo per il CO)."""
+    levels = max(1, (-p["colimit"]) // CO_STEP)
+    t = levels * p["step"] * (1 if p.get("parallel", 1) else CORES) + FINAL_SEC
+    if mode == "eco":
+        t += AT_FMAX_TESTS_EST * BURSTS * BURST_SEC
+    else:
+        t += AT_PPT_TESTS_EST * (5 + BENCH_SEC) + AT_FKNEE_TESTS_EST * (3 + BENCH_SEC)
+    return int(t)
+
+
+def at_estimate(st):
+    """{total_s, remaining_s}: tempo rimanente stimato dalla fase corrente."""
+    p, ph = st["params"], st["phase"]
+    levels = max(1, (-p["colimit"]) // CO_STEP)
+    rem = 0
+    if ph == "co":
+        level_idx = (-st["value"]) // CO_STEP - 1          # livelli già completati
+        if st.get("parallel"):
+            rem += (levels - level_idx) * p["step"]
+        else:
+            rem += ((CORES - st["core"] - 1) * levels + (levels - level_idx)) * p["step"]
+    if ph in ("co", "final"):
+        rem += FINAL_SEC
+    if st["mode"] == "eco" and ph in ("co", "final", "fmax"):
+        n = AT_FMAX_TESTS_EST
+        if ph == "fmax" and st["fmax"].get("current"):
+            n = min(n, max(1, (st["fmax"]["current"] - FMAX_SWEEP_MIN) // FMAX_STEP + 1))
+        rem += n * BURSTS * BURST_SEC
+    if st["mode"] == "auto" and ph in ("co", "final", "ppt", "fmax_knee"):
+        knee = st.get("knee", {})
+        if ph != "fmax_knee":
+            done = len(knee.get("ppt", {}).get("tests", [])) if ph == "ppt" else 0
+            rem += max(0, AT_PPT_TESTS_EST - done) * (5 + BENCH_SEC)
+        done_f = len(knee.get("fmax", {}).get("tests", [])) if ph == "fmax_knee" else 0
+        rem += max(0, AT_FKNEE_TESTS_EST - done_f) * (3 + BENCH_SEC)
+    return {"total_s": at_total_estimate(st["mode"], p), "remaining_s": int(rem)}
+
+
+def at_params(mode, kvs):
+    params = dict(AT_DEFAULTS[mode])
+    for kv in kvs:
+        k, _, v = kv.partition("=")
+        if k not in params:
+            raise Err("parametro sconosciuto '%s' (%s)" % (k, ", ".join(params)))
+        params[k] = to_int(v, k)
+    check_range("colimit", params["colimit"], CO_MIN, 0)
+    check_range("margin", params["margin"], 0, 20)
+    check_range("step", params["step"], 3, 3600, " s")
+    check_range("target", params["target"], 50, 90, " °C")
+    check_range("parallel", params["parallel"], 0, 1)
+    if "loss" in params:
+        check_range("loss", params["loss"], 1, 50, " %")
+    return params
 
 
 def tctl_p95():
@@ -1061,11 +1160,25 @@ def at_final_values(st):
 
 
 def cmd_autotune(ctx, args):
-    """autotune start eco|auto [chiave=valore…] | step | status | abort"""
+    """autotune start eco|auto [chiave=valore…] | step | status | abort | estimate eco|auto [chiave=valore…]"""
+    st = _autotune(ctx, args)
+    if isinstance(st, dict) and st.get("phase"):
+        st["eta"] = at_estimate(st)
+    return st
+
+
+def _autotune(ctx, args):
     if not args:
-        raise Err("uso: autotune start eco|auto [target=70 colimit=-25 margin=5 step=90] | step | status | abort")
+        raise Err("uso: autotune start eco|auto [target=70 colimit=-25 margin=5 step=90 parallel=1] | step | status | abort | estimate eco|auto […]")
     if args[0] == "status":
         return at_load() or {"phase": None}
+    if args[0] == "estimate":
+        if len(args) < 2 or args[1] not in AT_DEFAULTS:
+            raise Err("uso: autotune estimate eco|auto [chiave=valore…]")
+        p = at_params(args[1], args[2:])
+        return {"total_s": at_total_estimate(args[1], p),
+                "parallel_total_s": at_total_estimate(args[1], dict(p, parallel=1)),
+                "sequential_total_s": at_total_estimate(args[1], dict(p, parallel=0)), "params": p}
     if args[0] == "abort":
         st = at_load()
         rm(P(AT_PATH))
@@ -1078,20 +1191,10 @@ def cmd_autotune(ctx, args):
             raise Err("uso: autotune start eco|auto [chiave=valore…]")
         check_cpu()
         load_baseline()
-        params = dict(AT_DEFAULTS[args[1]])
-        for kv in args[2:]:
-            k, _, v = kv.partition("=")
-            if k not in params:
-                raise Err("parametro sconosciuto '%s' (%s)" % (k, ", ".join(params)))
-            params[k] = to_int(v, k)
-        check_range("colimit", params["colimit"], CO_MIN, 0)
-        check_range("margin", params["margin"], 0, 20)
-        check_range("step", params["step"], 3, 3600, " s")
-        check_range("target", params["target"], 50, 90, " °C")
-        if "loss" in params:
-            check_range("loss", params["loss"], 1, 50, " %")
+        params = at_params(args[1], args[2:])
         apply_lines(profile_lines("baseline"), ctx, "cpu")      # tutti i core a baseline
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
+              "parallel": bool(params["parallel"]), "active_cores": list(range(CORES)),
               "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
               "fmax": {"current": None, "tests": [], "chosen": None},
               "started": time.strftime("%Y-%m-%d %H:%M"), "resumed_after_crash": False}
@@ -1110,8 +1213,36 @@ def cmd_autotune(ctx, args):
         st["in_progress"] = None
         if ip["kind"] == "co":
             at_core_failed(st, ip["core"], ip["value"], "crash")
+        elif ip["kind"] == "co_par":                   # non attribuibile: tutti i core in prova instabili a v
+            for c in ip["cores"]:
+                st["unstable"][str(c)] = {"value": ip["value"], "why": "crash"}
+                st["results"].setdefault(str(c), 0)
+            st["active_cores"] = []
+            st["phase"] = "final"
         elif ip["kind"] == "final":
             at_final_failed(st)
+        at_save(st)
+        return st
+    if st["phase"] == "co" and st.get("parallel"):
+        v, cores = st["value"], st["active_cores"]
+        st["in_progress"] = {"kind": "co_par", "cores": cores, "value": v, "boot_id": boot_id()}
+        at_save(st)
+        for c in cores:
+            run(["co", str(c), str(v)], ctx)
+        failed = co_test_parallel(cores, st["params"]["step"])
+        st["in_progress"] = None
+        for c in cores:
+            if c in failed:
+                st["unstable"][str(c)] = {"value": v, "why": "instabile"}
+                st["results"].setdefault(str(c), 0)
+                run(["co", str(c), str(st["results"][str(c)])], ctx)   # torna all'ultimo stabile
+            else:
+                st["results"][str(c)] = v
+        st["active_cores"] = [c for c in cores if c not in failed]
+        if not st["active_cores"] or v - CO_STEP < st["params"]["colimit"]:
+            st["phase"] = "final"
+        else:
+            st["value"] = v - CO_STEP
         at_save(st)
         return st
     if st["phase"] == "co":
@@ -1988,12 +2119,19 @@ def selftest():
     # ---- autotune eco: CO discreto per core, passata finale, FMax dal target, profilo eco ----
     expect_err(["autotune", "step"], "nessuna calibrazione")
     expect_err(["autotune", "start", "eco", "colimit=5"], "fuori")
+    est = run(["autotune", "estimate", "eco"])
+    assert est["parallel_total_s"] == 5 * 90 + 300 + 5 * 12 * 5 and est["sequential_total_s"] == 8 * 5 * 90 + 300 + 300, est
+    expect_err(["autotune", "estimate", "eco", "parallel=2"], "fuori")
     st = run(["autotune", "start", "eco", "step=9"])
-    assert st["phase"] == "co" and st["params"]["colimit"] == -25 and st["params"]["step"] == 9
+    assert st["phase"] == "co" and st["params"]["colimit"] == -25 and st["params"]["step"] == 9 and st["parallel"]
+    assert st["eta"]["remaining_s"] == 5 * 9 + 300 + 300 and st["eta"]["total_s"] == 5 * 9 + 300 + 300, st["eta"]
+    steps = 0
     for _ in range(200):
         st = run(["autotune", "step"])
+        steps += 1
         if st["phase"] == "done":
             break
+    assert steps == 5 + 1 + 7 and st["eta"]["remaining_s"] == 0, steps   # 5 livelli in parallelo, finale, 7 FMax
     assert st["phase"] == "done" and "error" not in st, st
     # core 7 stabile fino a -15, instabile a -20 → finale -15+5 = -10; gli altri arrivano al limite -25 → -20
     assert st["final"] == [-20] * 7 + [-10] and st["unstable"]["7"]["value"] == -20, st["final"]
@@ -2002,8 +2140,9 @@ def selftest():
     assert "co -20 -20 -20 -20 -20 -20 -20 -10" in eco and "fmax 4625" in eco and "ppt 89" in eco
     assert "fan 1 step 10000 5000" in eco and "fan 1 curve 60:77 75:255" in eco, eco
     assert run(["status"])["profile"] == "eco" and run(["status"])["co"][7] == -10
-    # ripresa dopo crash: il passo in corso diventa instabile, si passa al core successivo
-    run(["autotune", "start", "auto", "step=9"])
+    # ripresa dopo crash (core per core): il passo in corso diventa instabile, si passa al core successivo
+    st = run(["autotune", "start", "auto", "step=9", "parallel=0"])
+    assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 300 + 5 * 20 + 6 * 18, st["eta"]
     run(["autotune", "step"])                          # core 0 a -5: ok
     st = run(["autotune", "status"])
     st["in_progress"] = {"kind": "co", "core": 0, "value": -10, "boot_id": "altro-boot"}
@@ -2012,6 +2151,15 @@ def selftest():
     assert st["resumed_after_crash"] and st["unstable"]["0"] == {"value": -10, "why": "crash"} and st["core"] == 1
     assert run(["autotune", "abort"])["aborted"] and run(["autotune", "status"]) == {"phase": None}
     assert run(["status"])["co"] == [0] * CORES          # abort riporta la CPU a baseline
+    # crash in parallelo: tutti i core in prova instabili a quel livello, si passa alla finale
+    run(["autotune", "start", "eco", "step=9"])
+    st = run(["autotune", "step"])                     # tutti a -5: ok
+    st["in_progress"] = {"kind": "co_par", "cores": st["active_cores"], "value": -10, "boot_id": "altro-boot"}
+    at_save(st)
+    st = run(["autotune", "step"])
+    assert st["resumed_after_crash"] and st["phase"] == "final" and st["unstable"]["0"] == {"value": -10, "why": "crash"}
+    assert st["results"]["0"] == -5
+    run(["autotune", "abort"])
     run(["profile", "delete", "eco"])
     run(["use", "quiet"]) if "quiet" in run(["profile", "list"])["profiles"] else None
 
