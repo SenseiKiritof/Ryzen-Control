@@ -242,9 +242,13 @@ class Fake:
         return 1, [0] * 6
 
     def load_ok(self, args):
-        """Carico simulato: fallisce se un core testato è sotto la sua soglia di stabilità."""
-        cores = [int(args[args.index("--taskset") + 1])] if "--taskset" in args else range(CORES)
-        return all(self.s["co"][c] >= self.s.get("co_limits", {}).get(str(c), -100) for c in cores)
+        """Carico simulato: fallisce se un core testato è sotto la sua soglia di stabilità;
+        con `combined_stricter` il carico su tutti i core richiede 3 passi di margine in più."""
+        if "--taskset" in args:
+            cores, extra = [int(args[args.index("--taskset") + 1].split(",")[0])], 0
+        else:
+            cores, extra = range(CORES), self.s.get("combined_stricter", 0)
+        return all(self.s["co"][c] >= self.s.get("co_limits", {}).get(str(c), -100) + extra for c in cores)
 
     def bench(self, threads):
         """(bogo-ops/s, W) simulati: multi-thread satura con il PPT, single-thread segue FMax."""
@@ -962,13 +966,26 @@ def wait_child(pr):
         _children.discard(pr)
 
 
+LAST_FAIL = {"why": ""}   # motivo dell'ultimo carico fallito (per lo stato della calibrazione)
+
+
 def run_load(args, seconds):
     """stress-ng con argomenti fissi; True se finisce bene e senza errori MCE."""
     if FAKE:
         check_abort()
-        return FAKE.load_ok(args)
+        ok = FAKE.load_ok(args)
+        if not ok:
+            LAST_FAIL["why"] = "simulato"
+        return ok
     t0 = time.time()
-    return wait_child(spawn_load(args, seconds)) == 0 and not mce_since(t0)
+    rc = wait_child(spawn_load(args, seconds))
+    if rc != 0:
+        LAST_FAIL["why"] = "stress-ng codice %d (verifica dei risultati fallita o processo terminato)" % rc
+        return False
+    if mce_since(t0):
+        LAST_FAIL["why"] = "errore MCE nel log del kernel"
+        return False
+    return True
 
 
 def core_cpus(c):
@@ -1105,7 +1122,7 @@ def at_estimate(st):
             rem += max(0, AT_PPT_TESTS_EST - done) * (5 + BENCH_SEC)
         done_f = len(knee.get("fmax", {}).get("tests", [])) if ph == "fmax_knee" else 0
         rem += max(0, AT_FKNEE_TESTS_EST - done_f) * (3 + BENCH_SEC)
-    return {"total_s": at_total_estimate(st["mode"], p), "remaining_s": int(rem)}
+    return {"total_s": st.get("eta_total", at_total_estimate(st["mode"], p)), "remaining_s": int(rem)}
 
 
 def co_limits_load():
@@ -1354,7 +1371,8 @@ def at_finish_auto(ctx, st, base):
 
 
 def at_final_values(st):
-    m = st["params"]["margin"]
+    """Limite misurato + margine della modalità + 3 per ogni passata finale fallita."""
+    m = st["params"]["margin"] + 3 * st.get("final_tries", 0)
     return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
 
 
@@ -1426,6 +1444,7 @@ def _autotune(ctx, args):
         if saved:                                   # limite già misurato: solo passata finale col margine di questa modalità
             st.update({"phase": "final", "results": saved["results"], "unstable": saved["unstable"],
                        "samples": saved.get("samples", st["samples"]), "co_reused": saved["time"], "active_cores": []})
+        st["eta_total"] = at_total_estimate(args[1], params)   # fissato all'avvio (dopo, il riuso lo abbasserebbe)
         at_save(st)
         return st
     if args[0] != "step":
@@ -1460,7 +1479,7 @@ def at_step(ctx, st, base):
             st["active_cores"] = []
             st["phase"] = "final"
         elif ip["kind"] == "final":
-            at_final_failed(st)
+            at_final_failed(st, "crash")
         at_save(st)
         return st
     if st["phase"] == "co" and st.get("parallel"):
@@ -1574,15 +1593,15 @@ def at_next_core(st, base):
         co_limits_save(st)
 
 
-def at_final_failed(st):
+def at_final_failed(st, why=None):
+    """La passata combinata è fallita: si registra e si riprova con +3 su tutti i core
+    (i limiti misurati per core restano invariati)."""
+    st.setdefault("final_failures", []).append({"values": at_final_values(st), "why": why or LAST_FAIL["why"] or "crash"})
     st["final_tries"] += 1
     if st["final_tries"] >= FINAL_RETRIES:
         st["phase"] = "done"
         st["error"] = "passata finale instabile anche con margine aumentato: CO lasciato a baseline"
         run(["apply", "baseline", "cpu"], {})
-        return
-    for c in range(CORES):                            # +3 a tutti e si riprova
-        st["results"][str(c)] = min(0, st["results"].get(str(c), 0) + 3)
 
 
 def at_finish_eco(ctx, st, base):
@@ -2474,6 +2493,22 @@ def selftest():
     run(["profile", "delete", "eco"])
     run(["use", "quiet"]) if "quiet" in run(["profile", "list"])["profiles"] else None
 
+    # ---- passata finale fallita: +3 a tutti, limiti misurati intatti, motivo registrato ----
+    FAKE.s["combined_stricter"] = 4           # il margine 3 non basta: la finale fallisce una volta
+    FAKE.save()
+    st = run(["autotune", "start", "boost", "step=3"])          # riusa i limiti di eco
+    assert st["phase"] == "final" and st["eta"]["total_s"] == 300 + 4 * 6 + 4 * 20
+    for _ in range(20):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["final_tries"] == 1 and st["final_failures"][0]["why"] == "simulato", st
+    assert st["results"]["0"] == -50 and st["final"][0] == -44 and st["final"][7] == -9, (st["results"], st["final"])
+    assert st["eta"]["total_s"] == 300 + 4 * 6 + 4 * 20          # totale fissato all'avvio
+    run(["autotune", "abort"])
+    run(["profile", "delete", "boost"])
+    FAKE.s["combined_stricter"] = 0
+    FAKE.save()
     # ---- riuso del limite misurato: auto parte dalla passata finale col suo margine ----
     saved = json.loads(open(P(CO_LIMITS_PATH)).read())
     assert saved["results"]["7"] == -15 and saved["colimit"] == -50, saved       # −50 copre anche i −40 di Auto/Boost
