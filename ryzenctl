@@ -1676,6 +1676,10 @@ def cmd_boot(ctx, args):
         rm(marker("active"))
         touch_sync(marker("dirty"))                 # prima di qualunque scrittura SMU
         touch_sync(P(RUN + "/booted"))
+        st = load_settings()                        # il BIOS ha riprogrammato la pompa: tetto da riapplicare
+        for f in st.get("fans", {}).values():
+            f.pop("pump_max", None)
+        save_settings(st)
         try:
             cmd_baseline(ctx, [])
         except Err as e:
@@ -1812,8 +1816,23 @@ def fan_info(d, n):
             "step_down_ms": hw_read("%s/pwm%d_step_down_time" % (d, n)),
             "curva": fan_curve_compact([(hw_read("%s/pwm%d_auto_point%d_temp" % (d, n, k)) // 1000,
                                          hw_read("%s/pwm%d_auto_point%d_pwm" % (d, n, k))) for k in range(1, fan_points(d, n) + 1)])}
-    info.update(fan_roles().get(str(n), {"role": "sconosciuto"}))
+    info.update({k: v for k, v in fan_roles().get(str(n), {"role": "sconosciuto"}).items() if k != "bios_curve"})
     return info
+
+
+def fan_points_raw(d, n):
+    return [(hw_read("%s/pwm%d_auto_point%d_temp" % (d, n, k)) // 1000, hw_read("%s/pwm%d_auto_point%d_pwm" % (d, n, k)))
+            for k in range(1, fan_points(d, n) + 1)]
+
+
+def fan_points_write(d, n, pts):
+    for i, (t, pw) in enumerate(pts, 1):
+        hw_write("%s/pwm%d_auto_point%d_temp" % (d, n, i), t * 1000)
+        hw_write("%s/pwm%d_auto_point%d_pwm" % (d, n, i), pw)
+
+
+def pump_settings(n):
+    return load_settings().get("fans", {}).get(str(n), {})
 
 
 def fan_capture_lines():
@@ -1828,8 +1847,16 @@ def fan_capture_lines():
             lines.append("fan %d step %d %d" % (n, i["step_up_ms"], i["step_down_ms"]))
             lines.append("fan %d curve %s" % (n, " ".join(i["curva"])))
         elif role == "pompa":
-            i = fan_info(d, n)
-            lines.append("fan %d pump %s" % (n, "auto" if i["modo"] != 1 else str(round(i["pwm"] * 100 / 255))))
+            i, ps = fan_info(d, n), pump_settings(n)
+            if i["modo"] == 1:
+                lines.append("fan %d pump %d" % (n, round(i["pwm"] * 100 / 255)))
+            elif ps.get("pump_max"):
+                lines.append("fan %d pump max %d" % (n, ps["pump_max"]))
+            else:
+                lines.append("fan %d pump auto" % n)
+                st = load_settings()                      # curva del BIOS di riferimento (per `pump auto`)
+                st.setdefault("fans", {}).setdefault(str(n), {"role": "pompa"})["bios_curve"] = fan_points_raw(d, n)
+                save_settings(st)
     return lines
 
 
@@ -1974,15 +2001,38 @@ def cmd_fan(ctx, args):
             if abs(got - v) > FAN_STEP_TOL_MS:
                 raise Err("fan %d %s: scritto %d ma riletto %d" % (n, attr, v, got))
         return {"canale": n, "step": [hw_read("%s/pwm%d_step_up_time" % (d, n)), hw_read("%s/pwm%d_step_down_time" % (d, n))]}
-    if len(args) == 3 and args[1] == "pump":
+    if len(args) in (3, 4) and args[1] == "pump":
         if fan_role(n) != "pompa":
             raise Err("canale %d non è classificato 'pompa' (ruolo '%s')" % (n, fan_role(n)))
-        if args[2] == "auto":
+        if args[2:] == ["auto"]:
             if ctx.get("dry"):
                 return {"canale": n, "pump": "auto"}
-            enable = load_settings().get("fans", {}).get(str(n), {}).get("enable_auto", 5)
-            hw_write("%s/pwm%d_enable" % (d, n), enable)       # torna alla SmartFan del BIOS
-            return {"canale": n, "pump": "auto", "modo": hw_read("%s/pwm%d_enable" % (d, n))}
+            st = load_settings()
+            ps = st.setdefault("fans", {}).setdefault(str(n), {"role": "pompa"})
+            if ps.get("pump_max") and ps.get("bios_curve"):   # toglie il tetto: curva del BIOS
+                fan_points_write(d, n, [tuple(p) for p in ps["bios_curve"]])
+            ps.pop("pump_max", None)
+            save_settings(st)
+            hw_write("%s/pwm%d_enable" % (d, n), ps.get("enable_auto", 5))   # torna alla SmartFan del BIOS
+            return {"canale": n, "pump": "auto", "modo": hw_read("%s/pwm%d_enable" % (d, n)), "curva": fan_info(d, n)["curva"]}
+        if len(args) == 4 and args[2] == "max":
+            cap = to_int(args[3], "tetto pompa %")
+            check_range("tetto pompa", cap, FAN_PUMP_MIN_PCT, 100, " %")
+            if ctx.get("dry"):
+                return {"canale": n, "pump_max": cap}
+            st = load_settings()
+            ps = st.setdefault("fans", {}).setdefault(str(n), {"role": "pompa"})
+            if hw_read("%s/pwm%d_enable" % (d, n)) == 1:          # da velocità fissa a curva del BIOS col tetto
+                hw_write("%s/pwm%d_enable" % (d, n), ps.get("enable_auto", 5))
+            if not ps.get("pump_max") or not ps.get("bios_curve"):
+                ps["bios_curve"] = fan_points_raw(d, n)              # la curva attuale è quella del BIOS
+            cap_pwm = round(cap * 255 / 100)
+            fan_points_write(d, n, [(t, min(pw, cap_pwm)) for t, pw in ps["bios_curve"]])
+            ps["pump_max"] = cap
+            save_settings(st)
+            return {"canale": n, "pump_max": cap, "curva": fan_info(d, n)["curva"]}
+        if len(args) != 3:
+            raise Err("uso: fan <N> pump auto | fan <N> pump max <50-100> | fan <N> pump <50-100>")
         pct = to_int(args[2], "pompa %")
         check_range("pompa", pct, FAN_PUMP_MIN_PCT, 100, " %")
         if ctx.get("dry"):
@@ -1998,6 +2048,9 @@ def cmd_fan(ctx, args):
         got = hw_read("%s/pwm%d" % (d, n))
         if abs(got - pwm) > FAN_PUMP_TOL:
             raise Err("pompa %d: scritto pwm %d ma riletto %d" % (n, pwm, got))
+        st = load_settings()
+        if st.get("fans", {}).get(str(n), {}).pop("pump_max", None) is not None:
+            save_settings(st)
         return {"canale": n, "pump": pct, "pwm": got, "rpm": hw_read("%s/fan%d_input" % (d, n))}
     if len(args) >= 3 and args[1] == "curve":
         pts = []
@@ -2025,7 +2078,7 @@ def cmd_fan(ctx, args):
             hw_write("%s/pwm%d_auto_point%d_temp" % (d, n, i), t * 1000)
             hw_write("%s/pwm%d_auto_point%d_pwm" % (d, n, i), pw)
         return {"canale": n, "curva": fan_info(d, n)["curva"]}
-    raise Err("uso: fan <N> step <su_ms> <giù_ms> | fan <N> curve t:pwm … | fan <N> pump auto|<50-100>")
+    raise Err("uso: fan <N> step <su_ms> <giù_ms> | fan <N> curve t:pwm … | fan <N> pump auto|max <50-100>|<50-100>")
 
 
 def fan_enable(ctx):
@@ -2439,6 +2492,17 @@ def selftest():
     assert run(["profile", "save", "pp", "fan 2 pump 70"])["lines"] == 1 and run(["apply", "pp"])["applied"] == ["fan 2 pump 70"]
     run(["fan", "2", "pump", "auto"])
     run(["profile", "delete", "pp"])
+    # tetto massimo: curva del BIOS con i punti sopra il tetto ridotti; auto la ripristina
+    expect_err(["fan", "2", "pump", "max", "30"], "fuori")
+    r = run(["fan", "2", "pump", "max", "60"])
+    assert r["curva"] == ["40:77", "50:110", "60:150", "70:153", "80:153"], r
+    assert "fan 2 pump max 60" in fan_capture_lines() and run(["fan", "status"])["canali"][1]["pump_max"] == 60
+    assert hw_read(Fake.FAN_DIR + "/pwm2_enable") == 5
+    r = run(["fan", "2", "pump", "max", "80"])                 # tetto diverso: dalla curva BIOS memorizzata
+    assert r["curva"] == ["40:77", "50:110", "60:150", "70:200", "80:204"], r
+    r = run(["fan", "2", "pump", "auto"])
+    assert r["curva"] == ["40:77", "50:110", "60:150", "70:200", "80:255"] and "pump_max" not in run(["fan", "status"])["canali"][1]
+    assert "fan 2 pump auto" in fan_capture_lines()
     expect_err(["profile", "save", "f", "fan autodetect"], "non ammesso")
     expect_err(["profile", "save", "f", "fan 2 step 10000 5000"], "pompa")
     assert run(["profile", "save", "f", "fan 1 step 12000 6000", "ppt 150"])["lines"] == 2
