@@ -37,10 +37,13 @@ PARAM_HELP = {"ppt": "Potenza massima del package (Package Power Tracking): più
               "edc": "Corrente massima di picco (Electrical Design Current) fornita dai VRM",
               "fmax": "Frequenza massima di boost: abbassarla taglia i picchi di temperatura con poca perdita",
               "tjmax": "Temperatura a cui la CPU rallenta per restare entro il limite",
-              "co": "Curve Optimizer: offset di tensione del core, negativo = meno tensione e calore; troppo negativo = instabilità"}
+              "co": None}   # riempito sotto con CO_TIP
+CO_TIP = ("Curve Optimizer: offset per core della curva tensione/frequenza. Negativo = meno tensione a parità di frequenza "
+          "(meno calore e consumo, boost più alto); troppo negativo = instabilità o riavvio. Unità: passi di circa 3–5 mV.")
+PARAM_HELP["co"] = CO_TIP
 CPU_HELP = ("PPT: potenza massima del package · TDC/EDC: corrente sostenuta/di picco · FMax: frequenza massima di boost · "
             "Tjmax: temperatura a cui la CPU rallenta. Trascina lo slider o scrivi il numero, poi \"Applica ora\".")
-CO_HELP = ("Curve Optimizer: offset di tensione per core, negativo = meno tensione e calore (troppo basso = instabilità). "
+CO_HELP = ("CO (Curve Optimizer): " + CO_TIP.split(": ", 1)[1] + " Trascina lo slider o scrivi il numero, poi \"Applica ora\". "
            "Il Curve Shaper è sperimentale su questa piattaforma: va impostato dal BIOS.")
 UNLOCK_WARNING = ("Verranno ammessi PPT, TDC ed EDC oltre i valori di fabbrica e FMax oltre la baseline "
                   "(fino ai tetti di sblocco di ryzenctl). Più calore e consumo, possibili riavvii "
@@ -51,15 +54,16 @@ AUTODETECT_WARNING = ("Ogni canale con giri > 0 viene portato a un PWM ridotto p
 FAN_MISSING_HELP = ("Il chip Super I/O (nct67xx) non è visibile in hwmon. \"Abilita\" carica il modulo nct6775 e lo "
                     "rende permanente; se il chip non compare per un conflitto ACPI, aggiunge il parametro kernel "
                     "acpi_enforce_resources=lax e chiede il riavvio.")
-# Parametri della calibrazione (autotune): chiave, titolo, unità, range ammesso, default per modalità
-AT_PARAMS = (("target", "Tctl obiettivo", "°C", (50, 90), {"eco": 70, "auto": 70}),
-             ("colimit", "Limite CO", "", (-50, 0), {"eco": -25, "auto": -40}),
-             ("margin", "Margine di sicurezza", "", (0, 20), {"eco": 5, "auto": 3}),
-             ("step", "Durata di ogni test", "s", (30, 600), {"eco": 90, "auto": 90}))
-AT_WARNING = ("Durata stimata 25–40 minuti (Eco). Ogni core viene portato a CO sempre più negativo sotto carico "
-              "(stress-ng) finché resta stabile; poi una passata finale su tutti i core e, per Eco, la ricerca della "
-              "FMax che tiene Tctl sotto l'obiettivo. Un CO instabile può riavviare il PC all'improvviso: salva tutto "
-              "prima di iniziare. La macchina resta usabile ma rallentata; la calibrazione riprende da dove era.")
+# Parametri della calibrazione (autotune): chiave, titolo, unità, range ammesso. I default li dà `autotune estimate`.
+AT_PARAMS = (("target", "Tctl obiettivo", "°C", (50, 90)),
+             ("colimit", "Limite CO (Curve Optimizer)", "", (-50, 0)),
+             ("margin", "Margine di sicurezza", "", (0, 20)),
+             ("step", "Durata di ogni test", "s", (30, 600)))
+AT_WARNING = ("Ogni core viene portato a CO (Curve Optimizer) sempre più negativo sotto carico (stress-ng) finché resta "
+              "stabile; poi una passata finale su tutti i core e, per Eco, la ricerca della FMax che tiene Tctl sotto "
+              "l'obiettivo. Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. "
+              "La macchina resta usabile ma rallentata; la calibrazione riprende da dove era.")
+AT_PARALLEL_SUB = "Spento: un core alla volta, più lento (%s) ma attribuisce con certezza anche un riavvio"
 AT_PHASES = {"co": 0.6, "final": 0.7, "fmax": 1.0, "ppt": 0.85, "fmax_knee": 1.0}   # quota della barra a fine fase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 CSS = """
@@ -126,6 +130,14 @@ def bg(work, done, fail):
 
 def fmt(v, unit=""):
     return "n/d" if v is None else ("%g%s" if isinstance(v, (int, float)) else "%s%s") % (v, unit)
+
+
+def mins(seconds):
+    """Durata leggibile dalla stima in secondi: '~18 min' (arrotondata per eccesso), '0 min', 'n/d'."""
+    if seconds is None:
+        return "n/d"
+    m = -(-int(seconds) // 60)
+    return "~%d min" % m if m else "0 min"
 
 
 def button(label, cb, css=None):
@@ -213,7 +225,7 @@ def profile_table(lines, st):
                 chip.set_tooltip_text("core %d: fabbrica %s" % (c, fmt(bco[c])))
                 chip.add_css_class("chip")
                 chips.append(chip)
-        rows.append(("CO per core", chips))
+        rows.append(("CO (Curve Optimizer) per core", chips, CO_TIP))
     for n, f in sorted(v["fan"].items()):
         cur = fans.get(n, {})
         if "step" in f:
@@ -222,9 +234,9 @@ def profile_table(lines, st):
         if "curve" in f:
             rows.append(("Ventola %d curva" % n, diff_label(" ".join(cur["curva"]) if cur.get("curva") else None, f["curve"])))
     grid = Gtk.Grid(column_spacing=18, row_spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
-    for i, (title, w) in enumerate(rows):
-        grid.attach(label(title, ["dim-label"]), 0, i, 1, 1)
-        grid.attach(w, 1, i, 1, 1)
+    for i, row in enumerate(rows):
+        grid.attach(label(row[0], ["dim-label"], tooltip_text=row[2] if len(row) > 2 else None), 0, i, 1, 1)
+        grid.attach(row[1], 1, i, 1, 1)
     if not rows:
         grid.attach(label("profilo vuoto", ["dim-label"]), 0, 0, 1, 1)
     return grid
@@ -340,8 +352,8 @@ class MonitorPage(Gtk.Box):
         mid = Gtk.Box(spacing=12, vexpand=True)
         table = card()
         grid = Gtk.Grid(column_spacing=18, row_spacing=4)
-        for col, h in enumerate(("Core", "MHz", "°C", "CO")):
-            grid.attach(label(h, ["heading"], xalign=1.0 if col else 0.0), col, 0, 1, 1)
+        for col, h in enumerate(("Core", "MHz", "°C", "CO (Curve Optimizer)")):
+            grid.attach(label(h, ["heading"], xalign=1.0 if col else 0.0, tooltip_text=CO_TIP if col == 3 else None), col, 0, 1, 1)
         self.cores = []
         for c in range(8):
             row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"], xalign=1.0) for _ in range(3)]
@@ -440,10 +452,15 @@ class AutotuneDialog(Adw.Dialog):
         self.running = self.aborting = False
         self.connect("close-attempt", lambda *_: self.win.toast("Calibrazione in corso: usa \"Interrompi\""))
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
-        self.phase = label("Avvio…", ["title-3"], wrap=True)
+        self.header = label("", ["dim-label"], wrap=True)
+        self.phase = label("Avvio…", ["title-3"], wrap=True, hexpand=True)
+        self.eta = label("", ["numeric"], xalign=1.0, valign=Gtk.Align.END)
+        top = Gtk.Box(spacing=12)
+        top.append(self.phase)
+        top.append(self.eta)
         self.progress = Gtk.ProgressBar(show_text=True)
         self.note = label("", ["warning"], wrap=True, visible=False)
-        for w in (self.phase, self.progress, self.note):
+        for w in (self.header, top, self.progress, self.note, label("CO (Curve Optimizer) per core", ["heading"], tooltip_text=CO_TIP)):
             body.append(w)
         grid = Gtk.Grid(column_spacing=18, row_spacing=4)
         for col, h in enumerate(("Core", "Ultimo stabile", "Instabile a", "Definitivo")):
@@ -501,7 +518,15 @@ class AutotuneDialog(Adw.Dialog):
         if st.get("resumed_after_crash"):
             self.note.set_text("Il sistema si è riavviato durante un test: quel passo è stato marcato instabile e la calibrazione è ripresa dal successivo.")
             self.note.set_visible(True)
-        if ph == "co":
+        eta = st.get("eta") or {}
+        if eta:
+            self.header.set_text("Avviata alle %s · stimati %s in totale" % (st.get("started", "")[-5:], mins(eta.get("total_s"))))
+            self.eta.set_text("Tempo rimanente stimato: %s" % mins(eta.get("remaining_s")))
+        if ph == "co" and st.get("parallel"):
+            levels = max(1, (-(p.get("colimit") or -5)) // 5)      # livelli di 5 (CO_STEP), come at_estimate in ryzenctl
+            self.phase.set_text("Livello CO %d: provo tutti i core insieme (ancora in prova: %d core)…" % (st["value"], len(st.get("active_cores", []))))
+            frac = AT_PHASES["co"] * max(0, (-st["value"]) // 5 - 1) / levels
+        elif ph == "co":
             self.phase.set_text("Core %d: provo CO %d…" % (st["core"], st["value"]))
             frac = (st["core"] + min(1.0, st["value"] / p["colimit"] if p.get("colimit") else 0)) / 8
         elif ph == "final":
@@ -554,7 +579,7 @@ class AutotuneDialog(Adw.Dialog):
             self.result.append(label("Profilo %s: fabbrica → calibrato" % self.mode, ["heading"]))
             self.result.append(profile_view(st["profile_lines"], self.win.status))
         elif st.get("final"):
-            self.result.append(label("CO definitivo (fabbrica → calibrato)", ["heading"]))
+            self.result.append(label("CO (Curve Optimizer) definitivo (fabbrica → calibrato)", ["heading"], tooltip_text=CO_TIP))
             self.result.append(profile_table(["co " + " ".join(str(v) for v in st["final"])], self.win.status))
         if st.get("fmax", {}).get("chosen") and not st.get("profile_lines"):
             self.result.append(label("FMax scelta: %d MHz" % st["fmax"]["chosen"], ["numeric"]))
@@ -669,40 +694,76 @@ class ModesPage(Adw.PreferencesPage):
             bg(lambda: self.win.h.call("preset", key, "show"), ask, lambda m: (self.win.toast(m), self.win.reload()))
 
     def calibrate(self, mode):
-        """Prima una scelta semplice: automatica con i default di AT_PARAMS, oppure i parametri a mano."""
-        dflt = {key: d[mode] for key, _, _, _, d in AT_PARAMS}
-        d = Adw.AlertDialog(heading="Calibrare la modalità %s?" % mode.capitalize(),
-                            body="Automatica: Tctl obiettivo %d °C, CO fino a %d con margine %d, %d s per test, durata stimata 25–40 min.\n\n%s"
-                                 % (dflt["target"], dflt["colimit"], dflt["margin"], dflt["step"], AT_WARNING))
-        d.add_response("cancel", "Annulla")
-        d.add_response("custom", "Scegli i valori…")
-        d.add_response("auto", "Automatica (consigliata)")
-        d.set_response_appearance("auto", Adw.ResponseAppearance.SUGGESTED)
-        def resp(_d, r):
-            if r == "auto":
-                AutotuneDialog(self.win, mode).start(dflt)
-            elif r == "custom":
-                self.calibrate_params(mode)
-        d.connect("response", resp)
-        d.present(self.win)
+        """Prima la stima (`autotune estimate`), poi una scelta semplice: automatica con i default di ryzenctl, o i parametri a mano."""
+        def ask(est):
+            p = est["params"]
+            d = Adw.AlertDialog(heading="Calibrare la modalità %s?" % mode.capitalize(),
+                                body="Automatica (consigliata): tutti i core insieme, %s — Tctl obiettivo %d °C, CO (Curve Optimizer) fino a %d "
+                                     "con margine %d, %d s per test.\n\n%s\n\n%s"
+                                     % (mins(est["parallel_total_s"]), p["target"], p["colimit"], p["margin"], p["step"], AT_WARNING, CO_TIP))
+            d.add_response("cancel", "Annulla")
+            d.add_response("custom", "Scegli i valori…")
+            d.add_response("auto", "Automatica (consigliata)")
+            d.set_response_appearance("auto", Adw.ResponseAppearance.SUGGESTED)
+            def resp(_d, r):
+                if r == "auto":
+                    AutotuneDialog(self.win, mode).start(dict(p, parallel=1))
+                elif r == "custom":
+                    self.calibrate_params(mode, est)
+            d.connect("response", resp)
+            d.present(self.win)
+        bg(lambda: self.win.h.call("autotune", "estimate", mode), ask, self.win.toast)
 
-    def calibrate_params(self, mode):
-        """Parametri (range dalla tabella AT_PARAMS) → autotune start → finestra di avanzamento."""
+    def calibrate_params(self, mode, est):
+        """Parametri (range da AT_PARAMS, default da ryzenctl) con stima che segue le modifiche → autotune start → avanzamento."""
         group = Adw.PreferencesGroup()
         spins = {}
-        for key, title, unit, (lo, hi), defaults in AT_PARAMS:
+        for key, title, unit, (lo, hi) in AT_PARAMS:
             r = Adw.SpinRow.new_with_range(lo, hi, 1)
             r.set_title(title + (" (%s)" % unit if unit else ""))
-            r.set_value(defaults[mode])
+            r.set_value(est["params"][key])
             spins[key] = r
             group.add(r)
-        d = Adw.AlertDialog(heading="Parametri della calibrazione %s" % mode.capitalize(), body=AT_WARNING, extra_child=group)
+        parallel = Adw.SwitchRow(title="Test di tutti i core insieme (veloce, consigliato)", active=bool(est["params"].get("parallel", 1)))
+        group.add(parallel)
+        estimate = label("", ["heading"], margin_top=6)
+        params = lambda: dict(((k, int(r.get_value())) for k, r in spins.items()), parallel=int(parallel.get_active()))
+        def show_est(e):
+            estimate.set_text("Durata stimata: %s" % mins(e["total_s"]))
+            parallel.set_subtitle(AT_PARALLEL_SUB % mins(e["sequential_total_s"]))
+        pending = {"timer": 0, "seq": 0}
+        def refresh_est():
+            pending["timer"] = 0
+            pending["seq"] += 1
+            seq = pending["seq"]
+            def got(e):
+                if seq == pending["seq"]:   # solo l'ultima stima richiesta
+                    show_est(e)
+            argv = ["autotune", "estimate", mode] + ["%s=%d" % kv for kv in params().items()]
+            bg(lambda: self.win.h.call(*argv), got, self.win.toast)
+            return False
+        def changed(*_):   # debounce: una stima dopo 400 ms di quiete
+            if pending["timer"]:
+                GLib.source_remove(pending["timer"])
+            pending["timer"] = GLib.timeout_add(400, refresh_est)
+        for r in spins.values():
+            r.connect("notify::value", changed)
+        parallel.connect("notify::active", changed)
+        show_est(est)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        box.append(group)
+        box.append(estimate)
+        d = Adw.AlertDialog(heading="Parametri della calibrazione %s" % mode.capitalize(), body=AT_WARNING, extra_child=box)
+        d.spins, d.parallel, d.estimate = spins, parallel, estimate   # raggiungibili dalle prove pilotate
         d.add_response("cancel", "Annulla")
         d.add_response("start", "Avvia")
         d.set_response_appearance("start", Adw.ResponseAppearance.DESTRUCTIVE)
         def resp(_d, r):
+            if pending["timer"]:
+                GLib.source_remove(pending["timer"])
+                pending["timer"] = 0
             if r == "start":
-                AutotuneDialog(self.win, mode).start({k: int(s.get_value()) for k, s in spins.items()})
+                AutotuneDialog(self.win, mode).start(params())
         d.connect("response", resp)
         d.present(self.win)
 
@@ -808,7 +869,7 @@ class CurvePage(Page):
     def __init__(self, win):
         super().__init__(win, CO_HELP)
         self.loading = False
-        self.all = Param("Tutti", "")
+        self.all = Param("Tutti", "", tooltip=CO_TIP)
         self.all.adj.connect("value-changed", self.on_all)
         self.body.append(self.all)
         self.body.append(Gtk.Separator())
@@ -1022,8 +1083,10 @@ class Window(Adw.ApplicationWindow):
 
     def ask_resume(self, at):
         d = Adw.AlertDialog(heading="Calibrazione interrotta",
-                            body="Una calibrazione %s iniziata il %s è rimasta a metà (fase %s, core %s). Riprenderla da dove era "
-                                 "o annullarla riportando la CPU ai valori di fabbrica?" % (at.get("mode", "?").capitalize(), at.get("started", "?"), at.get("phase"), at.get("core")))
+                            body="Una calibrazione %s iniziata il %s è rimasta a metà (fase %s, %s). Riprenderla da dove era "
+                                 "o annullarla riportando la CPU ai valori di fabbrica?" % (
+                                     at.get("mode", "?").capitalize(), at.get("started", "?"), at.get("phase"),
+                                     "livello CO %s" % at.get("value") if at.get("parallel") else "core %s" % at.get("core")))
         d.add_response("abort", "Annulla calibrazione")
         d.add_response("resume", "Riprendi")
         d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)

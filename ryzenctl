@@ -985,7 +985,8 @@ def at_estimate(st):
     if st["mode"] == "eco" and ph in ("co", "final", "fmax"):
         n = AT_FMAX_TESTS_EST
         if ph == "fmax" and st["fmax"].get("current"):
-            n = min(n, max(1, (st["fmax"]["current"] - FMAX_SWEEP_MIN) // FMAX_STEP + 1))
+            possible = max(1, (st["fmax"]["current"] - FMAX_SWEEP_MIN) // FMAX_STEP + 1)
+            n = min(possible, max(1, AT_FMAX_TESTS_EST - len(st["fmax"]["tests"])))   # scende a ogni test
         rem += n * BURSTS * BURST_SEC
     if st["mode"] == "auto" and ph in ("co", "final", "ppt", "fmax_knee"):
         knee = st.get("knee", {})
