@@ -1,0 +1,4 @@
+# Il servizio gira a ogni boot per baseline e crash-guard; NON applica nulla finché
+# l'utente non attiva "Applica all'avvio" (ryzenctl autostart on).
+enable ryzenctl.service
+enable ryzenctl-resume.service

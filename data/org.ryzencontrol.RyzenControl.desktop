@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Ryzen Control
+Comment=Curve Optimizer, limiti PBO, boost e ventole del processore Ryzen
+Exec=ryzen-control
+Icon=org.ryzencontrol.RyzenControl
+Terminal=false
+Categories=Settings;HardwareSettings;
+Keywords=ryzen;cpu;undervolt;pbo;curve;ventole;
