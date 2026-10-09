@@ -779,8 +779,12 @@ def cmd_notify(ctx, args):
     if info:
         msg = "Il profilo '%s' è stato disattivato: il sistema è andato in crash (%s). Apri Ryzen Control per decidere." % (
             info.get("profile") or "-", info.get("time", "?"))
-        subprocess.run(["notify-send", "-u", "critical", "-a", "Ryzen Control", "Ryzen Control", msg],
-                       capture_output=True)
+        if FAKE:  # il selftest gira nella sessione dell'utente: niente notifiche vere
+            FAKE.s["notified"] = msg
+            FAKE.save()
+        else:
+            subprocess.run(["notify-send", "-u", "critical", "-a", "Ryzen Control", "Ryzen Control", msg],
+                           capture_output=True)
     return {"crashed": info}
 
 
@@ -1012,7 +1016,7 @@ def selftest():
     assert out["crashed"] and out["crashed"]["profile"] == "quiet" and exists("crashed")
     assert "crash" in out["errors"]["cpu"] and run(["status"])["limits"]["ppt"] == 162.0
     assert exists("dirty") and not exists("active")
-    assert run(["notify"])["crashed"]["profile"] == "quiet"
+    assert run(["notify"])["crashed"]["profile"] == "quiet" and "quiet" in FAKE.s["notified"]
     # 3b. crash di nuovo mentre nulla è applicato: resta il crashed di prima, nessun nuovo active
     reboot()
     out = run(["boot"])
