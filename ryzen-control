@@ -199,22 +199,6 @@ def at_sample(st, c, level=None):
     return best[1:] if best else None
 
 
-def at_slope(st):
-    """mV per passo di CO misurati su questa CPU: media su core e livelli di (V0 − Vlivello)/|livello|;
-    None con meno di due livelli campionati."""
-    ref = (st.get("samples", {}).get("0") or {}).get("volt") or []
-    vals, levels = [], set()
-    for lvl, smp in st.get("samples", {}).items():
-        v = int(lvl)
-        if v == 0:
-            continue
-        for c, volt in enumerate(smp.get("volt") or []):
-            if volt is not None and c < len(ref) and ref[c] is not None and at_tested(st, c, v):
-                vals.append((ref[c] - volt) / abs(v) * 1000)
-                levels.add(v)
-    return sum(vals) / len(vals) if len(levels) >= 2 and vals else None
-
-
 def button(label, cb, css=None):
     b = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
     if css:
@@ -808,7 +792,7 @@ class AutotuneDialog(Adw.Window):
             first = tests[0][0] if tests else f
             frac = AT_PHASES["final"] + (AT_PHASES["fmax"] - AT_PHASES["final"]) * ((first - f) / max(1, first - 4000) if f else 0)
         elif ph == "bench":                       # Boost: un solo passo, prestazioni a fabbrica e in boost
-            self.phase.set_text("Misuro le prestazioni a fabbrica e in boost (MT e ST)…")
+            self.phase.set_text("Misuro le prestazioni a fabbrica e in boost (MT e ST)…" + self.load_text(st))
             frac = (AT_PHASES["final"] + AT_PHASES["bench"]) / 2
         elif ph in ("ppt", "fmax_knee"):          # Auto: ginocchio prestazioni/watt
             k = st.get("knee", {}).get("ppt" if ph == "ppt" else "fmax", {})
@@ -816,10 +800,10 @@ class AutotuneDialog(Adw.Window):
             unit = "W" if ph == "ppt" else "MHz"
             if tests:
                 last = tests[-1]
-                self.phase.set_text("%s %s %s: %.0f op/s a %.0f W → provo %s %s…" % (
-                    "PPT" if ph == "ppt" else "FMax", last[0], unit, last[1], last[2], cur, unit))
+                self.phase.set_text("%s %s %s: %.0f op/s a %.0f W → provo %s %s…%s" % (
+                    "PPT" if ph == "ppt" else "FMax", last[0], unit, last[1], last[2], cur, unit, self.load_text(st)))
             else:
-                self.phase.set_text("%s %s %s: misuro prestazioni e potenza…" % ("PPT" if ph == "ppt" else "FMax", cur, unit))
+                self.phase.set_text("%s %s %s: misuro prestazioni e potenza…%s" % ("PPT" if ph == "ppt" else "FMax", cur, unit, self.load_text(st)))
             lo, hi = (AT_PHASES["final"], AT_PHASES["ppt"]) if ph == "ppt" else (AT_PHASES["ppt"], AT_PHASES["fmax_knee"])
             frac = lo + (hi - lo) * min(1.0, len(tests) / 6.0)
         else:
@@ -849,7 +833,7 @@ class AutotuneDialog(Adw.Window):
                                    (cell["final"], "%d" % fin[c] if fin else None, "success")):
                 lab.set_markup("<b>%s</b>" % text if text and lab is cell["final"] else (text or "—"))
                 (lab.add_css_class if text else lab.remove_css_class)(cls)
-        slope = at_slope(st)
+        slope = st.get("mv_per_step")          # mediana delle pendenze per livello, calcolata da ryzenctl
         self.slope.set_visible(slope is not None)
         if slope is not None:
             self.slope.set_text("Misurato su questa CPU: ≈ %s mV per passo di CO" % ("%.1f" % slope).rstrip("0").rstrip(".").replace(".", ","))
@@ -862,6 +846,15 @@ class AutotuneDialog(Adw.Window):
                     text += ("\n" if text else "") + "Sweep %s:\n" % key.upper() + "\n".join(
                         "%s %s → %.0f op/s, %.0f W" % (t[0], unit, t[1], t[2]) for t in knee[key]["tests"])
         self.fmax.set_text(text)
+
+    @staticmethod
+    def load_method(st):
+        """Metodo stress-ng scelto da ryzenctl come più pesante su questa CPU (Auto: knee.method, Boost: method)."""
+        return (st.get("knee") or {}).get("method") or st.get("method")
+
+    def load_text(self, st):
+        m = self.load_method(st)
+        return " (carico: %s)" % m if m else ""
 
     @staticmethod
     def two_lines(pair, main, sub=None, sub_css=None):
@@ -912,6 +905,14 @@ class AutotuneDialog(Adw.Window):
         if knee and knee["ppt"].get("chosen"):
             self.result.append(label("Ginocchio prestazioni/watt: PPT %d W, FMax %d MHz (perdita massima %d %%)" % (
                 knee["ppt"]["chosen"], knee["fmax"]["chosen"] or 0, st.get("params", {}).get("loss", 0)), ["numeric"], wrap=True))
+        method = self.load_method(st)
+        if method:
+            self.result.append(label("Carico di prova: %s — quello che consuma di più su questa CPU" % method, ["dim-label"], wrap=True))
+        # ponytail: "sotto il limite" = oltre il 5 % in meno; i W della PM table oscillano di qualche unità intorno al limite
+        below = [t for t in (knee or {}).get("ppt", {}).get("tests", []) if len(t) >= 3 and t[2] < t[0] * 0.95]
+        if len(below) > 1:
+            self.result.append(label("Il carico di prova non ha raggiunto il limite di potenza impostato: il ginocchio vale per carichi di questa intensità",
+                                     ["warning"], wrap=True))
         self.abort_btn.set_visible(False)
         self.close_btn.set_visible(True)
         setattr(self, "closable", True)
