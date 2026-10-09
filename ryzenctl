@@ -8,10 +8,12 @@ un backend finto (stesso del selftest): nessun driver, nessun root.
 import fcntl
 import json
 import os
+import re
 import struct
 import subprocess
 import sys
 import tempfile
+import time
 
 # ---- Manopole di calibrazione (tutte qui, non sparpagliarle) -----------------------
 CORES = 8                      # 9800X3D: 1 CCD, 8 core, nessun core fuso
@@ -145,7 +147,7 @@ class Fake:
 
     def __init__(self):
         self.path = P("/fake_smu.json")
-        self.s = json.loads(open(self.path).read()) if os.path.exists(self.path) else dict(self.DEFAULT)
+        self.s = json.loads(open(self.path).read() if os.path.exists(self.path) else json.dumps(self.DEFAULT))
 
     def save(self):
         write_atomic(self.path, json.dumps(self.s))
@@ -566,6 +568,220 @@ def fmt_status(st):
     return "\n".join(lines)
 
 
+# ---- Profili -----------------------------------------------------------------------------
+PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "shaper", "power"}  # + fan (fase 2)
+NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+
+
+def profile_path(name):
+    if name == "baseline":
+        return P(STATE + "/baseline.conf")
+    if not NAME_RE.match(name):
+        raise Err("nome profilo non valido '%s' (solo a-z 0-9 _ -)" % name)
+    return P(ETC + "/profiles/" + name + ".conf")
+
+
+def profile_lines(name):
+    try:
+        return parse_lines(open(profile_path(name)).read())
+    except OSError:
+        raise Err("profilo '%s' inesistente" % name)
+
+
+def apply_lines(lines, ctx, part=None):
+    """Esegue le righe (part: 'cpu' | 'fan' | None=tutte). Si ferma al primo errore."""
+    done = []
+    for n, t in enumerate(lines, 1):
+        is_fan = t[0] == "fan"
+        if part == "fan" and not is_fan or part == "cpu" and is_fan:
+            continue
+        if t[0] not in PROFILE_CMDS:
+            raise Err("riga %d: '%s' non ammesso in un profilo" % (n, t[0]))
+        try:
+            run(t, ctx)
+        except Err as e:
+            raise Err("riga %d (%s): %s" % (n, " ".join(t), e))
+        done.append(" ".join(t))
+    return done
+
+
+def cmd_apply(ctx, args):
+    if len(args) not in (1, 2) or (len(args) == 2 and args[1] not in ("cpu", "fan")):
+        raise Err("uso: apply <profilo|baseline> [cpu|fan]")
+    return {"applied": apply_lines(profile_lines(args[0]), ctx, args[1] if len(args) == 2 else None)}
+
+
+def cmd_profile(ctx, args):
+    """profile list | show <n> | save <n> <riga>… | delete <n>"""
+    s = load_settings()
+    if args == ["list"]:
+        d = P(ETC + "/profiles")
+        names = sorted(f[:-5] for f in os.listdir(d) if f.endswith(".conf")) if os.path.isdir(d) else []
+        return {"profiles": names, "active": s["profile"]}
+    if len(args) == 2 and args[0] == "show":
+        return {"lines": [" ".join(t) for t in profile_lines(args[1])]}
+    if len(args) >= 2 and args[0] == "save":
+        name, path = args[1], profile_path(args[1])
+        if name == "baseline":
+            raise Err("'baseline' è riservato")
+        lines = parse_lines("\n".join(args[2:]))
+        apply_lines(lines, {"dry": True})          # valida tutto, non tocca l'hardware
+        write_atomic(path, "# profilo ryzenctl '%s'\n" % name + "\n".join(" ".join(t) for t in lines) + "\n")
+        return {"saved": name, "lines": len(lines)}
+    if len(args) == 2 and args[0] == "delete":
+        path = profile_path(args[1])
+        if args[1] == "baseline" or not os.path.exists(path):
+            raise Err("profilo '%s' inesistente o riservato" % args[1])
+        os.remove(path)
+        if s["profile"] == args[1]:
+            s["profile"] = None
+            save_settings(s)
+        return {"deleted": args[1]}
+    raise Err("uso: profile list | show <nome> | save <nome> <riga>… | delete <nome>")
+
+
+def cmd_use(ctx, args):
+    if len(args) != 1:
+        raise Err("uso: use <profilo>")
+    profile_lines(args[0])
+    s = load_settings()
+    s["profile"] = args[0]
+    save_settings(s)
+    return {"profile": args[0]}
+
+
+def cmd_autostart(ctx, args):
+    if args not in (["on"], ["off"]):
+        raise Err("uso: autostart on|off")
+    s = load_settings()
+    if args == ["on"] and not s["profile"]:
+        raise Err("nessun profilo selezionato (use <profilo>)")
+    s["autostart"] = args == ["on"]
+    save_settings(s)
+    return {"autostart": s["autostart"], "profile": s["profile"]}
+
+
+# ---- Crash-guard: marker dirty / active / crashed -----------------------------------------
+def marker(name):
+    return P(STATE + "/" + name)
+
+
+def rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def crashed_info():
+    try:
+        return json.loads(open(marker("crashed")).read())
+    except (OSError, ValueError):
+        return None
+
+
+def apply_autostart(ctx, parts):
+    """Applica il profilo di avvio (se attivo e non in stato crashed). Mai un'eccezione:
+    il servizio deve restare attivo perché ExecStop possa rimuovere `dirty`."""
+    s = load_settings()
+    out = {"profile": s["profile"], "autostart": s["autostart"], "crashed": crashed_info(), "applied": {}, "errors": {}}
+    if not (s["autostart"] and s["profile"]):
+        return out
+    for part in parts:
+        if part == "cpu" and out["crashed"]:
+            out["errors"][part] = "profilo CPU non applicato: crash nel boot precedente"
+            continue
+        try:
+            out["applied"][part] = apply_lines(profile_lines(s["profile"]), ctx, part)
+        except Err as e:
+            out["errors"][part] = str(e)
+    return out
+
+
+def cmd_boot(ctx, args):
+    os.makedirs(P(STATE), exist_ok=True)
+    os.makedirs(P(RUN), exist_ok=True)
+    out = {}
+    if os.path.exists(P(RUN + "/booted")):          # restart nello stesso boot: ExecStop ha tolto dirty
+        touch_sync(marker("dirty"))
+    else:
+        s = load_settings()
+        if os.path.exists(marker("dirty")) and os.path.exists(marker("active")):
+            write_atomic(marker("crashed"), json.dumps({"time": time.strftime("%Y-%m-%d %H:%M"),
+                                                        "profile": s["profile"]}))
+        rm(marker("active"))
+        touch_sync(marker("dirty"))                 # prima di qualunque scrittura SMU
+        touch_sync(P(RUN + "/booted"))
+        try:
+            cmd_baseline(ctx, [])
+        except Err as e:
+            out["baseline_error"] = str(e)
+    out.update(apply_autostart(ctx, ("fan", "cpu")))
+    return out
+
+
+def cmd_shutdown(ctx, args):
+    rm(marker("dirty"))
+    return {"dirty": False}
+
+
+def cmd_resume(ctx, args):
+    return apply_autostart(ctx, ("fan", "cpu"))
+
+
+def cmd_default(ctx, args):
+    done = apply_lines(profile_lines("baseline"), ctx)
+    rm(marker("active"))
+    s = load_settings()
+    s["autostart"] = False
+    save_settings(s)
+    return {"applied": done, "autostart": False}
+
+
+def cmd_crashed(ctx, args):
+    if args == ["clear"]:
+        rm(marker("crashed"))
+        return {"crashed": None}
+    if args:
+        raise Err("uso: crashed [clear]")
+    return {"crashed": crashed_info()}
+
+
+def cmd_notify(ctx, args):
+    """Da autostart XDG dell'utente: avvisa se il boot precedente è finito con un crash."""
+    info = crashed_info()
+    if info:
+        msg = "Il profilo '%s' è stato disattivato: il sistema è andato in crash (%s). Apri Ryzen Control per decidere." % (
+            info.get("profile") or "-", info.get("time", "?"))
+        subprocess.run(["notify-send", "-u", "critical", "-a", "Ryzen Control", "Ryzen Control", msg],
+                       capture_output=True)
+    return {"crashed": info}
+
+
+# ---- serve: protocollo per la GUI (una riga JSON per richiesta e per risposta) ---------
+SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}
+
+
+def cmd_serve(ctx, args):
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            argv = json.loads(line)
+            if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv) or not argv:
+                raise Err("richiesta non valida: atteso un array JSON di stringhe")
+            if argv[0] in SERVE_DENY:
+                raise Err("comando '%s' non disponibile via serve" % argv[0])
+            reply = {"ok": True, "data": run(argv)}
+        except Err as e:
+            reply = {"ok": False, "error": str(e)}
+        except Exception as e:  # mai morire su un bug: la GUI mostra l'errore
+            reply = {"ok": False, "error": "interno: %r" % e}
+        sys.stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
 # ---- Dispatcher ------------------------------------------------------------------------
 COMMANDS = {
     "status": cmd_status, "baseline": cmd_baseline, "co": cmd_co,
@@ -574,6 +790,9 @@ COMMANDS = {
     "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
     "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
     "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "unlock": cmd_unlock,
+    "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
+    "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
+    "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve,
 }
 FORMAT = {"status": fmt_status}
 
@@ -677,6 +896,138 @@ def selftest():
     FAKE.save()
     # baseline non si ricattura con stato modificato
     expect_err(["baseline"], "già modificato")
+
+    # ---- profili ----
+    expect_err(["profile", "save", "Bad Name", "ppt 150"], "non valido")
+    expect_err(["profile", "save", "baseline", "ppt 150"], "riservato")
+    expect_err(["profile", "save", "q", "ppt 500"], "riga 1")
+    expect_err(["profile", "save", "q", "boot"], "non ammesso")
+    assert run(["profile", "save", "quiet", "ppt 150", "co all -10", "# commento", "fmax 5000", "power balanced"])["lines"] == 4
+    assert run(["profile", "list"]) == {"profiles": ["quiet"], "active": None}
+    assert run(["profile", "show", "quiet"])["lines"][0] == "ppt 150"
+    expect_err(["apply", "nope"], "inesistente")
+    expect_err(["autostart", "on"], "nessun profilo")
+    assert run(["use", "quiet"]) == {"profile": "quiet"}
+
+    # ---- crash-guard ----
+    def reboot():
+        """Riavvio simulato: /run svuotato, SMU torna ai valori BIOS."""
+        for f in os.listdir(P(RUN)):
+            os.remove(P(RUN + "/" + f))
+        FAKE.s.update({k: Fake.DEFAULT[k] for k in ("co", "fmax", "ppt", "tdc", "edc", "thm", "shaper")})
+        FAKE.s["co"] = list(Fake.DEFAULT["co"])
+        FAKE.s["shaper"] = list(Fake.DEFAULT["shaper"])
+        FAKE.save()
+
+    def exists(name):
+        return os.path.exists(marker(name))
+
+    # 1. primo boot (dirty mai esistito): marker a posto, nulla applicato
+    reboot()
+    out = run(["boot"])
+    assert exists("dirty") and not exists("active") and not exists("crashed") and out["applied"] == {}
+    assert os.path.exists(P(RUN + "/booted")) and run(["status"])["baseline_fresh"]
+    # 2. modifica a runtime, spegnimento pulito → nessun crash
+    run(["ppt", "150"])
+    assert exists("active")
+    run(["shutdown"])
+    assert not exists("dirty")
+    reboot()
+    out = run(["boot"])
+    assert not exists("crashed") and run(["status"])["limits"]["ppt"] == 162.0
+    # 3. profilo con autostart, poi crash → al boot niente CPU, marker crashed
+    run(["autostart", "on"])
+    run(["apply", "quiet"])
+    assert run(["status"])["limits"]["ppt"] == 150.0 and exists("active")
+    reboot()                                           # nessun shutdown = crash
+    out = run(["boot"])
+    assert out["crashed"] and out["crashed"]["profile"] == "quiet" and exists("crashed")
+    assert "crash" in out["errors"]["cpu"] and run(["status"])["limits"]["ppt"] == 162.0
+    assert exists("dirty") and not exists("active")
+    assert run(["notify"])["crashed"]["profile"] == "quiet"
+    # 3b. crash di nuovo mentre nulla è applicato: resta il crashed di prima, nessun nuovo active
+    reboot()
+    out = run(["boot"])
+    assert out["crashed"]["profile"] == "quiet" and not exists("active")
+    # "Resta su Default"
+    run(["crashed", "clear"])
+    run(["autostart", "off"])
+    reboot()
+    out = run(["boot"])
+    assert not exists("crashed") and out["applied"] == {} and run(["status"])["limits"]["ppt"] == 162.0
+    # 4. "Riattiva": applicato subito e a ogni boot pulito
+    run(["autostart", "on"])
+    out = run(["apply", "quiet"])
+    assert out["applied"][0] == "ppt 150"
+    run(["shutdown"])
+    reboot()
+    out = run(["boot"])
+    assert out["applied"]["cpu"] and run(["status"])["limits"]["ppt"] == 150.0 and run(["status"])["co"] == [-10] * CORES
+    assert not exists("crashed")
+    # ordine dei marker: a ogni scrittura SMU del boot dirty e active erano già presenti
+    assert all(e["dirty"] and e["active"] for e in FAKE.s["log"][-3:])
+    # 5. restart nello stesso boot: ExecStop toglie dirty, boot lo rimette, active e baseline restano
+    run(["shutdown"])
+    out = run(["boot"])
+    assert exists("dirty") and exists("active") and run(["baseline", "show"])["ppt"] == 162
+    reboot()                                           # crash dopo il restart → rilevato
+    assert run(["boot"])["crashed"]
+    run(["crashed", "clear"])
+    # 6. resume: riapplica solo senza crashed
+    reboot()
+    run(["boot"])
+    run(["ppt", "162"])
+    assert run(["resume"])["applied"]["cpu"] and run(["status"])["limits"]["ppt"] == 150.0
+    write_atomic(marker("crashed"), json.dumps({"time": "x", "profile": "quiet"}))
+    run(["ppt", "162"])
+    assert "crash" in run(["resume"])["errors"]["cpu"] and run(["status"])["limits"]["ppt"] == 162.0
+    run(["crashed", "clear"])
+    # 7. default: tutto a baseline, active via, autostart off; un crash dopo non è colpa nostra
+    run(["apply", "quiet"])
+    out = run(["default"])
+    assert not out["autostart"] and not exists("active")
+    st = run(["status"])
+    assert st["limits"]["ppt"] == 162.0 and st["co"] == [0] * CORES and st["fmax"] == 5225
+    assert st["power"] == run(["baseline", "show"])["power"]
+    reboot()
+    assert not run(["boot"])["crashed"]
+    # 8. boot non muore se l'apply fallisce (PM table assente): errore riportato, unit resta attiva
+    run(["use", "quiet"])
+    run(["autostart", "on"])
+    FAKE.s["pm_version"] = 0
+    FAKE.save()
+    reboot()
+    out = run(["boot"])
+    assert "PM table" in out["errors"]["cpu"] and "baseline_error" not in out
+    FAKE.s["pm_version"] = 0x620105
+    FAKE.save()
+    run(["autostart", "off"])
+    # 9. boot con SMU assente: baseline_error, nessuna eccezione
+    FAKE.s["codename"] = 0
+    FAKE.save()
+    reboot()
+    out = run(["boot"])
+    assert "baseline_error" in out
+    FAKE.s["codename"] = GRANITE_RIDGE
+    FAKE.save()
+    reboot()
+    run(["boot"])
+
+    # ---- serve ----
+    import io
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin = io.StringIO('["status"]\n["ppt","500"]\n["boot"]\nnon json\n["co","7","-3"]\n')
+    sys.stdout = io.StringIO()
+    try:
+        run(["serve"])
+        replies = [json.loads(l) for l in sys.stdout.getvalue().splitlines()]
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+    assert replies[0]["ok"] and replies[0]["data"]["fmax"] == 5225
+    assert not replies[1]["ok"] and "fuori" in replies[1]["error"]
+    assert not replies[2]["ok"] and "serve" in replies[2]["error"]
+    assert not replies[3]["ok"]
+    assert replies[4]["ok"] and replies[4]["data"]["co"][7] == -3
     print("selftest ok (%s)" % ROOT)
 
 
@@ -689,6 +1040,8 @@ def main():
     except Err as e:
         print("errore: %s" % e, file=sys.stderr)
         sys.exit(1)
+    if argv[0] in ("boot", "resume") and result.get("errors") or result and result.get("baseline_error"):
+        print("ryzenctl %s: %s" % (argv[0], json.dumps(result, ensure_ascii=False)), file=sys.stderr)
     if argv[0] in FORMAT:
         print(FORMAT[argv[0]](result))
     elif isinstance(result, str):
