@@ -140,6 +140,51 @@ def mins(seconds):
     return "~%d min" % m if m else "0 min"
 
 
+def volts(v, unit=" V"):
+    """Tensione leggibile con la virgola decimale: '1,245 V'; 'n/d' se assente."""
+    return "n/d" if v is None else ("%.3f" % v).replace(".", ",") + unit
+
+
+def at_tested(st, c, level):
+    """Il core c è stato davvero provato al livello di CO `level`? In parallelo i campioni riportano
+    anche i core già usciti dalla prova, fermi al loro ultimo CO stabile: vanno ignorati."""
+    u = st.get("unstable", {}).get(str(c))
+    if u:
+        return level >= u["value"]
+    r = st.get("results", {}).get(str(c))
+    return r is not None and level >= r
+
+
+def at_sample(st, c, level=None):
+    """(livello, V) misurati sul core c: al livello più vicino a `level`, o al più profondo se None."""
+    best = None
+    for lvl, smp in st.get("samples", {}).items():
+        v = int(lvl)
+        volt = (smp.get("volt") or [None] * 8)[c] if c < len(smp.get("volt") or []) else None
+        if v == 0 or volt is None or not at_tested(st, c, v):
+            continue
+        key = abs(v - level) if level is not None else v
+        if best is None or key < best[0]:
+            best = (key, v, volt)
+    return (best[1], best[2]) if best else None
+
+
+def at_slope(st):
+    """mV per passo di CO misurati su questa CPU: media su core e livelli di (V0 − Vlivello)/|livello|;
+    None con meno di due livelli campionati."""
+    ref = (st.get("samples", {}).get("0") or {}).get("volt") or []
+    vals, levels = [], set()
+    for lvl, smp in st.get("samples", {}).items():
+        v = int(lvl)
+        if v == 0:
+            continue
+        for c, volt in enumerate(smp.get("volt") or []):
+            if volt is not None and c < len(ref) and ref[c] is not None and at_tested(st, c, v):
+                vals.append((ref[c] - volt) / abs(v) * 1000)
+                levels.add(v)
+    return sum(vals) / len(vals) if len(levels) >= 2 and vals else None
+
+
 def button(label, cb, css=None):
     b = Gtk.Button(label=label, valign=Gtk.Align.CENTER)
     if css:
@@ -260,7 +305,7 @@ class Param(Gtk.Box):
         self.unit, self.read = unit, None
         self.adj = Gtk.Adjustment(lower=0, upper=1, step_increment=1, page_increment=5)
         self.append(label(title, ["heading"], width_chars=9))
-        self.info = label("", ["dim-label", "numeric"], width_chars=16, visible=info)
+        self.info = label("", ["dim-label", "numeric"], width_chars=26, visible=info)
         self.append(self.info)
         self.scale = Gtk.Scale(adjustment=self.adj, hexpand=True, draw_value=True, digits=0, value_pos=Gtk.PositionType.TOP)
         self.append(self.scale)
@@ -354,11 +399,12 @@ class MonitorPage(Gtk.Box):
         mid = Gtk.Box(spacing=12, vexpand=True)
         table = card()
         grid = Gtk.Grid(column_spacing=18, row_spacing=4)
-        for col, h in enumerate(("Core", "MHz", "°C", "CO (Curve Optimizer)")):
-            grid.attach(label(h, ["heading"], xalign=1.0 if col else 0.0, tooltip_text=CO_TIP if col == 3 else None), col, 0, 1, 1)
+        tips = {3: "Tensione del core a questo istante (PM table)", 4: CO_TIP}
+        for col, h in enumerate(("Core", "MHz", "°C", "V", "CO (Curve Optimizer)")):
+            grid.attach(label(h, ["heading"], xalign=1.0 if col else 0.0, tooltip_text=tips.get(col)), col, 0, 1, 1)
         self.cores = []
         for c in range(8):
-            row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"], xalign=1.0) for _ in range(3)]
+            row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"], xalign=1.0) for _ in range(4)]
             for col, lab in enumerate(row):
                 grid.attach(lab, col, c + 1, 1, 1)
             self.cores.append(row[1:])
@@ -405,7 +451,8 @@ class MonitorPage(Gtk.Box):
             d = t["cores"][c] if c < len(t["cores"]) else {}
             labs[0].set_text(fmt(d.get("mhz")))
             labs[1].set_text(fmt(d.get("temp")))
-            labs[2].set_text("%+d" % d["co"] if d.get("co") is not None else "n/d")
+            labs[2].set_text(volts(d.get("volt"), ""))
+            labs[3].set_text("%+d" % d["co"] if d.get("co") is not None else "n/d")
         for f in t["fans"]:
             lab = self.fan_labels.get(f["canale"])
             if lab is None:
@@ -464,16 +511,32 @@ class AutotuneDialog(Adw.Dialog):
         self.note = label("", ["warning"], wrap=True, visible=False)
         for w in (self.header, top, self.progress, self.note, label("CO (Curve Optimizer) per core", ["heading"], tooltip_text=CO_TIP)):
             body.append(w)
-        grid = Gtk.Grid(column_spacing=18, row_spacing=4)
-        for col, h in enumerate(("Core", "Ultimo stabile", "Instabile a", "Definitivo")):
-            grid.attach(label(h, ["heading"]), col, 0, 1, 1)
+        grid = Gtk.Grid(column_spacing=14, row_spacing=4)
+        heads = (("Core", None), ("Fabbrica", "CO di fabbrica; sotto, la tensione di riferimento misurata all'avvio con lo stesso carico"),
+                 ("In prova", "Livello di CO in prova sul core; sotto, l'ultima tensione misurata a pieno carico e la differenza dal riferimento"),
+                 ("Ultimo stabile", None), ("Instabile a", None), ("Definitivo", None))
+        for col, (h, tip) in enumerate(heads):
+            grid.attach(label(h, ["heading"], tooltip_text=tip), col, 0, 1, 1)
         self.cells = []
         for c in range(8):
-            row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"]) for _ in range(3)]
-            for col, lab in enumerate(row):
-                grid.attach(lab, col, c + 1, 1, 1)
-            self.cells.append(row[1:])
+            cell = {"core": label("%d" % c, ["numeric"], valign=Gtk.Align.START)}
+            boxes = []
+            for key in ("fab", "prova"):   # due righe: CO sopra, tensione sotto
+                cell[key] = (label("—", ["numeric"]), label("", ["numeric", "caption"], visible=False))
+                box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+                box.append(cell[key][0])
+                box.append(cell[key][1])
+                boxes.append(box)
+            for key in ("stable", "unstable", "final"):
+                cell[key] = label("—", ["numeric"], valign=Gtk.Align.START)
+            for col, w in enumerate([cell["core"]] + boxes + [cell["stable"], cell["unstable"], cell["final"]]):
+                grid.attach(w, col, c + 1, 1, 1)
+            self.cells.append(cell)
         body.append(grid)
+        body.append(label("Un passo di CO (Curve Optimizer) vale circa 3–5 mV di tensione in meno a parità di frequenza; "
+                          "qui vedi la tensione reale misurata a pieno carico per ogni livello.", ["dim-label", "caption"], wrap=True))
+        self.slope = label("", ["numeric"], visible=False)
+        body.append(self.slope)
         self.fmax = label("", ["numeric"], wrap=True)
         body.append(self.fmax)
         self.result = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -558,12 +621,28 @@ class AutotuneDialog(Adw.Dialog):
             frac = 1.0
         self.progress.set_fraction(max(0.0, min(1.0, frac)))
         res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
-        for c, cells in enumerate(self.cells):
-            for lab, text, css in ((cells[0], "%d" % res[str(c)] if str(c) in res else None, "success"),
-                                   (cells[1], "%d (%s)" % (uns[str(c)]["value"], uns[str(c)]["why"]) if str(c) in uns else None, "error"),
-                                   (cells[2], "%d" % fin[c] if fin else None, "success")):
-                lab.set_markup("<b>%s</b>" % text if text and lab is cells[2] else (text or "—"))
-                (lab.add_css_class if text else lab.remove_css_class)(css)
+        base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
+        ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
+        active = st.get("active_cores", []) if st.get("parallel") else [st.get("core")]
+        for c, cell in enumerate(self.cells):
+            self.two_lines(cell["fab"], "%d" % base_co[c] if base_co[c] is not None else "—", volts(ref[c]) if ref[c] is not None else None)
+            smp = at_sample(st, c)                      # misura più profonda disponibile per questo core
+            cur = st["value"] if ph == "co" and c in active else (smp[0] if smp else None)
+            sub, css = None, None
+            if smp:
+                dmv = round((smp[1] - ref[c]) * 1000) if ref[c] is not None else None
+                sub = ("" if smp[0] == cur else "a %d: " % smp[0]) + volts(smp[1]) + ("" if dmv is None else " · %+d mV" % dmv)
+                css = "success" if dmv is not None and dmv < 0 else None
+            self.two_lines(cell["prova"], "%d" % cur if cur is not None else "—", sub, css)
+            for lab, text, cls in ((cell["stable"], "%d" % res[str(c)] if str(c) in res else None, "success"),
+                                   (cell["unstable"], "%d (%s)" % (uns[str(c)]["value"], uns[str(c)]["why"]) if str(c) in uns else None, "error"),
+                                   (cell["final"], "%d" % fin[c] if fin else None, "success")):
+                lab.set_markup("<b>%s</b>" % text if text and lab is cell["final"] else (text or "—"))
+                (lab.add_css_class if text else lab.remove_css_class)(cls)
+        slope = at_slope(st)
+        self.slope.set_visible(slope is not None)
+        if slope is not None:
+            self.slope.set_text("Misurato su questa CPU: ≈ %s mV per passo di CO" % ("%.1f" % slope).rstrip("0").rstrip(".").replace(".", ","))
         tests = st.get("fmax", {}).get("tests", [])
         text = "Test FMax:\n" + "\n".join("%d MHz → picco Tctl %.1f °C" % tuple(t) for t in tests) if tests else ""
         knee = st.get("knee")
@@ -574,15 +653,39 @@ class AutotuneDialog(Adw.Dialog):
                         "%s %s → %.0f op/s, %.0f W" % (t[0], unit, t[1], t[2]) for t in knee[key]["tests"])
         self.fmax.set_text(text)
 
+    @staticmethod
+    def two_lines(pair, main, sub=None, sub_css=None):
+        pair[0].set_text(main)
+        pair[1].set_text(sub or "")
+        pair[1].set_visible(bool(sub))
+        pair[1].remove_css_class("success")
+        if sub_css:
+            pair[1].add_css_class(sub_css)
+
     def done(self, st):
         if st.get("error"):
             self.result.append(label(st["error"], ["warning"], wrap=True))
+        if st.get("final"):   # per core: CO fabbrica → definitivo e ΔV misurata (campione al livello definitivo o al più vicino)
+            base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
+            ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
+            grid = Gtk.Grid(column_spacing=18, row_spacing=4)
+            for col, h in enumerate(("Core", "CO fabbrica → definitivo", "ΔV misurata")):
+                grid.attach(label(h, ["heading"], tooltip_text=CO_TIP if col == 1 else None), col, 0, 1, 1)
+            for c in range(8):
+                grid.attach(label("%d" % c, ["numeric"]), 0, c + 1, 1, 1)
+                grid.attach(diff_label(base_co[c], st["final"][c]), 1, c + 1, 1, 1)
+                smp = at_sample(st, c, st["final"][c])
+                if smp and ref[c] is not None:
+                    dmv = round((smp[1] - ref[c]) * 1000)
+                    lab = label("%+d mV (%s → %s a CO %d)" % (dmv, volts(ref[c]), volts(smp[1]), smp[0]), ["numeric", "success" if dmv < 0 else "dim-label"])
+                else:
+                    lab = label("n/d", ["numeric", "dim-label"])
+                grid.attach(lab, 2, c + 1, 1, 1)
+            self.result.append(label("CO (Curve Optimizer) per core: fabbrica → definitivo, con la tensione misurata", ["heading"], tooltip_text=CO_TIP))
+            self.result.append(grid)
         if st.get("profile_lines"):
             self.result.append(label("Profilo %s: fabbrica → calibrato" % self.mode, ["heading"]))
             self.result.append(profile_view(st["profile_lines"], self.win.status))
-        elif st.get("final"):
-            self.result.append(label("CO (Curve Optimizer) definitivo (fabbrica → calibrato)", ["heading"], tooltip_text=CO_TIP))
-            self.result.append(profile_table(["co " + " ".join(str(v) for v in st["final"])], self.win.status))
         if st.get("fmax", {}).get("chosen") and not st.get("profile_lines"):
             self.result.append(label("FMax scelta: %d MHz" % st["fmax"]["chosen"], ["numeric"]))
         knee = st.get("knee")
@@ -906,7 +1009,12 @@ class CurvePage(Page):
     def telemetry(self, t):
         for c, p in enumerate(self.cores):
             d = t["cores"][c] if c < len(t["cores"]) else {}
-            p.info.set_text(fmt(d.get("mhz"), " MHz") + (" · %g °C" % d["temp"] if d.get("temp") is not None else ""))
+            parts = [("%.2f GHz" % (d["mhz"] / 1000.0)).replace(".", ",") if d.get("mhz") is not None else "n/d"]
+            if d.get("temp") is not None:
+                parts.append("%g °C" % d["temp"])
+            if d.get("volt") is not None:
+                parts.append(volts(d["volt"]))
+            p.info.set_text(" · ".join(parts))
 
     def on_all(self, adj):
         if not self.loading:

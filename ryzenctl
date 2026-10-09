@@ -1278,7 +1278,9 @@ def _autotune(ctx, args):
             run(["co", str(c), str(v)], ctx)
         failed, sample = co_test_parallel(cores, st["params"]["step"])
         st["in_progress"] = None
-        if sample:
+        if sample:   # i core già usciti dalla prova non sono a questo livello: campione non significativo
+            for key in ("volt", "mhz"):
+                sample[key] = [sample[key][c] if c in cores else None for c in range(CORES)]
             st.setdefault("samples", {})[str(v)] = sample
         for c in cores:
             if c in failed:
@@ -2189,6 +2191,7 @@ def selftest():
             break
     assert steps == 5 + 1 + 7 and st["eta"]["remaining_s"] == 0, steps   # 5 livelli in parallelo, finale, 7 FMax
     assert st["samples"]["0"]["volt"][0] == 1.25 and st["samples"]["-20"]["volt"][0] == 1.19, st["samples"]   # −20 ≈ −60 mV nel finto
+    assert st["samples"]["-25"]["volt"][7] is None and st["samples"]["-25"]["volt"][0] == 1.175   # core 7 fuori prova a −25
     assert run(["telemetry"])["cores"][0]["volt"] is not None
     assert run(["status"])["limits"]["ppt"] == 89.0 and run(["status"])["limits"]["tjmax"] == 80.0
     assert st["phase"] == "done" and "error" not in st, st
