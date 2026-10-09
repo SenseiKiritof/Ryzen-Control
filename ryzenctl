@@ -159,7 +159,9 @@ class Fake:
                "pm_version": 0x620105, "drop": 0, "log": [], "tctl_base": 52.0, "cmdline": "quiet",
                # ventole simulate: 1 ventola radiatore, 2 pompa AIO, 3 ventola 3 pin (non risponde al PWM)
                "fans": {"1": {"kind": "fan", "rpm": 1200}, "2": {"kind": "pump", "rpm": 2800},
-                        "3": {"kind": "uncontrollable", "rpm": 900}}}
+                        "3": {"kind": "uncontrollable", "rpm": 900}},
+               # autotune simulato: sotto questi CO il core è instabile; boot_id cambia a ogni reboot()
+               "co_limits": {"7": -15, "3": -25}, "boot_id": "boot-1"}
     FAN_DIR = HWMON + "/hwmon0"
 
     def __init__(self):
@@ -238,6 +240,15 @@ class Fake:
         else:
             return 0xFE, [0] * 6
         return 1, [0] * 6
+
+    def load_ok(self, args):
+        """Carico simulato: fallisce se un core testato è sotto la sua soglia di stabilità."""
+        cores = [int(args[args.index("--taskset") + 1])] if "--taskset" in args else range(CORES)
+        return all(self.s["co"][c] >= self.s.get("co_limits", {}).get(str(c), -100) for c in cores)
+
+    def peak_tctl(self):
+        """Picco Tctl sotto raffica: 60 °C a 4000 MHz, +20 °C ogni 1250 MHz."""
+        return round(60 + (self.s["fmax"] - 4000) / 1250 * 20, 1)
 
     def pm(self):
         s = self.s
@@ -843,6 +854,224 @@ def cmd_preset(ctx, args):
     return cmd_profile(ctx, ["save", args[0]] + lines)
 
 
+# ---- Autotune: macchina a passi (Eco/Auto), stato su disco, ripresa dopo crash ----------
+AT_PATH = STATE + "/autotune.json"
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -25, "margin": 5, "step": 90},
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90}}
+CO_STEP, FINAL_SEC, FINAL_RETRIES = 5, 300, 3
+FMAX_STEP, FMAX_SWEEP_MIN, BURSTS = 100, 4000, 12
+
+
+def boot_id():
+    return FAKE.s["boot_id"] if FAKE else read_text("/proc/sys/kernel/random/boot_id")
+
+
+def at_load():
+    try:
+        return json.loads(open(P(AT_PATH)).read())
+    except (OSError, ValueError):
+        return None
+
+
+def at_save(st):
+    write_atomic(P(AT_PATH), json.dumps(st, indent=1))
+
+
+def mce_since(ts):
+    r = subprocess.run(["journalctl", "-k", "-q", "--since", "@%d" % int(ts), "-g", "mce|Hardware Error"],
+                       capture_output=True, text=True)
+    return bool(r.stdout.strip())
+
+
+def run_load(args, seconds):
+    """stress-ng con argomenti fissi; True se finisce bene e senza errori MCE."""
+    if FAKE:
+        return FAKE.load_ok(args)
+    t0 = time.time()
+    try:
+        r = subprocess.run(["stress-ng"] + args + ["-t", str(int(seconds)), "-q"], capture_output=True)
+    except OSError:
+        raise Err("stress-ng non installato: serve per i test di carico")
+    return r.returncode == 0 and not mce_since(t0)
+
+
+def co_test(cores, seconds):
+    """Tre fasi: pieno carico con verifica, 50 %, 10 % (le instabilità CO emergono a basso carico)."""
+    sec = max(1, seconds // 3)
+    base = ["--cpu", str(len(cores)), "--cpu-method", "all", "--verify"]
+    if len(cores) == 1:
+        base += ["--taskset", str(cores[0])]
+    for extra in ([], ["--cpu-load", "50"], ["--cpu-load", "10"]):
+        if not run_load(base + extra, sec):
+            return False
+    return True
+
+
+def tctl_p95():
+    """p95 dei picchi Tctl su BURSTS raffiche di 2 s (solo k10temp: niente letture PM, scaldano)."""
+    if FAKE:
+        return FAKE.peak_tctl()
+    peaks = []
+    for _ in range(BURSTS):
+        p = subprocess.Popen(["stress-ng", "--cpu", "2", "-t", "2", "-q"])
+        peak = 0.0
+        while p.poll() is None:
+            peak = max(peak, tctl() or 0.0)
+            time.sleep(0.05)
+        peaks.append(peak)
+        time.sleep(3)
+    return sorted(peaks)[max(0, int(len(peaks) * 0.95) - 1)]
+
+
+def at_final_values(st):
+    m = st["params"]["margin"]
+    return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
+
+
+def cmd_autotune(ctx, args):
+    """autotune start eco|auto [chiave=valore…] | step | status | abort"""
+    if not args:
+        raise Err("uso: autotune start eco|auto [target=70 colimit=-25 margin=5 step=90] | step | status | abort")
+    if args[0] == "status":
+        return at_load() or {"phase": None}
+    if args[0] == "abort":
+        st = at_load()
+        rm(P(AT_PATH))
+        if st:
+            apply_lines(profile_lines("baseline"), ctx, "cpu")
+            rm(marker("active"))                       # stato CPU = baseline
+        return {"phase": None, "aborted": bool(st)}
+    if args[0] == "start":
+        if len(args) < 2 or args[1] not in AT_DEFAULTS:
+            raise Err("uso: autotune start eco|auto [chiave=valore…]")
+        check_cpu()
+        load_baseline()
+        params = dict(AT_DEFAULTS[args[1]])
+        for kv in args[2:]:
+            k, _, v = kv.partition("=")
+            if k not in params:
+                raise Err("parametro sconosciuto '%s' (%s)" % (k, ", ".join(params)))
+            params[k] = to_int(v, k)
+        check_range("colimit", params["colimit"], CO_MIN, 0)
+        check_range("margin", params["margin"], 0, 20)
+        check_range("step", params["step"], 3, 3600, " s")
+        check_range("target", params["target"], 50, 90, " °C")
+        apply_lines(profile_lines("baseline"), ctx, "cpu")      # tutti i core a baseline
+        st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
+              "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
+              "fmax": {"current": None, "tests": [], "chosen": None},
+              "started": time.strftime("%Y-%m-%d %H:%M"), "resumed_after_crash": False}
+        at_save(st)
+        return st
+    if args[0] != "step":
+        raise Err("uso: autotune start|step|status|abort")
+    st = at_load()
+    if not st or st["phase"] == "done":
+        raise Err("nessuna calibrazione in corso (autotune start eco|auto)")
+    check_cpu()
+    base = load_baseline()
+    ip = st.get("in_progress")
+    if ip and ip.get("boot_id") != boot_id():          # il passo precedente ha fatto crashare il sistema
+        st["resumed_after_crash"] = True
+        st["in_progress"] = None
+        if ip["kind"] == "co":
+            at_core_failed(st, ip["core"], ip["value"], "crash")
+        elif ip["kind"] == "final":
+            at_final_failed(st)
+        at_save(st)
+        return st
+    if st["phase"] == "co":
+        c, v = st["core"], st["value"]
+        st["in_progress"] = {"kind": "co", "core": c, "value": v, "boot_id": boot_id()}
+        at_save(st)
+        run(["co", str(c), str(v)], ctx)
+        ok = co_test([c], st["params"]["step"])
+        st["in_progress"] = None
+        if ok:
+            st["results"][str(c)] = v
+            if v - CO_STEP < st["params"]["colimit"]:
+                at_next_core(st, base)
+            else:
+                st["value"] = v - CO_STEP
+        else:
+            at_core_failed(st, c, v, "instabile")
+        at_save(st)
+        return st
+    if st["phase"] == "final":
+        vals = at_final_values(st)
+        st["in_progress"] = {"kind": "final", "boot_id": boot_id()}
+        at_save(st)
+        run(["co"] + [str(v) for v in vals], ctx)
+        ok = co_test(list(range(CORES)), FINAL_SEC)
+        st["in_progress"] = None
+        if ok:
+            st["final"] = vals
+            st["phase"] = "fmax" if st["mode"] == "eco" else "done"
+            if st["phase"] == "fmax":
+                st["fmax"]["current"] = base["fmax"]
+        else:
+            at_final_failed(st)
+        at_save(st)
+        return st
+    if st["phase"] == "fmax":
+        f = st["fmax"]["current"]
+        run(["fmax", str(f)], ctx)
+        p95 = tctl_p95()
+        st["fmax"]["tests"].append([f, p95])
+        if p95 <= st["params"]["target"] or f - FMAX_STEP < FMAX_SWEEP_MIN:
+            st["fmax"]["chosen"] = f
+            at_finish_eco(ctx, st, base)
+        else:
+            st["fmax"]["current"] = f - FMAX_STEP
+        at_save(st)
+        return st
+    raise Err("fase sconosciuta: %s" % st["phase"])
+
+
+def at_core_failed(st, c, v, why):
+    st["unstable"][str(c)] = {"value": v, "why": why}
+    st["results"].setdefault(str(c), 0)             # ultimo stabile: quello già registrato, o 0
+    at_next_core(st, load_baseline())
+
+
+def at_next_core(st, base):
+    run(["co", str(st["core"]), str(base["co"][st["core"]])], {})   # il core torna a baseline fino alla passata finale
+    st["core"] += 1
+    st["value"] = -CO_STEP
+    if st["core"] >= CORES:
+        st["phase"] = "final"
+
+
+def at_final_failed(st):
+    st["final_tries"] += 1
+    if st["final_tries"] >= FINAL_RETRIES:
+        st["phase"] = "done"
+        st["error"] = "passata finale instabile anche con margine aumentato: CO lasciato a baseline"
+        run(["apply", "baseline", "cpu"], {})
+        return
+    for c in range(CORES):                            # +3 a tutti e si riprova
+        st["results"][str(c)] = min(0, st["results"].get(str(c), 0) + 3)
+
+
+def at_finish_eco(ctx, st, base):
+    """Profilo eco dalle misure: CO finale, FMax scelto, limiti eco, ventole lente + curva dal target."""
+    lines = ["co " + " ".join(str(v) for v in st["final"]), "fmax %d" % st["fmax"]["chosen"]]
+    lines += [l for l in preset_lines("eco", base) if not l.startswith("fmax ")]
+    d = fans_dir()
+    if d:
+        tj = min(base.get("tjmax", TJMAX_ABS_MAX), PRESETS["eco"]["tjmax"])
+        for n in fan_channels(d):
+            if fan_role(n) == "ventola":
+                cur = fan_info(d, n)["curva"]
+                pwm_min = int(cur[0].split(":")[1]) if cur else FAN_PWM_MIN
+                lines.append("fan %d curve %d:%d %d:255" % (n, st["params"]["target"] - 10, max(FAN_PWM_MIN, pwm_min), tj - 5))
+    cmd_profile(ctx, ["save", "eco"] + lines)
+    run(["apply", "eco"], ctx)
+    run(["use", "eco"], ctx)
+    st["phase"] = "done"
+    st["profile_lines"] = lines
+
+
 # ---- Crash-guard: marker dirty / active / crashed -----------------------------------------
 def marker(name):
     return P(STATE + "/" + name)
@@ -1292,7 +1521,7 @@ def fmt_hwtest(r):
 
 
 # ---- serve: protocollo per la GUI (una riga JSON per richiesta e per risposta) ---------
-SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}
+SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}   # autotune step è ammesso: la GUI lo pilota
 
 
 def cmd_serve(ctx, args):
@@ -1326,7 +1555,7 @@ COMMANDS = {
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
-    "fan": cmd_fan, "telemetry": cmd_telemetry, "preset": cmd_preset,
+    "fan": cmd_fan, "telemetry": cmd_telemetry, "preset": cmd_preset, "autotune": cmd_autotune,
 }
 FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest, "fan": fmt_fan}
 
@@ -1457,6 +1686,8 @@ def selftest():
         FAKE.s["shaper"] = list(Fake.DEFAULT["shaper"])
         FAKE.save()
         FAKE._make_hwmon()                             # il BIOS riprogramma la SmartFan a ogni boot
+        FAKE.s["boot_id"] = "boot-%d" % (int(FAKE.s["boot_id"].split("-")[1]) + 1)
+        FAKE.save()
 
     def exists(name):
         return os.path.exists(marker(name))
@@ -1611,6 +1842,36 @@ def selftest():
     assert "ppt 162" in bl and "power performance" in bl and "fan 1 step 400 400" in bl, bl
     expect_err(["preset", "turbo"], "uso")
     run(["profile", "delete", "auto"])
+
+    # ---- autotune eco: CO discreto per core, passata finale, FMax dal target, profilo eco ----
+    expect_err(["autotune", "step"], "nessuna calibrazione")
+    expect_err(["autotune", "start", "eco", "colimit=5"], "fuori")
+    st = run(["autotune", "start", "eco", "step=9"])
+    assert st["phase"] == "co" and st["params"]["colimit"] == -25 and st["params"]["step"] == 9
+    for _ in range(200):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and "error" not in st, st
+    # core 7 stabile fino a -15, instabile a -20 → finale -15+5 = -10; gli altri arrivano al limite -25 → -20
+    assert st["final"] == [-20] * 7 + [-10] and st["unstable"]["7"]["value"] == -20, st["final"]
+    assert st["fmax"]["chosen"] == 4625 and st["fmax"]["tests"][0][0] == 5225, st["fmax"]
+    eco = run(["profile", "show", "eco"])["lines"]
+    assert "co -20 -20 -20 -20 -20 -20 -20 -10" in eco and "fmax 4625" in eco and "ppt 89" in eco
+    assert "fan 1 step 10000 5000" in eco and "fan 1 curve 60:77 75:255" in eco, eco
+    assert run(["status"])["profile"] == "eco" and run(["status"])["co"][7] == -10
+    # ripresa dopo crash: il passo in corso diventa instabile, si passa al core successivo
+    run(["autotune", "start", "auto", "step=9"])
+    run(["autotune", "step"])                          # core 0 a -5: ok
+    st = run(["autotune", "status"])
+    st["in_progress"] = {"kind": "co", "core": 0, "value": -10, "boot_id": "altro-boot"}
+    at_save(st)
+    st = run(["autotune", "step"])
+    assert st["resumed_after_crash"] and st["unstable"]["0"] == {"value": -10, "why": "crash"} and st["core"] == 1
+    assert run(["autotune", "abort"])["aborted"] and run(["autotune", "status"]) == {"phase": None}
+    assert run(["status"])["co"] == [0] * CORES          # abort riporta la CPU a baseline
+    run(["profile", "delete", "eco"])
+    run(["use", "quiet"]) if "quiet" in run(["profile", "list"])["profiles"] else None
 
     # ---- telemetry e caps ----
     tele = run(["telemetry"])
