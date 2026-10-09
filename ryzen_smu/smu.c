@@ -1118,6 +1118,16 @@ u32 smu_update_pmtable_size(u32 version) {
     case 0x620205:
       g_smu.pm_dram_map_size = 0x994;
       break;
+    // Newer AGESA (ComboAm5PI 1.3.0.x, SMU 98.84+). Sizes from ZenStates-Core
+    // PowerTable.cs: 0x6211xx share the 0x620105 layout, 0x6212xx the 0x620205 one.
+    case 0x621101:
+    case 0x621102:
+      g_smu.pm_dram_map_size = 0x724;
+      break;
+    case 0x621201:
+    case 0x621202:
+      g_smu.pm_dram_map_size = 0x994;
+      break;
     default:
       goto UNKNOWN_PM_TABLE_VERSION;
     }

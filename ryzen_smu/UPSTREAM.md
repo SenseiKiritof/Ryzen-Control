@@ -7,7 +7,10 @@
 
 ## Modifiche locali
 
-Nessuna (copia identica a monte).
+- `smu.c`, `smu_update_pmtable_size()`, blocco `CODENAME_GRANITERIDGE`: aggiunte le versioni
+  PM table 0x621101/0x621102 (0x724 byte) e 0x621201/0x621202 (0x994 byte) degli AGESA più
+  recenti, dimensioni da ZenStates-Core `Hardware/PowerTable.cs`. Senza, il driver carica ma
+  disabilita `pm_table` su quei firmware.
 
 ## Aggiornamento
 
