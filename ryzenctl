@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import traceback
 
 # ---- Manopole di calibrazione (tutte qui, non sparpagliarle) -----------------------
 CORES = 8                      # 9800X3D: 1 CCD, 8 core, nessun core fuso
@@ -28,6 +29,8 @@ TJMAX_MIN, TJMAX_ABS_MAX = 60, 95
 PPT_MIN, TDC_MIN, EDC_MIN = 45, 30, 45           # W, A, A — mai 0: PPT 0 blocca a 606 MHz
 UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC = 230, 160, 230
 READBACK_TOL = 0.6             # W/A: i limiti tornano come float dalla PM table
+READBACK_WAIT = 1.0            # s: l'SMU aggiorna la PM table col suo passo, non subito
+READBACK_POLL = 0.02
 POWER_PROFILES = ("power-saver", "balanced", "performance")
 
 # ---- Percorsi ------------------------------------------------------------------------
@@ -357,8 +360,8 @@ def capture_lines():
     for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
         if pm_key in lim:
             lines.append("%s %d" % (key, round(lim[pm_key])))
-    for tier, v in enumerate(read_shaper()):
-        lines.append("shaper %d %d %d %d" % (tier, *v))
+    # Curve Shaper escluso: sul 9800X3D (SMU 98.81.0) 0xA6 risponde OK ma 0x84 non cambia,
+    # quindi non è verificabile; resta solo come comando sperimentale (`shaper probe`).
     power = power_get()
     if power:
         lines.append("power " + power)
@@ -424,9 +427,15 @@ def write_verify(ctx, name, value, write, read, base_value, equal=lambda a, b: a
         return value
     if not equal(base_value, value):
         touch_sync(P(STATE + "/active"))
+    wait = 0.05 if FAKE else READBACK_WAIT
     for _ in range(2):
         write(value)
-        got = read()
+        deadline = time.monotonic() + wait
+        while True:
+            got = read()
+            if equal(got, value) or time.monotonic() >= deadline:
+                break
+            time.sleep(READBACK_POLL)
         if equal(got, value):
             return got
     if base_value is not None:
@@ -489,8 +498,25 @@ def cmd_fmax(ctx, args):
 
 
 def cmd_shaper(ctx, args):
+    """Sperimentale: non verificato su hardware. `shaper raw` = parole di 0x84;
+    `shaper probe` = scrive tier 4 -2/-2/-2, legge subito e dopo 1 s, ripristina."""
+    raw = lambda: ["0x%08X" % w for w in smu("shaper_get")]
+    if args == ["raw"]:
+        check_cpu()
+        return {"raw": raw()}
+    if args == ["probe"]:
+        check_cpu()
+        base = load_baseline()
+        out = {"prima": raw()}
+        smu("shaper_set", shaper_arg(4, -2, -2, -2))
+        out["subito"] = raw()
+        time.sleep(1)
+        out["dopo_1s"] = raw()
+        smu("shaper_set", shaper_arg(4, *base["shaper"].get(4, [0, 0, 0])))
+        out["ripristino"] = raw()
+        return out
     if len(args) != 4:
-        raise Err("uso: shaper <tier 0-4> <bassaT> <mediaT> <altaT>")
+        raise Err("uso: shaper <tier 0-4> <bassaT> <mediaT> <altaT> | shaper raw | shaper probe")
     tier = to_int(args[0], "tier")
     check_range("tier", tier, 0, 4)
     v = [to_int(x, "shaper") for x in args[1:]]
@@ -554,7 +580,7 @@ def fmt_status(st):
     lines = [
         "CPU %s, %d core, SMU %s, PM table %s" % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"]),
         "CO      " + " ".join("%+d" % v for v in st["co"]) + ("  (base %s)" % " ".join("%+d" % v for v in b["co"]) if "co" in b else ""),
-        "Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])),
+        "Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + "  (sperimentale, non verificato)",
         "FMax    %s MHz%s" % (f(st["fmax"]), bl("fmax", " MHz")),
         "Limiti  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s" % (
             f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
@@ -569,7 +595,7 @@ def fmt_status(st):
 
 
 # ---- Profili -----------------------------------------------------------------------------
-PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "shaper", "power"}  # + fan (fase 2)
+PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power"}  # + fan (fase 2); shaper: sperimentale
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 
@@ -765,8 +791,7 @@ def cmd_hwtest(ctx, args):
     check_cpu()
     base = load_baseline()
     steps = [("co", ["7", str(max(CO_MIN, base["co"][7] - 3))], ["7", str(base["co"][7])]),
-             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])]),
-             ("shaper", ["4", "-2", "-2", "-2"], ["4"] + [str(v) for v in base["shaper"].get(4, [0, 0, 0])])]
+             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])])]
     for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
         if key in base:
             steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
@@ -878,7 +903,7 @@ def selftest():
     expect_err(["ppt", "150"], "baseline")
     expect_err(["co", "7", "-3"], "baseline")
     base = run(["baseline"])
-    assert base["ppt"] == 162 and base["co"] == [0] * CORES and base["shaper"][0] == [0, 0, 0]
+    assert base["ppt"] == 162 and base["co"] == [0] * CORES and base["shaper"] == {}   # shaper sperimentale: fuori
     assert run(["baseline", "show"]) == base and run(["status"])["baseline_fresh"]
     assert "(base performance)" in fmt_status(run(["status"]))
     # validazione
@@ -902,6 +927,9 @@ def selftest():
     assert run(["fmax", "5000"]) == {"fmax": 5000}
     assert run(["tjmax", "85"]) == {"tjmax": 85.0}
     assert run(["shaper", "2", "-10", "-5", "3"]) == {"shaper": {2: [-10, -5, 3]}}
+    assert run(["shaper", "raw"])["raw"][2] == "0x%08X" % shaper_arg(2, -10, -5, 3)
+    probe = run(["shaper", "probe"])
+    assert probe["subito"][4] == "0x%08X" % shaper_arg(4, -2, -2, -2) and probe["ripristino"][4] == "0x%08X" % shaper_arg(4, 0, 0, 0)
     assert run(["power", "balanced"]) == {"power": "balanced"} and FAKE.s["power"] == "balanced"
     assert os.path.exists(P(STATE + "/active")) and FAKE.s["log"][-1]["active"]
     # sblocco
@@ -941,6 +969,7 @@ def selftest():
     expect_err(["profile", "save", "baseline", "ppt 150"], "riservato")
     expect_err(["profile", "save", "q", "ppt 500"], "riga 1")
     expect_err(["profile", "save", "q", "boot"], "non ammesso")
+    expect_err(["profile", "save", "q", "shaper 4 -2 -2 -2"], "non ammesso")
     assert run(["profile", "save", "quiet", "ppt 150", "co all -10", "# commento", "fmax 5000", "power balanced"])["lines"] == 4
     assert run(["profile", "list"]) == {"profiles": ["quiet"], "active": None}
     assert run(["profile", "show", "quiet"])["lines"][0] == "ppt 150"
@@ -1085,13 +1114,16 @@ def selftest():
 
 def main():
     argv = sys.argv[1:]
-    if argv == ["selftest"]:
-        return selftest()
     try:
+        if argv == ["selftest"]:
+            return selftest()
         result = run(argv)
     except Err as e:
         print("errore: %s" % e, file=sys.stderr)
         sys.exit(1)
+    except Exception:  # mai un'eccezione non gestita: ABRT la segnalerebbe come "crash"
+        traceback.print_exc()
+        sys.exit(2)
     if argv[0] in ("boot", "resume") and result.get("errors") or result and result.get("baseline_error"):
         print("ryzenctl %s: %s" % (argv[0], json.dumps(result, ensure_ascii=False)), file=sys.stderr)
     if argv[0] in FORMAT:

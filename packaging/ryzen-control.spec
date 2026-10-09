@@ -1,6 +1,6 @@
 Name:           ryzen-control
 Version:        0.1.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 License:        GPL-3.0-or-later
 Source0:        %{name}-%{version}.tar.gz
@@ -111,6 +111,10 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-3
+- Readback dei limiti con attesa (la PM table si aggiorna col passo dell'SMU), Curve Shaper
+  sperimentale fuori da profili e hwtest, nessuna eccezione non gestita (ABRT)
+
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-2
 - Firma automatica con la chiave akmods se registrata, rebuild forzato, avvio del servizio
   all'installazione, comando hwtest
