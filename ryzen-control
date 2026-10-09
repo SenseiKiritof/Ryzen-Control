@@ -18,7 +18,8 @@ from collections import deque
 import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
-from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
+gi.require_version("Pango", "1.0")
+from gi.repository import Pango, Adw, Gdk, GLib, Gtk  # noqa: E402
 
 APP_ID = "org.ryzencontrol.RyzenControl"
 DEV_RYZENCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryzenctl")
@@ -526,9 +527,10 @@ class AutotuneDialog(Adw.Window):
         self.connect("close-request", self.on_close_request)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         self.header = label("", ["dim-label"], wrap=True)
-        self.phase = label("Avvio…", ["title-3"], wrap=True, hexpand=True)
-        self.eta = label("", ["numeric"], xalign=1.0, valign=Gtk.Align.END)
-        top = Gtk.Box(spacing=12)
+        # altezze costanti: ogni cambio di altezza sposta la tabella e il compositore lascia frammenti
+        self.phase = label("Avvio…", ["title-3"], hexpand=True, ellipsize=Pango.EllipsizeMode.END, single_line_mode=True)
+        self.eta = label(" ", ["numeric"], xalign=1.0)
+        top = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         top.append(self.phase)
         top.append(self.eta)
         self.progress = Gtk.ProgressBar(show_text=True)
@@ -547,7 +549,7 @@ class AutotuneDialog(Adw.Window):
             boxes = []
             for key in ("fab", "prova"):   # due righe: CO sopra, tensione sotto; larghezza fissa = niente riflussi
                 cell[key] = (label("—", ["numeric"], width_chars=4 if key == "fab" else 8),
-                             label("", ["numeric", "caption"], visible=False, width_chars=9 if key == "fab" else 22))
+                             label(" ", ["numeric", "caption"], width_chars=9 if key == "fab" else 22))
                 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
                 box.append(cell[key][0])
                 box.append(cell[key][1])
@@ -654,6 +656,7 @@ class AutotuneDialog(Adw.Window):
             self.phase.set_text("Calibrazione completata" if not st.get("error") else "Calibrazione terminata: " + st["error"])
             frac = 1.0
         self.progress.set_fraction(max(0.0, min(1.0, frac)))
+        self.queue_draw()                   # ridisegno completo: niente frammenti del fotogramma precedente
         res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
         base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
         ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
@@ -691,7 +694,8 @@ class AutotuneDialog(Adw.Window):
     def two_lines(pair, main, sub=None, sub_css=None):
         pair[0].set_text(main)
         pair[1].set_text(sub or "")
-        pair[1].set_visible(bool(sub))
+        if not sub:
+            pair[1].set_text(" ")          # resta allocata: l'altezza della riga non cambia
         pair[1].remove_css_class("success")
         if sub_css:
             pair[1].add_css_class(sub_css)
