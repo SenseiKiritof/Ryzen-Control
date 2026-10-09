@@ -23,11 +23,13 @@ APP_ID = "org.ryzencontrol.RyzenControl"
 DEV_RYZENCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryzenctl")
 RYZENCTL = DEV_RYZENCTL if os.path.exists(DEV_RYZENCTL) else "/usr/bin/ryzenctl"
 POWER = ("power-saver", "balanced", "performance")
-PRESETS = ("eco", "auto", "boost")
+PRESETS = ("quiet", "eco", "auto", "boost")
+CALIBRATED = ("eco", "auto")   # si adattano all'hardware con test di carico; gli altri sono preset fissi
 MODES = (("default", "Default", "Valori di fabbrica (baseline), avvio automatico disattivato"),
-         ("eco", "Eco", "Silenzio e temperature: undervolt discreto, limiti ridotti, ventole lente"),
-         ("auto", "Auto", "Prestazioni per watt: limiti al ginocchio di efficienza"),
-         ("boost", "Boost", "Potenza bruta: limiti massimi consentiti"),
+         ("quiet", "Quiet", "Preset fisso: limiti ridotti, FMax −400, ventole lente"),
+         ("eco", "Eco", "Si adatta all'hardware (test di carico): undervolt discreto misurato, FMax per il silenzio, ventole lente"),
+         ("auto", "Auto", "Si adatta all'hardware (test di carico): undervolt misurato e limiti al ginocchio prestazioni/watt"),
+         ("boost", "Boost", "Preset fisso: valori di fabbrica, energia al massimo"),
          ("custom", "Custom", "Valori impostati a mano nelle pagine CPU, Curve e Ventole"))
 CPU_PARAMS = (("ppt", "PPT", "W"), ("tdc", "TDC", "A"), ("edc", "EDC", "A"), ("fmax", "FMax", "MHz"), ("tjmax", "Tjmax", "°C"))
 CPU_HELP = ("PPT: potenza massima del package · TDC/EDC: corrente sostenuta/di picco · FMax: frequenza massima di boost · "
@@ -357,6 +359,13 @@ class ModesPage(Adw.PreferencesPage):
             chk.connect("toggled", self.on_mode, key)
             regen = None
             if key in PRESETS:
+                tag = Gtk.Label(label="calibrata sull'hardware" if key in CALIBRATED else "preset fisso", valign=Gtk.Align.CENTER)
+                tag.add_css_class("chip")
+                tag.add_css_class("success" if key in CALIBRATED else "dim-label")
+                row.add_suffix(tag)
+                if key in CALIBRATED:
+                    cal = button("Calibra…", lambda k=key: self.win.toast("Calibrazione %s in arrivo (autotune): test di carico su questa CPU" % k))
+                    row.add_suffix(cal)
                 regen = button("Rigenera dai valori di fabbrica", lambda k=key: self.regen(k))
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
