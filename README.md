@@ -66,7 +66,6 @@ sudo ryzenctl co 7 -15               # Curve Optimizer del core 7; `co all -10`;
 sudo ryzenctl ppt 120                # limiti: ppt (W), tdc (A), edc (A)
 sudo ryzenctl fmax 5000              # frequenza massima di boost (MHz)
 sudo ryzenctl tjmax 85               # temperatura massima (°C), mai sopra la baseline
-sudo ryzenctl shaper 4 -10 -10 -5    # Curve Shaper: tier 0-4, margini a bassa/media/alta temperatura
 sudo ryzenctl power balanced         # power-saver | balanced | performance
 sudo ryzenctl default                # tutto ai valori di base (BIOS), avvio automatico off
 sudo ryzenctl hwtest                 # prova reversibile di ogni comando con readback
@@ -83,6 +82,12 @@ sudo ryzenctl profile list | show quiet | delete quiet
 
 Oltre i valori di fabbrica (PPT fino a 230 W, TDC 160 A, EDC 230 A, FMax +200 MHz) solo dopo
 `sudo ryzenctl unlock on`, che stampa un'avvertenza. Tjmax non supera mai la baseline.
+
+**Curve Shaper**: sperimentale e di fatto disattivato. Sul 9800X3D con SMU 98.81.0 il comando
+di scrittura (RSMU 0xA6) risponde OK ma quello di lettura (0x84) restituisce solo zeri o
+l'argomento stesso, quindi nessuna scrittura è verificabile: `shaper` resta fuori da profili e
+baseline (`shaper raw` / `shaper probe` servono solo a indagare). Il Curve Shaper va impostato
+dal BIOS.
 
 ## Sicurezza
 
@@ -109,7 +114,8 @@ Oltre i valori di fabbrica (PPT fino a 230 W, TDC 160 A, EDC 230 A, FMax +200 MH
 1. `dkms status` installed; `modinfo -F signer ryzen_smu` (chiave akmods o DKMS registrata);
    `systemctl status ryzenctl` active; `cat /sys/kernel/ryzen_smu_drv/codename` = 23.
 2. `sudo ryzenctl status` = valori BIOS; `sudo ryzenctl hwtest` con esito `ok` (ogni comando
-   scritto, riletto e riportato alla baseline; il Curve Shaper è il meno certo).
+   scritto, riletto e riportato alla baseline). Esito sul 9800X3D / SMU 98.81.0: CO, FMax,
+   PPT, TDC, EDC, Tjmax ok; Curve Shaper non verificabile (vedi sopra).
 3. Crash-guard: profilo innocuo (`ppt 150`) con autostart; `sync; echo b | sudo tee
    /proc/sysrq-trigger` → al boot `ryzenctl crashed` valorizzato, `status` = baseline,
    notifica al login; `systemctl restart ryzenctl` → baseline invariata; riavvio pulito →

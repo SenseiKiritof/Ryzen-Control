@@ -14,9 +14,19 @@ vanno nella stessa cartella (`docs/plans/YYYY-MM-DD-<argomento>.md`). Lingua di 
 messaggi di commit: italiano.
 
 Fatto: **fase 1** (`ryzenctl` completo per la parte CPU, unit systemd, driver vendorizzato,
-spec RPM, README) in attesa di verifica su hardware. Da fare, in quest'ordine: fase 2 ventole
-(CLI, `fan autodetect`), fase 3 GUI, fase 4 calibrazioni Quiet/Auto e auto-tuning CO, fase 5
-deb/PKGBUILD.
+spec RPM, README). Verificato su hardware (9800X3D, SMU 98.81.0, PM table 0x620105): driver
+firmato automaticamente con la chiave akmods, `hwtest` ok per CO, FMax, PPT, TDC, EDC, Tjmax.
+**Curve Shaper non verificabile**: RSMU 0xA6 risponde OK ma 0x84 restituisce zeri (o l'arg0
+stesso) → `shaper` è sperimentale, fuori da profili/baseline/hwtest, il setter fallisce sempre
+al readback (sicuro per costruzione). Manca il test di crash (sysrq) e il tag `v0.1.0`. Da
+fare, in quest'ordine: fase 2 ventole (CLI, `fan autodetect`), fase 3 GUI, fase 4 calibrazioni
+Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD.
+
+Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
+attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
+che cambia il formato le righe non più ammesse vanno ignorate (`profile_lines("baseline")`);
+il backend finto non deve mai avere effetti reali (es. `notify-send`) perché il selftest gira
+nella sessione dell'utente.
 
 ## Layout
 
