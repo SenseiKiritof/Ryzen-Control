@@ -918,8 +918,13 @@ class Aborted(Exception):
 
 
 def at_request_abort():
-    """Da un altro thread/processo: alza il flag e termina i carichi in corso."""
-    touch_sync(P(AT_ABORT_FLAG))
+    """Da un altro thread/processo: alza il flag e termina i carichi in corso. Creazione
+    semplice e tollerante: può correre in parallelo con `start`/`abort` che lo rimuovono."""
+    try:
+        os.makedirs(P(RUN), exist_ok=True)
+        open(P(AT_ABORT_FLAG), "w").close()
+    except OSError:
+        pass
     for pr in list(_children):
         try:
             pr.terminate()
