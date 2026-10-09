@@ -797,6 +797,50 @@ def cmd_autostart(ctx, args):
     return {"autostart": s["autostart"], "profile": s["profile"]}
 
 
+# ---- Preset delle modalità (finché la calibrazione della fase 4 non li sostituisce) ---------
+# ponytail: rapporti fissi rispetto alla baseline (quiet ≈ eco 65 W AMD su un 162 W, auto ≈ eco 105 W);
+# la calibrazione Quiet/Auto li rimpiazzerà con valori misurati su questa CPU.
+PRESETS = {
+    "quiet": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
+    "auto": {"ppt": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
+    "boost": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
+}
+
+
+def preset_lines(name, base):
+    pr = PRESETS[name]
+    lines = []
+    for key, floor in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
+        if key in base:
+            lines.append("%s %d" % (key, max(floor, round(base[key] * pr[key]))))
+    if "fmax" in base:
+        lines.append("fmax %d" % max(FMAX_MIN, base["fmax"] + pr["fmax"]))
+    if "tjmax" in base:
+        lines.append("tjmax %d" % (base["tjmax"] if pr["tjmax"] is None else min(base["tjmax"], pr["tjmax"])))
+    lines.append("power " + pr["power"])
+    d = fans_dir()
+    if d:
+        for n in fan_channels(d):
+            if fan_role(n) == "ventola":
+                if pr["fan"]:
+                    lines.append("fan %d step %d %d" % (n, *pr["fan"]))
+                else:   # boost: valori BIOS (baseline)
+                    for t in profile_lines("baseline"):
+                        if t[:3] == ["fan", str(n), "step"]:
+                            lines.append(" ".join(t))
+    return lines
+
+
+def cmd_preset(ctx, args):
+    """`preset quiet|auto|boost [show]`: crea (o rigenera) il profilo dalla baseline; `show` solo elenca."""
+    if not args or args[0] not in PRESETS or len(args) > 2 or (len(args) == 2 and args[1] != "show"):
+        raise Err("uso: preset quiet|auto|boost [show]")
+    lines = preset_lines(args[0], load_baseline())
+    if len(args) == 2:
+        return {"profile": args[0], "lines": lines}
+    return cmd_profile(ctx, ["save", args[0]] + lines)
+
+
 # ---- Crash-guard: marker dirty / active / crashed -----------------------------------------
 def marker(name):
     return P(STATE + "/" + name)
@@ -1280,7 +1324,7 @@ COMMANDS = {
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
-    "fan": cmd_fan, "telemetry": cmd_telemetry,
+    "fan": cmd_fan, "telemetry": cmd_telemetry, "preset": cmd_preset,
 }
 FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest, "fan": fmt_fan}
 
@@ -1554,6 +1598,17 @@ def selftest():
     run(["default"])
     assert hw_read(Fake.FAN_DIR + "/pwm1_step_up_time") == 400
     run(["profile", "delete", "f"])
+
+    # ---- preset ----
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "ppt 89" in pl and "tdc 76" in pl and "edc 149" in pl and "fmax 4825" in pl and "tjmax 80" in pl and "power balanced" in pl, pl
+    assert "fan 1 step 10000 5000" in pl and not any(l.startswith("fan 2") for l in pl)
+    assert run(["preset", "auto"])["saved"] == "auto" and "auto" in run(["profile", "list"])["profiles"]
+    assert "ppt 143" in run(["profile", "show", "auto"])["lines"]
+    bl = run(["preset", "boost", "show"])["lines"]
+    assert "ppt 162" in bl and "power performance" in bl and "fan 1 step 400 400" in bl, bl
+    expect_err(["preset", "turbo"], "uso")
+    run(["profile", "delete", "auto"])
 
     # ---- telemetry e caps ----
     tele = run(["telemetry"])
