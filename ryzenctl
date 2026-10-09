@@ -34,12 +34,12 @@ READBACK_POLL = 0.02
 # Ventole (nct6775). Autodetect: canale al 40 % per 20 s sotto carico; la pompa alza Tctl di
 # gradi in secondi, una ventola del radiatore scalda il liquido lentamente.
 # ponytail: soglie tarate su un AIO 360; ritoccare se un radiatore piccolo le sfiora.
-FAN_TEST_PWM, FAN_TEST_SEC = 102, 20
+FAN_TEST_PWM, FAN_TEST_MIN_PWM, FAN_TEST_SEC = 102, 51, 20   # prova al 60 % del pwm attuale, tra 20 % e 40 %
 FAN_PUMP_DT, FAN_FAN_DT, FAN_PUMP_RPM = 2.0, 1.0, 1500
 FAN_ABORT_TCTL, FAN_ABORT_DT = 80.0, 8.0
 FAN_RPM_CHANGE = 0.05          # sotto: il canale non risponde al PWM
 FAN_STEP_MAX_MS, FAN_STEP_TOL_MS = 60000, 200
-FAN_PWM_MIN, FAN_CURVE_LAST_TEMP_MAX = 77, 90
+FAN_PWM_MIN, FAN_CURVE_LAST_TEMP_MAX = 77, 125   # 125 = ultimo punto delle curve BIOS
 FAN_ROLES = ("ventola", "pompa", "non-controllabile", "sconosciuto")
 POWER_PROFILES = ("power-saver", "balanced", "performance")
 
@@ -977,9 +977,10 @@ def cmd_fan_autodetect(ctx, d):
             rpm0 = hw_read("%s/fan%d_input" % (d, n))
             t0 = tctl_median(5)
             peak, aborted = 0.0, False
+            test_pwm = max(FAN_TEST_MIN_PWM, min(FAN_TEST_PWM, int(pwm * 0.6)))
             try:
                 hw_write("%s/pwm%d_enable" % (d, n), 1)
-                hw_write("%s/pwm%d" % (d, n), FAN_TEST_PWM)
+                hw_write("%s/pwm%d" % (d, n), test_pwm)
                 end = time.monotonic() + (0 if FAKE else FAN_TEST_SEC)
                 while True:
                     t = tctl()
@@ -1006,7 +1007,7 @@ def cmd_fan_autodetect(ctx, d):
                 role = "ventola"
             else:
                 role = "sconosciuto"
-            why = "ΔTctl %.1f °C, giri %d→%d al %d%%%s" % (dt, rpm0, rpm1, FAN_TEST_PWM * 100 // 255, ", interrotto" if aborted else "")
+            why = "ΔTctl %.1f °C, giri %d→%d al %d%%%s" % (dt, rpm0, rpm1, test_pwm * 100 // 255, ", interrotto" if aborted else "")
             fan_set_role(n, role, why)
             results[n] = {"ruolo": role, "perché": why}
             pause(10)   # torna a regime prima del canale successivo
@@ -1468,7 +1469,7 @@ def selftest():
     expect_err(["fan", "1", "curve", "40:50", "75:255"], "fuori")
     expect_err(["fan", "1", "curve", "40:77", "75:200"], "ultimo punto")
     expect_err(["fan", "1", "curve", "40:120", "50:100", "75:255"], "non decrescenti")
-    expect_err(["fan", "1", "curve", "40:77", "95:255"], "ultimo punto")
+    expect_err(["fan", "1", "curve", "40:77", "130:255"], "ultimo punto")
     assert run(["fan", "1", "curve", "40:77", "60:150", "75:255"])["curva"] == ["40:77", "60:150", "75:255", "76:255", "77:255"]
     r = run(["fan", "identify", "2"])
     assert r["rpm_al_100"] == 2800 and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 5
