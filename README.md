@@ -83,6 +83,25 @@ sudo ryzenctl profile list | show quiet | delete quiet
 Oltre i valori di fabbrica (PPT fino a 230 W, TDC 160 A, EDC 230 A, FMax +200 MHz) solo dopo
 `sudo ryzenctl unlock on`, che stampa un'avvertenza. Tjmax non supera mai la baseline.
 
+### Ventole (scheda madre, chip Nuvoton nct67xx)
+
+```sh
+sudo ryzenctl fan enable             # carica nct6775 e lo rende permanente; se il chip non appare per un
+                                     # conflitto ACPI aggiunge acpi_enforce_resources=lax (grubby) e chiede il riavvio
+sudo ryzenctl fan status             # canali, giri, pwm, step, curva, ruolo
+sudo ryzenctl fan autodetect         # ~30 s per canale sotto carico: assegna i ruoli ventola/pompa/non-controllabile
+sudo ryzenctl fan 1 step 10000 5000  # ritardo di reazione della SmartFan (ms, salita/discesa): ignora i picchi brevi
+sudo ryzenctl fan 1 curve 40:77 60:150 75:255   # punti temperatura:pwm (pwm >= 77, ultimo 255 entro 90 °C)
+sudo ryzenctl fan identify 2         # 100 % per 5 s per riconoscere fisicamente il canale
+sudo ryzenctl fan name 1 "radiatore alto"; sudo ryzenctl fan role 3 pompa   # a mano si può solo declassare
+sudo ryzenctl fan disable
+```
+
+Si scrive solo su canali classificati **ventola** da `fan autodetect` (test fisico: canale al 40 %
+per 20 s sotto carico, la pompa fa salire Tctl di gradi in secondi, una ventola no); la pompa e i
+canali che non rispondono al PWM restano in sola lettura, `pwmN_enable` (modalità SmartFan del
+BIOS) non viene mai cambiato fuori dai test. Nei profili: `fan <N> step …` e `fan <N> curve …`.
+
 **Curve Shaper**: sperimentale e di fatto disattivato. Sul 9800X3D con SMU 98.81.0 il comando
 di scrittura (RSMU 0xA6) risponde OK ma quello di lettura (0x84) restituisce solo zeri o
 l'argomento stesso, quindi nessuna scrittura è verificabile: `shaper` resta fuori da profili e

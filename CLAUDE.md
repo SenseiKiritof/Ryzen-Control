@@ -20,8 +20,10 @@ firmato automaticamente con la chiave akmods, `hwtest` ok per CO, FMax, PPT, TDC
 stesso) → `shaper` è sperimentale, fuori da profili/baseline/hwtest, il setter fallisce sempre
 al readback (sicuro per costruzione). Crash-guard verificato su hardware (crash sysrq →
 profilo disattivato + notifica, riattiva, restart, boot pulito, resume). Tag `v0.1.0` su `main`.
-Da fare, in quest'ordine: fase 2 ventole (CLI, `fan autodetect`), fase 3 GUI, fase 4
-calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
+**Fase 2 (ventole)**: CLI `fan` scritta e coperta dal selftest su hwmon finto (3 canali:
+ventola, pompa, 3 pin); `fan enable` carica nct6775 e, se il chip non appare, aggiunge
+`acpi_enforce_resources=lax` con grubby. In attesa della verifica su hardware. Poi: fase 3 GUI,
+fase 4 calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi).
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
@@ -108,8 +110,10 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   punti curva se richiesto) della SmartFan già programmata dal BIOS. Ruoli assegnati da
   `fan autodetect` (test fisico: canale al 40 % per 20 s sotto carico, ΔTctl distingue la pompa);
   a mano si può solo declassare, mai promuovere a "ventola". `pwmN_enable` non si tocca mai
-  fuori dai test (ripristino in `finally`). Il parametro kernel `acpi_enforce_resources=lax` è
-  un passo manuale: il pacchetto non tocca il bootloader.
+  fuori dai test (ripristino in `finally`). Il parametro kernel `acpi_enforce_resources=lax` lo
+  mette `ryzenctl fan enable` (azione esplicita dell'utente, grubby), mai il pacchetto.
+  Il backend finto simula l'hwmon con file veri sotto `$ROOT/sys/class/hwmon/hwmon0` e la
+  fisica in `Fake.after_fan_write`.
 
 ## Invarianti hardware (non negoziabili)
 
