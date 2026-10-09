@@ -105,13 +105,16 @@ BIOS) non viene mai cambiato fuori dai test. Nei profili: `fan <N> step …` e `
 ### Modalità e calibrazione automatica
 
 Nella GUI (pagina Modalità) o da CLI. Preset fissi (nessun test): **Default** = valori BIOS,
-**Quiet** = limiti ×0.55/0.63/0.83, FMax −400, Tjmax 80, ventole 10 s/5 s, **Boost** = valori
-di fabbrica con energia al massimo. Modalità **calibrate sull'hardware** con test di carico:
+**Quiet** = limiti ×0.55/0.63/0.83, FMax −400, Tjmax 80, ventole 10 s/5 s, **Performance** =
+valori di fabbrica con energia al massimo. Modalità **calibrate sull'hardware** con test di
+carico (**Eco**, **Auto**, **Boost**): la ricerca del limite di stabilità del CO per core è una
+sola, condivisa e salvata (`/var/lib/ryzenctl/co_limits.json`, riusata dalle calibrazioni
+successive); ogni modalità applica il proprio margine: Eco +5 (discreto), Auto e Boost +3.
 
 ```sh
-sudo ryzenctl preset quiet|eco|auto|boost        # crea il profilo dai valori di fabbrica (segnaposto)
+sudo ryzenctl preset quiet|performance|eco|auto|boost   # crea il profilo dai valori di fabbrica (segnaposto)
 sudo ryzenctl autotune estimate eco              # durata stimata (parallelo e core per core)
-sudo ryzenctl autotune start eco [target=70 colimit=-25 margin=5 step=90 parallel=1]
+sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1]
 sudo ryzenctl autotune step                      # un test alla volta; ripetere finché phase == done
 sudo ryzenctl autotune status | abort            # abort interrompe subito anche un passo in corso
 ```
@@ -130,10 +133,11 @@ per core a ogni livello e quanti mV vale un passo di CO su questa CPU.
   `target`; scrive il profilo `eco` con limiti Quiet, ventole lente e curva dal target.
   Esito sul 9800X3D di sviluppo: tutti i core stabili fino a −25 → CO −20, ≈ 3,4 mV per passo
   (−69 mV reali a pieno carico), FMax invariata (picco 64 °C < 70 con il profilo eco).
-- **Auto**: stessa ricerca CO ma più spinta (−40, margine 3), poi il ginocchio prestazioni/watt:
-  sweep di PPT (multi-thread) e FMax (single-thread) misurando bogo-ops/s di stress-ng e potenza
-  RAPL, scegliendo il valore più basso che perde al massimo `loss` % (default 10) rispetto al
-  massimo. Aggiorna anche `boost` con il CO trovato.
+- **Auto**: CO = limite + 3, poi il ginocchio prestazioni/watt: sweep di PPT (multi-thread) e
+  FMax (single-thread) misurando bogo-ops/s di stress-ng e potenza RAPL, scegliendo il valore
+  più basso che perde al massimo `loss` % (default 10) rispetto al massimo.
+- **Boost**: CO = limite + 3, limiti e FMax ai tetti consentiti (fabbrica, o sblocco), energia
+  al massimo; misura il guadagno MT/ST rispetto alla fabbrica.
 
 **Attenzione**: un CO instabile può riavviare il PC durante la calibrazione (nessun danno,
 lavoro non salvato perso). Lo stato è su disco: al riavvio il passo interrotto viene marcato

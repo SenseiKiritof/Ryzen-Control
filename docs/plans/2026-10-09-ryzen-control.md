@@ -12,7 +12,12 @@ hwtest` automatizza la verifica reversibile su hardware. Resta manuale solo ciò
 impone (registrazione MOK al riavvio, se nessuna chiave è già registrata) e il test di crash.
 In fase 2 `ryzenctl fan enable` imposterà da sé il parametro kernel (grubby / /etc/default/grub)
 con conferma esplicita, reversibile con `fan disable`.
-Revisione 8 (2026-10-09): Eco → **Eco** con undervolt discreto calibrato; calibrazioni come
+Revisione 9 (2026-10-10): **Boost** diventa calibrata (CO spinto, limiti e FMax ai tetti, guadagno
+misurato), la statica di fabbrica + energia al massimo si chiama **Performance**; la ricerca del
+limite CO è unica e condivisa (−40, salvata in `co_limits.json`, riusata), ogni modalità applica il
+suo margine (Eco +5, Auto/Boost +3); interruzione immediata (`serve` con lettore separato, flag +
+stress-ng terminati); tensione per core campionata a ogni livello (mV per passo misurati).
+Revisione 8 (2026-10-09): nuova modalità **Eco** (Quiet resta come preset) con undervolt discreto calibrato; calibrazioni come
 macchina a passi in ryzenctl (`autotune`), GUI pilota con avanzamento e ripresa dopo crash.
 Revisione 7 (2026-10-09): curva ventole per modalità (Eco dal target, Auto step moderato).
 Revisione 6 (2026-10-09): fase 1 verificata su hardware e taggata `v0.1.0`; un solo pacchetto
@@ -230,8 +235,11 @@ Regole di transazione:
   - **Auto**: PPT/TDC/EDC e FMax dalla calibrazione Auto (punto di ginocchio prestazioni/W di
     *questa* CPU), CO da auto-tuning, Tjmax baseline, `power balanced`. Finché non calibrata:
     preset eco AMD 105 W (142/110/170), FMax baseline. Obiettivo: prestazioni per watt.
-  - **Boost**: limiti baseline (o tetti sbloccati), FMax massimo consentito, Tjmax baseline,
-    CO da auto-tuning, `power performance`. Obiettivo: potenza bruta.
+  - **Performance** (preset fisso, rev. 9): limiti, FMax e Tjmax di fabbrica, `power performance`,
+    ventole BIOS.
+  - **Boost** (calibrata, rev. 9): CO = limite misurato + 3, limiti e FMax ai tetti consentiti
+    (fabbrica o sblocco), `power performance`, ventole BIOS; a fine calibrazione misura il
+    guadagno MT/ST rispetto alla fabbrica. Obiettivo: potenza bruta.
   - **Custom**: valori impostati a mano nelle pagine.
 - `power`: profilo energetico via D-Bus `net.hadess.PowerProfiles` (`busctl`, funziona con
   power-profiles-daemon e tuned-ppd); se assente, scrittura EPP in sysfs.
@@ -454,7 +462,7 @@ direttamente su D-Bus con `Gio` di PyGObject: nessuna dipendenza nuova, funziona
 (GTK4 non ha più la StatusIcon). È lo stesso processo `ryzen-control` avviato con `--tray`
 dall'autostart al login (finestra nascosta, un solo processo: l'autostart `ryzenctl-notify`
 viene assorbito, il banner crash diventa voce del menu).
-- Menu rapido: modalità **Default / Eco / Auto / Boost** (spunta su quella attiva),
+- Menu rapido: modalità **Default / Quiet / Performance / Eco / Auto / Boost** (spunta su quella attiva),
   **Applica all'avvio** on/off, **Apri Ryzen Control**, **Esci**; dopo un crash in testa la voce
   "Profilo disattivato dopo un crash: Riattiva / Resta su Default".
 - Tooltip e icona di stato: Tctl e PPT attuali aggiornati ogni 2 s (icona normale /
