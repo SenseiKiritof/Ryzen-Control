@@ -706,7 +706,8 @@ def cmd_telemetry(ctx, args):
             rpm = hw_read("%s/fan%d_input" % (fd, n))
             if rpm > 0 or fan_role(n) != "sconosciuto":
                 info = fan_roles().get(str(n), {})
-                fans.append({"canale": n, "rpm": rpm, "role": info.get("role", "sconosciuto"), "name": info.get("name")})
+                fans.append({"canale": n, "rpm": rpm, "pwm": hw_read("%s/pwm%d" % (fd, n)),
+                             "role": info.get("role", "sconosciuto"), "name": info.get("name")})
     return {"tctl": tctl(), "tccd": tccd, "ppt": lim.get("ppt"), "ppt_limit": lim.get("ppt_limit"),
             "tdc": lim.get("tdc"), "tdc_limit": lim.get("tdc_limit"), "edc_limit": lim.get("edc_limit"),
             "tjmax": lim.get("thm_limit"), "fmax": read_fmax(), "cores": cores, "fans": fans, "power": power_get()}
@@ -970,12 +971,25 @@ def run_load(args, seconds):
     return wait_child(spawn_load(args, seconds)) == 0 and not mce_since(t0)
 
 
+def core_cpus(c):
+    """CPU logiche del core fisico c (entrambi i thread SMT), es. "3,11"."""
+    if FAKE:
+        return "%d,%d" % (c, c + CORES)
+    try:
+        return read_text("/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list" % c)
+    except OSError:
+        return str(c)
+
+
+def core_load_args(c, extra=()):
+    """Carico di stabilità per un core: entrambi i thread, metodi misti con verifica dei risultati."""
+    return ["--cpu", "2", "--taskset", core_cpus(c), "--cpu-method", "all", "--verify"] + list(extra)
+
+
 def co_test(cores, seconds):
     """Tre fasi: pieno carico con verifica, 50 %, 10 % (le instabilità CO emergono a basso carico)."""
     sec = max(1, seconds // 3)
-    base = ["--cpu", str(len(cores)), "--cpu-method", "all", "--verify"]
-    if len(cores) == 1:
-        base += ["--taskset", str(cores[0])]
+    base = core_load_args(cores[0]) if len(cores) == 1 else ["--cpu", "0", "--cpu-method", "all", "--verify"]
     for extra in ([], ["--cpu-load", "50"], ["--cpu-load", "10"]):
         if not run_load(base + extra, sec):
             return False
@@ -989,9 +1003,7 @@ def co_test_sampled(cores, seconds):
         check_abort()
         return FAKE.load_ok(["--taskset", str(cores[0])] if len(cores) == 1 else []), sample_cores()
     sec = max(1, seconds // 3)
-    base = ["--cpu", str(len(cores)), "--cpu-method", "all", "--verify"]
-    if len(cores) == 1:
-        base += ["--taskset", str(cores[0])]
+    base = core_load_args(cores[0]) if len(cores) == 1 else ["--cpu", "0", "--cpu-method", "all", "--verify"]
     pr = spawn_load(base, sec)
     time.sleep(max(1, sec // 2))
     sample = sample_cores()
@@ -1027,9 +1039,9 @@ def mce_cores_since(ts, cores):
 
 
 def co_test_parallel(cores, seconds):
-    """Tutti i core insieme, un worker per core (così l'instabilità software resta attribuita al
-    core): pieno carico, poi 50 %, poi raffiche singole a turno per toccare il boost massimo
-    di ogni core. Restituisce (core falliti, campione tensioni/MHz a pieno carico)."""
+    """Tutti i core insieme, un worker per core su entrambi i thread SMT (così l'instabilità
+    software resta attribuita al core): pieno carico, poi 50 %, poi raffiche singole a turno per
+    toccare il boost massimo di ogni core. Restituisce (core falliti, campione tensioni/MHz)."""
     if FAKE:
         check_abort()
         return {c for c in cores if not FAKE.load_ok(["--taskset", str(c)])}, sample_cores()
@@ -1038,8 +1050,7 @@ def co_test_parallel(cores, seconds):
     sample = None
     t0 = time.time()
     for extra in ([], ["--cpu-load", "50"]):
-        procs = {c: spawn_load(["--cpu", "1", "--taskset", str(c), "--cpu-method", "all", "--verify"] + extra, sec)
-                 for c in cores if c not in failed}
+        procs = {c: spawn_load(core_load_args(c, extra), sec) for c in cores if c not in failed}
         if not extra:
             time.sleep(max(1, sec // 2))
             sample = sample_cores()                    # tensioni a pieno carico a questo livello di CO
@@ -1048,7 +1059,7 @@ def co_test_parallel(cores, seconds):
                 failed.add(c)
     burst = max(3, sec // max(1, len(cores)))
     for c in cores:
-        if c not in failed and not run_load(["--cpu", "1", "--taskset", str(c), "--cpu-method", "all", "--verify"], burst):
+        if c not in failed and not run_load(core_load_args(c), burst):
             failed.add(c)
     return failed | mce_cores_since(t0, cores), sample
 
@@ -1060,9 +1071,9 @@ def at_total_estimate(mode, p):
     if mode == "eco":
         t += AT_FMAX_TESTS_EST * BURSTS * BURST_SEC
     elif mode == "auto":
-        t += AT_PPT_TESTS_EST * (5 + BENCH_SEC) + AT_FKNEE_TESTS_EST * (3 + BENCH_SEC)
+        t += len(BENCH_METHODS) * 6 + AT_PPT_TESTS_EST * (5 + BENCH_SEC) + AT_FKNEE_TESTS_EST * (3 + BENCH_SEC)
     else:
-        t += BOOST_BENCHES * (5 + BENCH_SEC)
+        t += len(BENCH_METHODS) * 6 + BOOST_BENCHES * (5 + BENCH_SEC)
     return int(t)
 
 
@@ -1172,13 +1183,30 @@ def rapl_energy():
         return None, None
 
 
-def bench(threads, core=None):
-    """(bogo-ops/s, W medi) di stress-ng matrixprod per BENCH_SEC secondi; W da RAPL, fallback PM d[3]."""
+BENCH_METHODS = ("matrixprod", "fft", "double", "int64")   # candidati: si misura quale consuma di più
+
+
+def heaviest_method():
+    """Il metodo stress-ng che fa consumare di più su questa CPU: lo sweep del PPT deve toccare
+    il limite, altrimenti il ginocchio viene misurato su un carico leggero e il PPT scelto
+    penalizza i carichi pesanti reali."""
+    if FAKE:
+        return "matrixprod"
+    best, watts_best = BENCH_METHODS[0], -1.0
+    for m in BENCH_METHODS:
+        _, w = bench(CORES * 2, method=m, seconds=6)
+        if w > watts_best:
+            best, watts_best = m, w
+    return best
+
+
+def bench(threads, core=None, method="matrixprod", seconds=None):
+    """(bogo-ops/s, W medi) di stress-ng per `seconds` (default BENCH_SEC); W da RAPL, fallback PM d[3]."""
     if FAKE:
         check_abort()
         return FAKE.bench(threads)
-    args = ["stress-ng", "--cpu", str(threads), "--cpu-method", "matrixprod", "--metrics", "-Y", "/dev/stdout",
-            "-t", str(BENCH_SEC), "-q"]
+    args = ["stress-ng", "--cpu", str(threads), "--cpu-method", method, "--metrics", "-Y", "/dev/stdout",
+            "-t", str(seconds or BENCH_SEC), "-q"]
     if core is not None:
         args += ["--taskset", str(core)]
     e0, rng = rapl_energy()
@@ -1232,6 +1260,8 @@ def at_knee_step(ctx, st, base):
     basso con prestazioni ≥ (100 − loss) % del massimo misurato."""
     k = st["knee"]
     loss = st["params"]["loss"] / 100.0
+    if "method" not in k:
+        k["method"] = heaviest_method()
     if st["phase"] == "ppt":
         v = k["ppt"]["current"]
         lim = at_scaled_limits(base, v)
@@ -1239,7 +1269,7 @@ def at_knee_step(ctx, st, base):
             if lim[key] is not None:
                 run([key, str(lim[key])], ctx)
         pause(5)
-        ops, watts = bench(CORES * 2)
+        ops, watts = bench(CORES * 2, method=k["method"])
         k["ppt"]["tests"].append([v, ops, watts])
         best = max(t[1] for t in k["ppt"]["tests"])
         nxt = round(v - base["ppt"] * PPT_SWEEP_STEP)
@@ -1261,7 +1291,7 @@ def at_knee_step(ctx, st, base):
         v = k["fmax"]["current"]
         run(["fmax", str(v)], ctx)
         pause(3)
-        ops, watts = bench(1, best_core())
+        ops, watts = bench(1, best_core(), method=k["method"])
         k["fmax"]["tests"].append([v, ops, watts])
         best = max(t[1] for t in k["fmax"]["tests"])
         nxt = v - FMAX_STEP
@@ -1290,14 +1320,15 @@ def boost_lines(st, base):
 def at_boost_bench(ctx, st, base):
     """Un solo passo: prestazioni MT e ST a fabbrica e con il profilo boost → guadagno misurato;
     poi il profilo boost viene scritto e applicato."""
-    core = best_core()
+    core, m = best_core(), heaviest_method()
     apply_lines(profile_lines("baseline"), ctx, "cpu")
     pause(5)
-    fab = {"mt": bench(CORES * 2), "st": bench(1, core)}
+    fab = {"mt": bench(CORES * 2, method=m), "st": bench(1, core, method=m)}
     lines = boost_lines(st, base)
     apply_lines([l.split() for l in lines], ctx)
     pause(5)
-    bst = {"mt": bench(CORES * 2), "st": bench(1, core)}
+    bst = {"mt": bench(CORES * 2, method=m), "st": bench(1, core, method=m)}
+    st["method"] = m
     st["bench"] = {"fabbrica": fab, "boost": bst,
                    "gain_mt_pct": round((bst["mt"][0] / fab["mt"][0] - 1) * 100, 1) if fab["mt"][0] else None,
                    "gain_st_pct": round((bst["st"][0] / fab["st"][0] - 1) * 100, 1) if fab["st"][0] else None}
@@ -1327,11 +1358,30 @@ def at_final_values(st):
     return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
 
 
+def at_mv_per_step(st):
+    """Mediana delle pendenze (V0 − Vlivello)/|livello| sui core provati a ogni livello: robusta
+    a un campione preso in condizioni diverse (frequenza/temperatura)."""
+    smp = st.get("samples", {})
+    ref = smp.get("0", {}).get("volt")
+    if not ref:
+        return None
+    slopes = []
+    for lvl, sm in smp.items():
+        v = int(lvl)
+        if v >= 0:
+            continue
+        for c in range(CORES):
+            if sm["volt"][c] is not None and ref[c] is not None:
+                slopes.append((ref[c] - sm["volt"][c]) * 1000.0 / -v)
+    return round(median(slopes), 1) if slopes else None
+
+
 def cmd_autotune(ctx, args):
-    """autotune start eco|auto [chiave=valore…] | step | status | abort | estimate eco|auto [chiave=valore…]"""
+    """autotune start eco|auto|boost [chiave=valore…] | step | status | abort | estimate eco|auto|boost [chiave=valore…]"""
     st = _autotune(ctx, args)
     if isinstance(st, dict) and st.get("phase"):
         st["eta"] = at_estimate(st)
+        st["mv_per_step"] = at_mv_per_step(st)
     return st
 
 
@@ -2397,6 +2447,7 @@ def selftest():
     # ripresa dopo crash (core per core): il passo in corso diventa instabile, si passa al core successivo
     st = run(["autotune", "start", "auto", "step=9", "parallel=0", "reuse=0"])
     assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 300 + 5 * 20 + 6 * 18, st["eta"]
+    assert core_cpus(3) == "3,11" and core_load_args(3)[:4] == ["--cpu", "2", "--taskset", "3,11"]
     run(["autotune", "step"])                          # core 0 a -5: ok
     st = run(["autotune", "status"])
     st["in_progress"] = {"kind": "co", "core": 0, "value": -10, "boot_id": "altro-boot"}
@@ -2427,7 +2478,7 @@ def selftest():
     saved = json.loads(open(P(CO_LIMITS_PATH)).read())
     assert saved["results"]["7"] == -15 and saved["colimit"] == -50, saved       # −50 copre anche i −40 di Auto/Boost
     est = run(["autotune", "estimate", "auto"])
-    assert est["co_reuse"] and est["parallel_total_s"] == 300 + 5 * 20 + 6 * 18, est
+    assert est["co_reuse"] and est["parallel_total_s"] == 300 + 4 * 6 + 5 * 20 + 6 * 18, est
     st = run(["autotune", "start", "auto", "step=3"])
     assert st["phase"] == "final" and st["co_reused"] and st["results"]["7"] == -15
     run(["autotune", "abort"])
@@ -2452,7 +2503,7 @@ def selftest():
     run(["profile", "delete", "auto"])
     # ---- autotune boost: CO spinto + limiti/FMax ai tetti + guadagno misurato ----
     est = run(["autotune", "estimate", "boost"])
-    assert "target" not in est["params"] and est["parallel_total_s"] == 300 + 4 * 20 and est["co_reuse"], est
+    assert "target" not in est["params"] and est["parallel_total_s"] == 300 + 4 * 6 + 4 * 20 and est["co_reuse"], est
     st = run(["autotune", "start", "boost", "step=3"])      # riusa il limite misurato da auto (−40 → −37)
     assert st["phase"] == "final" and st["co_reused"]
     for _ in range(300):
@@ -2460,6 +2511,7 @@ def selftest():
         if st["phase"] == "done":
             break
     assert st["phase"] == "done" and st["final"] == [-37] * CORES and st["bench"]["gain_mt_pct"] is not None, st
+    assert st["method"] == "matrixprod" and st["mv_per_step"] == 3.0
     bl = run(["profile", "show", "boost"])["lines"]
     assert "co -37 -37 -37 -37 -37 -37 -37 -37" in bl and "ppt 162" in bl and "fmax 5225" in bl and "power performance" in bl, bl
     assert run(["status"])["profile"] == "boost" and run(["status"])["co"] == [-37] * CORES

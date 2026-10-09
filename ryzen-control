@@ -234,6 +234,34 @@ def card(orientation=Gtk.Orientation.VERTICAL, spacing=6):
     return Gtk.Box(orientation=orientation, spacing=spacing, css_classes=["card", "tile"])
 
 
+def pwm_pct(pwm):
+    """pwm 0–255 → percentuale intera (arrotondamento classico): 77 → 30, 51 → 20, 255 → 100."""
+    return int(pwm * 100 / 255.0 + 0.5)
+
+
+def pct_pwm(pct):
+    """percentuale → pwm 0–255: 20 → 51, 100 → 255."""
+    return int(pct * 255 / 100.0 + 0.5)
+
+
+def curve_points(tokens):
+    """['60:51', '75:255'] (o la stringa) → [(60, 51), (75, 255)]; token non validi ignorati (li valida ryzenctl)."""
+    out = []
+    for tok in (tokens.split() if isinstance(tokens, str) else tokens):
+        try:
+            t, pwm = tok.split(":")
+            out.append((int(t), int(pwm)))
+        except ValueError:
+            pass
+    return out
+
+
+def curve_text(tokens):
+    """Curva leggibile: '60 °C → 20 % · 75 °C → 100 %'."""
+    pts = curve_points(tokens)
+    return " · ".join("%d °C → %d %%" % (t, pwm_pct(pwm)) for t, pwm in pts) if pts else None
+
+
 def diff_label(base, new, unit="", lower_is_better=True):
     """Etichetta 'fabbrica → nuovo Δ': verde se più conservativo della baseline, rosso se più spinto, grigio se uguale."""
     def num(v):
@@ -309,7 +337,7 @@ def profile_table(lines, st):
                 same = cur_v is not None and abs(cur_v - new_v) <= tol
                 rows.append(("Ventola %d %s" % (n, name), diff_label(new_v if same else cur_v, new_v, "ms", lower_is_better=False)))
         if "curve" in f:
-            rows.append(("Ventola %d curva" % n, diff_label(" ".join(cur["curva"]) if cur.get("curva") else None, f["curve"])))
+            rows.append(("Ventola %d curva" % n, diff_label(curve_text(cur["curva"]) if cur.get("curva") else None, curve_text(f["curve"]))))
     grid = Gtk.Grid(column_spacing=18, row_spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
     for i, row in enumerate(rows):
         grid.attach(label(row[0], ["dim-label"], tooltip_text=row[2] if len(row) > 2 else None), 0, i, 1, 1)
@@ -330,16 +358,16 @@ def profile_view(lines, st):
 class Param(Gtk.Box):
     """Riga parametro: etichetta, info, Scale con marks, SpinButton (stessa Adjustment), 'attuale → nuovo'."""
 
-    def __init__(self, title, unit, info=False, tooltip=None):
+    def __init__(self, title, unit, info=False, tooltip=None, digits=0, step=1):
         super().__init__(spacing=12, tooltip_text=tooltip)
-        self.unit, self.read = unit, None
-        self.adj = Gtk.Adjustment(lower=0, upper=1, step_increment=1, page_increment=5)
+        self.unit, self.read, self.digits = unit, None, digits
+        self.adj = Gtk.Adjustment(lower=0, upper=1, step_increment=step, page_increment=step * 5)
         self.append(label(title, ["heading"], width_chars=9))
         self.info = label("", ["dim-label", "numeric"], width_chars=26, visible=info)
         self.append(self.info)
-        self.scale = Gtk.Scale(adjustment=self.adj, hexpand=True, draw_value=True, digits=0, value_pos=Gtk.PositionType.TOP)
+        self.scale = Gtk.Scale(adjustment=self.adj, hexpand=True, draw_value=True, digits=digits, value_pos=Gtk.PositionType.TOP)
         self.append(self.scale)
-        self.append(Gtk.SpinButton(adjustment=self.adj, digits=0, valign=Gtk.Align.CENTER))
+        self.append(Gtk.SpinButton(adjustment=self.adj, digits=digits, valign=Gtk.Align.CENTER))
         self.delta = label("", ["numeric"], xalign=1.0, width_chars=15)
         self.append(self.delta)
         self.adj.connect("value-changed", self.show_delta)
@@ -349,17 +377,21 @@ class Param(Gtk.Box):
         self.adj.set_lower(lo)
         self.adj.set_upper(hi)
         self.scale.clear_marks()
-        self.scale.add_mark(lo, Gtk.PositionType.BOTTOM, "%d" % lo)
-        self.scale.add_mark(hi, Gtk.PositionType.BOTTOM, "%d" % hi)
+        self.scale.add_mark(lo, Gtk.PositionType.BOTTOM, self.text(lo))
+        self.scale.add_mark(hi, Gtk.PositionType.BOTTOM, self.text(hi))
         if base is not None and lo < base < hi:
-            self.scale.add_mark(base, Gtk.PositionType.BOTTOM, "fabbrica %d" % base)
+            self.scale.add_mark(base, Gtk.PositionType.BOTTOM, "fabbrica " + self.text(base))
         self.reset()
 
+    def text(self, v):
+        return ("%.*f" % (self.digits, v)).replace(".", ",")
+
     def value(self):
-        return int(round(self.adj.get_value()))
+        v = round(self.adj.get_value(), self.digits)
+        return int(v) if self.digits == 0 else v
 
     def changed(self):
-        return self.read is not None and self.value() != self.read
+        return self.read is not None and self.value() != round(self.read, self.digits)
 
     def reset(self):
         if self.read is not None:
@@ -370,11 +402,130 @@ class Param(Gtk.Box):
         if self.read is None:
             return
         if self.changed():
-            self.delta.set_markup("<span alpha='60%%'>%d</span> → <b>%d</b> %s" % (self.read, self.value(), self.unit))
+            self.delta.set_markup("<span alpha='60%%'>%s</span> → <b>%s</b> %s" % (self.text(self.read), self.text(self.value()), self.unit))
             self.delta.add_css_class("accent")
         else:
-            self.delta.set_markup("<span alpha='60%%'>%d %s</span>" % (self.read, self.unit))
+            self.delta.set_markup("<span alpha='60%%'>%s %s</span>" % (self.text(self.read), self.unit))
             self.delta.remove_css_class("accent")
+
+
+class CurveEditor(Gtk.Box):
+    """Curva ventola in °C → % con giri stimati e grafico; il profilo resta `t:pwm` 0–255 (conversione qui,
+    validazione in ryzenctl: temperature crescenti, pwm non decrescenti, minimo 20 %, ultimo 100 % entro 125 °C)."""
+    T_LO, T_HI, PCT_LO, PCT_HI = 20, 125, 20, 100   # range dell'editor
+
+    def __init__(self, read, max_points, rpm_max):
+        super().__init__(spacing=12)
+        self.read, self.max_points, self.rpm_max = read, max(2, min(5, max_points)), rpm_max
+        self.read_pct = [(t, pwm_pct(pwm)) for t, pwm in read]
+        self.rows = []
+        left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        left.append(label("Curva (°C → %)", ["heading"], tooltip_text="La SmartFan del chip interpola fra i punti; sotto il primo tiene la sua %, oltre l'ultimo il 100 %"))
+        self.rows_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        left.append(self.rows_box)
+        btns = Gtk.Box(spacing=6)
+        self.add_btn = button("+ punto", self.add_point)
+        self.del_btn = button("− punto", self.del_point)
+        btns.append(self.add_btn)
+        btns.append(self.del_btn)
+        left.append(btns)
+        self.append(left)
+        right = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        self.graph = Gtk.DrawingArea(content_width=260, content_height=120, css_classes=["card"], valign=Gtk.Align.START)
+        self.graph.set_draw_func(self.draw)
+        right.append(self.graph)
+        self.reaction = label("", ["dim-label", "caption"], wrap=True, max_width_chars=44)
+        right.append(self.reaction)
+        self.append(right)
+        self.reset()
+
+    def row(self, t, pct):
+        box = Gtk.Box(spacing=6)
+        ts = Gtk.SpinButton.new_with_range(self.T_LO, self.T_HI, 1)
+        ts.set_value(t)
+        ps = Gtk.SpinButton.new_with_range(self.PCT_LO, self.PCT_HI, 1)
+        ps.set_value(pct)
+        rpm = label("", ["dim-label", "numeric"], width_chars=20)
+        for w in (ts, label("°C →"), ps, label("%"), rpm):
+            box.append(w)
+        ts.connect("value-changed", self.changed)
+        ps.connect("value-changed", self.changed)
+        return (box, ts, ps, rpm)
+
+    def set_points(self, pts):
+        for r in self.rows:
+            self.rows_box.remove(r[0])
+        self.rows = [self.row(t, pwm_pct(pwm)) for t, pwm in pts]
+        for r in self.rows:
+            self.rows_box.append(r[0])
+        self.changed()
+
+    def reset(self):
+        self.set_points(self.read)
+
+    def values(self):
+        """[(°C, %)] come mostrati."""
+        return [(int(ts.get_value()), int(ps.get_value())) for _, ts, ps, _ in self.rows]
+
+    def points(self):
+        """[(°C, pwm)] per il comando: se la % coincide con quella del punto letto resta il pwm letto (BIOS 77 = 30 %)."""
+        out = []
+        for i, (t, pct) in enumerate(self.values()):
+            keep = i < len(self.read) and pwm_pct(self.read[i][1]) == pct
+            out.append((t, self.read[i][1] if keep else pct_pwm(pct)))
+        return out
+
+    def changed(self, *_):
+        vals = self.values()
+        for (_, _, _, rpm), (_, pct) in zip(self.rows, vals):
+            # ponytail: stima lineare giri = rpm_max × % (i giri reali non sono lineari con la %); basta per orientarsi
+            rpm.set_text("≈ %d giri" % (self.rpm_max * pct / 100.0) if self.rpm_max else "giri: usa Identifica")
+        self.add_btn.set_sensitive(len(vals) < self.max_points and vals[-1][0] + 5 <= self.T_HI)
+        self.del_btn.set_sensitive(len(vals) > 2)
+        self.graph.queue_draw()
+
+    def add_point(self):
+        self.set_points(self.points() + [(self.values()[-1][0] + 5, 255)])
+
+    def del_point(self):
+        self.set_points(self.points()[:-1])
+
+    def set_reaction(self, up_s, down_s):
+        self.reaction.set_text("Reazione: salita %s s · discesa %s s — quanto in fretta la ventola segue la curva; valori alti ignorano i picchi brevi"
+                               % (("%.1f" % up_s).replace(".", ","), ("%.1f" % down_s).replace(".", ",")))
+
+    def draw(self, area, cr, w, h):
+        x0, y0, x1, y1 = 28, 6, w - 6, h - 14
+        X = lambda t: x0 + (t - 20) / 80.0 * (x1 - x0)            # 20–100 °C
+        Y = lambda pct: y1 - pct / 100.0 * (y1 - y0)               # 0–100 %
+        col = area.get_color()
+        cr.set_source_rgba(col.red, col.green, col.blue, 0.35)
+        cr.set_line_width(1)
+        cr.set_font_size(9)
+        for pct in (0, 50, 100):
+            cr.move_to(x0, Y(pct))
+            cr.line_to(x1, Y(pct))
+            cr.stroke()
+            cr.move_to(2, Y(pct) + 3)
+            cr.show_text("%d%%" % pct)
+        for t in (20, 60, 100):
+            cr.move_to(X(t), y0)
+            cr.line_to(X(t), y1)
+            cr.stroke()
+            cr.move_to(X(t) - 8, h - 3)
+            cr.show_text("%d°" % t)
+        cr.rectangle(x0, y0, x1 - x0, y1 - y0)
+        cr.clip()
+        for pts, rgb, width in ((self.read_pct, (0.55, 0.55, 0.55), 1.5), (self.values(), (0.21, 0.52, 0.89), 2.0)):
+            if not pts:
+                continue
+            cr.set_source_rgb(*rgb)
+            cr.set_line_width(width)
+            cr.move_to(X(20), Y(pts[0][1]))                 # sotto il primo punto: la sua %
+            for t, pct in pts:
+                cr.line_to(X(t), Y(pct))
+            cr.line_to(X(130), Y(pts[-1][1]))               # oltre l'ultimo: resta la sua % (100)
+            cr.stroke()
 
 
 class Page(Gtk.Box):
@@ -488,7 +639,11 @@ class MonitorPage(Gtk.Box):
             if lab is None:
                 lab = self.fan_labels[f["canale"]] = label("", ["numeric"])
                 self.fans.append(lab)
-            lab.set_text("%s (%s) · %d giri/min" % (f.get("name") or "Canale %d" % f["canale"], f.get("role", "sconosciuto"), f["rpm"]))
+            pwm = f.get("pwm")
+            if pwm is None:   # telemetry non porta il pwm: ultimo `fan status` (aggiornato a ogni ricarica)
+                pwm = next((c["pwm"] for c in (self.win.status.get("fans") or {}).get("canali", []) if c["canale"] == f["canale"]), None)
+            lab.set_text("%s (%s) · %d giri/min%s" % (f.get("name") or "Canale %d" % f["canale"], f.get("role", "sconosciuto"), f["rpm"],
+                                                      " · pwm %d (%d %%)" % (pwm, pwm_pct(pwm)) if pwm is not None else ""))
         if not self.fan_labels:
             self.fans.append(label("Nessuna ventola rilevata", ["dim-label"]))
             self.fan_labels[0] = None
@@ -1163,7 +1318,8 @@ class FansPage(Page):
             head.append(name)
             chip = label(role, ["chip", ROLE_CSS.get(role, "dim-label")], valign=Gtk.Align.CENTER)
             head.append(chip)
-            head.append(label("%d giri/min · pwm %d · modo %d" % (c["rpm"], c["pwm"], c["modo"]), ["numeric"], hexpand=True))
+            head.append(label("%d giri/min · pwm %d (%d %%) · modo %d%s" % (c["rpm"], c["pwm"], pwm_pct(c["pwm"]), c["modo"],
+                                                                          " · %d giri al 100 %%" % c["rpm_max"] if c.get("rpm_max") else ""), ["numeric"], hexpand=True))
             head.append(button("Identifica", lambda n=n: self.identify(n)))
             for target in ("pompa", "sconosciuto"):
                 if role != target:
@@ -1171,17 +1327,17 @@ class FansPage(Page):
             box.append(head)
             box.append(label(why or "ruolo non rilevato: usa \"Rileva ruoli\" (nome: Invio per salvare)", ["dim-label", "caption"]))
             if role == "ventola" and self.step_range:
-                up, down = Param("Salita", "ms"), Param("Discesa", "ms")
-                up.setup(self.step_range[0], self.step_range[1], c["step_up_ms"])
-                down.setup(self.step_range[0], self.step_range[1], c["step_down_ms"])
-                curve = Gtk.Entry(text=" ".join(c["curva"]), hexpand=True)
-                crow = Gtk.Box(spacing=12)
-                crow.append(label("Curva", ["heading"], width_chars=9))
-                crow.append(curve)
-                crow.append(label("°C:pwm crescenti, ultimo pwm 255", ["dim-label"]))
-                for w in (up, down, crow):
+                up = Param("Salita", "s", digits=1, step=0.5, tooltip="Tempo fra un passo PWM e il successivo quando la temperatura sale: alto = la ventola ignora i picchi brevi")
+                down = Param("Discesa", "s", digits=1, step=0.5, tooltip="Tempo fra un passo PWM e il successivo quando la temperatura scende")
+                up.setup(self.step_range[0] / 1000.0, self.step_range[1] / 1000.0, c["step_up_ms"] / 1000.0)
+                down.setup(self.step_range[0] / 1000.0, self.step_range[1] / 1000.0, c["step_down_ms"] / 1000.0)
+                editor = CurveEditor(curve_points(c["curva"]), len(c["curva"]), c.get("rpm_max"))
+                for prm in (up, down):
+                    prm.adj.connect("value-changed", lambda *_, u=up, d=down, e=editor: e.set_reaction(u.value(), d.value()))
+                editor.set_reaction(up.value(), down.value())
+                for w in (up, down, editor):
                     box.append(w)
-                self.chans[n] = (up, down, curve, c)
+                self.chans[n] = (up, down, editor, c)
             self.body.append(box)
             self.cards.append(box)
 
@@ -1209,19 +1365,20 @@ class FansPage(Page):
         self.win.confirm("Rilevare i ruoli dei canali?", AUTODETECT_WARNING, "Avvia", go)
 
     def reset(self):
-        for up, down, curve, c in self.chans.values():
+        for up, down, editor, c in self.chans.values():
             up.reset()
             down.reset()
-            curve.set_text(" ".join(c["curva"]))
+            editor.reset()
 
     def lines(self, only_changed):
         out = []
-        for n, (up, down, curve, c) in sorted(self.chans.items()):
-            if not only_changed or up.changed() or down.changed():
-                out.append("fan %d step %d %d" % (n, up.value(), down.value()))
-            text = " ".join(curve.get_text().split())
-            if not only_changed or text != " ".join(c["curva"]):
-                out.append("fan %d curve %s" % (n, text))
+        for n, (up, down, editor, c) in sorted(self.chans.items()):
+            ms = (int(round(up.value() * 1000)), int(round(down.value() * 1000)))
+            if not only_changed or ms != (c["step_up_ms"], c["step_down_ms"]):
+                out.append("fan %d step %d %d" % (n, ms[0], ms[1]))
+            pts = editor.points()
+            if not only_changed or pts != editor.read:
+                out.append("fan %d curve %s" % (n, " ".join("%d:%d" % pt for pt in pts)))
         return out
 
 
