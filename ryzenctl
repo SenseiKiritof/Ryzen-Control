@@ -882,9 +882,10 @@ def cmd_preset(ctx, args):
 # ---- Autotune: macchina a passi (Eco/Auto), stato su disco, ripresa dopo crash ----------
 AT_PATH = STATE + "/autotune.json"
 # Il limite di stabilità del CO è uno solo per core: la ricerca è condivisa fra le modalità
-# (stessa profondità, colimit −40) e salvata in CO_LIMITS_PATH; ogni modalità applica il
+# (Eco fino a −50 = fondo scala, Auto/Boost −40; una misura più profonda vale per tutte) e
+# salvata in CO_LIMITS_PATH; ogni modalità applica il
 # proprio margine (Eco +5 = discreto, Auto/Boost +3). reuse=1 riusa la misura precedente.
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 5, "step": 90, "parallel": 1, "reuse": 1},
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -50, "margin": 5, "step": 90, "parallel": 1, "reuse": 1},
                "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1},
                "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1}}
 CO_LIMITS_PATH = STATE + "/co_limits.json"
@@ -2364,29 +2365,29 @@ def selftest():
     expect_err(["autotune", "step"], "nessuna calibrazione")
     expect_err(["autotune", "start", "eco", "colimit=5"], "fuori")
     est = run(["autotune", "estimate", "eco"])
-    assert est["parallel_total_s"] == 8 * 90 + 300 + 5 * 12 * 5 and est["sequential_total_s"] == 8 * 8 * 90 + 300 + 300, est
+    assert est["parallel_total_s"] == 10 * 90 + 300 + 5 * 12 * 5 and est["sequential_total_s"] == 8 * 10 * 90 + 300 + 300, est
     expect_err(["autotune", "estimate", "eco", "parallel=2"], "fuori")
     rm(P(CO_LIMITS_PATH))
     st = run(["autotune", "start", "eco", "step=9"])
-    assert st["phase"] == "co" and st["params"]["colimit"] == -40 and st["params"]["step"] == 9 and st["parallel"]
-    assert st["eta"]["remaining_s"] == 8 * 9 + 300 + 300 and st["eta"]["total_s"] == 8 * 9 + 300 + 300, st["eta"]
+    assert st["phase"] == "co" and st["params"]["colimit"] == -50 and st["params"]["step"] == 9 and st["parallel"]
+    assert st["eta"]["remaining_s"] == 10 * 9 + 300 + 300 and st["eta"]["total_s"] == 10 * 9 + 300 + 300, st["eta"]
     steps = 0
     for _ in range(200):
         st = run(["autotune", "step"])
         steps += 1
         if st["phase"] == "done":
             break
-    assert steps == 8 + 1 + 7 and st["eta"]["remaining_s"] == 0, steps   # 8 livelli in parallelo, finale, 7 FMax
+    assert steps == 10 + 1 + 7 and st["eta"]["remaining_s"] == 0, steps   # 10 livelli in parallelo, finale, 7 FMax
     assert st["samples"]["0"]["volt"][0] == 1.25 and st["samples"]["-20"]["volt"][0] == 1.19, st["samples"]   # −20 ≈ −60 mV nel finto
     assert st["samples"]["-25"]["volt"][7] is None and st["samples"]["-25"]["volt"][0] == 1.175   # core 7 fuori prova a −25
     assert run(["telemetry"])["cores"][0]["volt"] is not None
     assert run(["status"])["limits"]["ppt"] == 89.0 and run(["status"])["limits"]["tjmax"] == 80.0
     assert st["phase"] == "done" and "error" not in st, st
-    # core 7 stabile fino a -15 (instabile a -20) → -10; core 3 fino a -25 → -20; gli altri al limite -40 → -35
-    assert st["final"] == [-35, -35, -35, -20, -35, -35, -35, -10] and st["unstable"]["7"]["value"] == -20, st["final"]
+    # core 7 stabile fino a -15 (instabile a -20) → -10; core 3 fino a -25 → -20; gli altri al fondo scala -50 → -45
+    assert st["final"] == [-45, -45, -45, -20, -45, -45, -45, -10] and st["unstable"]["7"]["value"] == -20, st["final"]
     assert st["fmax"]["chosen"] == 4625 and st["fmax"]["tests"][0][0] == 5225, st["fmax"]
     eco = run(["profile", "show", "eco"])["lines"]
-    assert "co -35 -35 -35 -20 -35 -35 -35 -10" in eco and "fmax 4625" in eco and "ppt 89" in eco
+    assert "co -45 -45 -45 -20 -45 -45 -45 -10" in eco and "fmax 4625" in eco and "ppt 89" in eco
     assert "fan 1 step 10000 5000" in eco and "fan 1 curve 60:77 75:255" in eco, eco
     assert run(["status"])["profile"] == "eco" and run(["status"])["co"][7] == -10
     # ripresa dopo crash (core per core): il passo in corso diventa instabile, si passa al core successivo
@@ -2420,7 +2421,7 @@ def selftest():
 
     # ---- riuso del limite misurato: auto parte dalla passata finale col suo margine ----
     saved = json.loads(open(P(CO_LIMITS_PATH)).read())
-    assert saved["results"]["7"] == -15 and saved["colimit"] == -40, saved
+    assert saved["results"]["7"] == -15 and saved["colimit"] == -50, saved       # −50 copre anche i −40 di Auto/Boost
     est = run(["autotune", "estimate", "auto"])
     assert est["co_reuse"] and est["parallel_total_s"] == 300 + 5 * 20 + 6 * 18, est
     st = run(["autotune", "start", "auto", "step=3"])
