@@ -1,6 +1,6 @@
 Name:           ryzen-control
 Version:        0.1.0
-Release:        9%{?dist}
+Release:        10%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; driver ryzen_smu incluso (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -63,10 +63,12 @@ if [ ! -s "$DROPIN" ] && [ -f "$AKMODS_KEY" ] && [ -f "$AKMODS_CERT" ] \
     printf 'mok_signing_key=%%s\nmok_certificate=%%s\n' "$AKMODS_KEY" "$AKMODS_CERT" > "$DROPIN"
     FORCE="--force"   # nuova chiave: il modulo va rifirmato
 fi
+# `dkms add --rpm_safe_upgrade` SEMPRE: crea il lock che annulla il `dkms remove` del %%preun
+# del pacchetto vecchio nella stessa transazione (senza, l'aggiornamento cancella il modulo).
+dkms add -m ryzen_smu -v %{version} -q --rpm_safe_upgrade || :
 # Ricompila solo se serve: un rebuild + dracut di tutte le initramfs costa circa un minuto.
 # Quando cambia il sorgente del driver va bumpata la versione (nuova directory /usr/src).
 if [ -n "$FORCE" ] || ! dkms status -m ryzen_smu -v %{version} -k "$(uname -r)" 2>/dev/null | grep -q ': installed'; then
-    dkms add -m ryzen_smu -v %{version} -q --rpm_safe_upgrade || :
     dkms build -m ryzen_smu -v %{version} -q $FORCE || :
     dkms install -m ryzen_smu -v %{version} -q $FORCE || :
 fi
@@ -107,6 +109,10 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-10
+- dkms add --rpm_safe_upgrade sempre nel %%post: altrimenti il %%preun del pacchetto
+  precedente rimuove il modulo durante l'aggiornamento
+
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-9
 - Il %%post ricompila il modulo solo se manca per il kernel in uso o cambia la chiave di firma
 
