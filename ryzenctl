@@ -870,8 +870,9 @@ def cmd_default(ctx, args):
     rm(marker("active"))
     s = load_settings()
     s["autostart"] = False
+    s["profile"] = None          # Default = nessun profilo selezionato (la GUI mostra la modalità da qui)
     save_settings(s)
-    return {"applied": done, "autostart": False}
+    return {"applied": done, "autostart": False, "profile": None}
 
 
 def cmd_crashed(ctx, args):
@@ -1479,7 +1480,7 @@ def selftest():
     with open(P(STATE + "/baseline.conf"), "a") as f:   # baseline di una versione vecchia con riga shaper
         f.write("shaper 4 0 0 0\n")
     out = run(["default"])
-    assert not out["autostart"] and not exists("active")
+    assert not out["autostart"] and not exists("active") and run(["status"])["profile"] is None
     st = run(["status"])
     assert st["limits"]["ppt"] == 162.0 and st["co"] == [0] * CORES and st["fmax"] == 5225
     assert st["power"] == run(["baseline", "show"])["power"]

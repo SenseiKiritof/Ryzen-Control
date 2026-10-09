@@ -287,10 +287,9 @@ class ModesPage(Adw.PreferencesPage):
                 ok = key in profiles
                 row.set_sensitive(ok)
                 row.set_subtitle(dict((k, s) for k, _, s in MODES)[key] if ok else MISSING_PROFILE)
-        if not st.get("active"):
-            current = "default"          # stato CPU = baseline, qualunque sia il profilo selezionato
-        else:
-            current = prof if prof in ("quiet", "auto", "boost") else "custom"
+        # Modalità = profilo selezionato (`use`); `default` lo azzera. Un profilo di sole ventole
+        # non tocca la CPU, quindi il marker `active` non basta a dedurla.
+        current = prof if prof in ("quiet", "auto", "boost") else ("custom" if prof else "default")
         self.rows[current][1].set_active(True)
         self.autostart.set_active(bool(st.get("autostart")))
         self.unlock.set_active(bool(st.get("unlock")))
