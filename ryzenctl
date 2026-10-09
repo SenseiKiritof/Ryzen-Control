@@ -1,0 +1,385 @@
+#!/usr/bin/python3
+"""ryzenctl — helper privilegiato di Ryzen Control (Ryzen 7 9800X3D, Granite Ridge).
+
+Unico punto che parla con l'SMU (driver ryzen_smu) e con le ventole. Stessa grammatica
+di comandi per CLI, file profilo e protocollo `serve`. Con RYZENCTL_ROOT impostato usa
+un backend finto (stesso del selftest): nessun driver, nessun root.
+"""
+import fcntl
+import json
+import os
+import struct
+import subprocess
+import sys
+import tempfile
+
+# ---- Manopole di calibrazione (tutte qui, non sparpagliarle) -----------------------
+CORES = 8                      # 9800X3D: 1 CCD, 8 core, nessun core fuso
+GRANITE_RIDGE = 23             # indice codename del driver ryzen_smu
+PM_FAMILY = 0x62               # pm_table_version >> 16 — ponytail: euristica famiglia,
+                               # mappa misurata solo su 0x620105 (gnr-smu)
+PM = {"ppt_limit": 2, "ppt": 3, "tdc_limit": 8, "tdc": 9,
+      "thm_limit": 10, "tctl": 11, "edc_limit": 63}   # indici float nella PM table
+
+# ---- Percorsi ------------------------------------------------------------------------
+ROOT = os.environ.get("RYZENCTL_ROOT", "")
+SMU_DIR = "/sys/kernel/ryzen_smu_drv"
+HWMON = "/sys/class/hwmon"
+ETC = "/etc/ryzenctl"
+STATE = "/var/lib/ryzenctl"
+RUN = "/run/ryzenctl"
+
+
+def P(path):
+    return ROOT + path
+
+
+# ---- Allowlist SMU: nient'altro viene mai inviato ------------------------------------
+MP1, RSMU = "mp1_smu_cmd", "rsmu_cmd"
+CMD = {
+    "co_set": (MP1, 0x35),      # SetDldoPsmMargin: core<<20 | margin&0xFFFF
+    "ppt_set": (MP1, 0x3E),     # mW
+    "tdc_set": (MP1, 0x3C),     # mA
+    "edc_set": (MP1, 0x3D),     # mA
+    "co_get": (RSMU, 0xD5),     # GetDldoPsmMargin: arg0 = core<<20
+    "fmax_set": (RSMU, 0x70),   # SetBoostLimitFrequencyAllCores, MHz
+    "fmax_get": (RSMU, 0x6E),   # GetBoostLimitFrequency
+    "tjmax_set": (RSMU, 0x59),  # SetTctlMax, °C
+    "shaper_set": (RSMU, 0xA6),  # hi<<24 | med<<16 | lo<<8 | 0x80 | tier
+    "shaper_get": (RSMU, 0x84),  # 5 parole, una per tier
+}
+SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
+              0xFD: "REJECTED_PREREQ", 0xFC: "BUSY", 0xFB: "TIMEOUT", 0xFA: "INVALID_ARG",
+              0xF9: "UNSUPPORTED_PLATFORM", 0xF8: "BUFFER", 0xF7: "MMAP", 0xF6: "PCI"}
+
+
+class Err(Exception):
+    """Errore riportato all'utente (CLI: stderr + exit 1; serve: {"ok": false})."""
+
+
+def s8(v):
+    return v - 0x100 if v & 0x80 else v
+
+
+def s16(v):
+    v &= 0xFFFF
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def co_arg(core, margin):
+    return (core << 20) | (margin & 0xFFFF)
+
+
+def shaper_arg(tier, lo, med, hi):
+    return ((hi & 0xFF) << 24) | ((med & 0xFF) << 16) | ((lo & 0xFF) << 8) | 0x80 | (tier & 0x7F)
+
+
+def shaper_decode(word):
+    return [s8((word >> 8) & 0xFF), s8((word >> 16) & 0xFF), s8((word >> 24) & 0xFF)]
+
+
+# ---- Trasporto SMU (reale) -----------------------------------------------------------
+def read_text(path):
+    with open(P(path)) as f:
+        return f.read().strip()
+
+
+def _lock():
+    os.makedirs(P(RUN), exist_ok=True)
+    fd = os.open(P(RUN + "/lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def smu_raw(mailbox, cmd, args):
+    """Una transazione: args → cmd → (stato, args di risposta). smu_args del driver è
+    globale: lock obbligatorio."""
+    fd = _lock()
+    try:
+        with open(P(SMU_DIR + "/smu_args"), "wb") as f:
+            f.write(struct.pack("<6I", *(list(args) + [0] * (6 - len(args)))))
+        with open(P(SMU_DIR + "/" + mailbox), "wb") as f:
+            f.write(struct.pack("<I", cmd))
+        with open(P(SMU_DIR + "/" + mailbox), "rb") as f:
+            status = struct.unpack("<I", f.read(4))[0]
+        with open(P(SMU_DIR + "/smu_args"), "rb") as f:
+            out = list(struct.unpack("<6I", f.read(24)))
+    finally:
+        os.close(fd)
+    return status, out
+
+
+def pm_raw():
+    """(versione, [float]) oppure (None, None) se il driver non espone la tabella."""
+    try:
+        with open(P(SMU_DIR + "/pm_table_version"), "rb") as f:
+            version = struct.unpack("<I", f.read(4))[0]
+        fd = _lock()
+        try:
+            with open(P(SMU_DIR + "/pm_table"), "rb") as f:
+                data = f.read()
+        finally:
+            os.close(fd)
+    except OSError:
+        return None, None
+    return version, list(struct.unpack("<%df" % (len(data) // 4), data[:len(data) // 4 * 4]))
+
+
+# ---- Backend finto (selftest, RYZENCTL_ROOT, GUI --mock) -----------------------------
+class Fake:
+    """Simula SMU, PM table, k10temp e profilo energetico di un 9800X3D. Stato su file
+    così più invocazioni CLI lo condividono. `drop` = prossime scritture accettate ma
+    ignorate (prova del readback). `log` registra i marker presenti a ogni scrittura."""
+
+    DEFAULT = {"codename": GRANITE_RIDGE, "co": [0] * CORES, "fmax": 5225,
+               "ppt": 162.0, "tdc": 120.0, "edc": 180.0, "thm": 95.0,
+               "shaper": [0x80 | t for t in range(5)], "tctl": 52.0, "power": "performance",
+               "pm_version": 0x620105, "drop": 0, "log": []}
+
+    def __init__(self):
+        self.path = P("/fake_smu.json")
+        self.s = json.loads(open(self.path).read()) if os.path.exists(self.path) else dict(self.DEFAULT)
+
+    def save(self):
+        write_atomic(self.path, json.dumps(self.s))
+
+    def _write(self, apply):
+        self.s["log"].append({"dirty": os.path.exists(P(STATE + "/dirty")),
+                              "active": os.path.exists(P(STATE + "/active"))})
+        if self.s["drop"] > 0:
+            self.s["drop"] -= 1
+        else:
+            apply()
+        self.save()
+
+    def smu(self, mailbox, cmd, args):
+        a = args[0] if args else 0
+        s = self.s
+        if (mailbox, cmd) == CMD["co_set"]:
+            self._write(lambda: s["co"].__setitem__((a >> 20) & 0xF, s16(a)))
+        elif (mailbox, cmd) in (CMD["ppt_set"], CMD["tdc_set"], CMD["edc_set"]):
+            key = {CMD["ppt_set"]: "ppt", CMD["tdc_set"]: "tdc", CMD["edc_set"]: "edc"}[(mailbox, cmd)]
+            self._write(lambda: s.__setitem__(key, a / 1000.0))
+        elif (mailbox, cmd) == CMD["co_get"]:
+            return 1, [s["co"][(a >> 20) & 0xF] & 0xFFFFFFFF, 0, 0, 0, 0, 0]
+        elif (mailbox, cmd) == CMD["fmax_set"]:
+            self._write(lambda: s.__setitem__("fmax", a & 0xFFFFF))
+        elif (mailbox, cmd) == CMD["fmax_get"]:
+            return 1, [s["fmax"], 0, 0, 0, 0, 0]
+        elif (mailbox, cmd) == CMD["tjmax_set"]:
+            self._write(lambda: s.__setitem__("thm", float(a)))
+        elif (mailbox, cmd) == CMD["shaper_set"]:
+            self._write(lambda: s["shaper"].__setitem__(a & 0x7F, a))
+        elif (mailbox, cmd) == CMD["shaper_get"]:
+            return 1, list(s["shaper"]) + [0]
+        else:
+            return 0xFE, [0] * 6
+        return 1, [0] * 6
+
+    def pm(self):
+        s = self.s
+        if not s["pm_version"]:
+            return None, None
+        t = [0.0] * 457
+        t[PM["ppt_limit"]], t[PM["ppt"]] = s["ppt"], 61.0
+        t[PM["tdc_limit"]], t[PM["tdc"]] = s["tdc"], 23.0
+        t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
+        t[PM["edc_limit"]] = s["edc"]
+        return s["pm_version"], t
+
+
+FAKE = Fake() if ROOT else None
+
+
+def smu(name, *args):
+    mailbox, cmd = CMD[name]
+    status, out = FAKE.smu(mailbox, cmd, args) if FAKE else smu_raw(mailbox, cmd, args)
+    if status != 1:
+        hint = " (PBO disabilitato nel BIOS? impostarlo su Advanced/Motherboard)" if status == 0xFD else ""
+        raise Err("SMU %s 0x%02X: %s%s" % (mailbox, cmd, SMU_STATUS.get(status, hex(status)), hint))
+    return out
+
+
+def pm_table():
+    version, t = FAKE.pm() if FAKE else pm_raw()
+    if version is None or (version >> 16) != PM_FAMILY:
+        return None, None
+    return version, t
+
+
+def check_cpu():
+    try:
+        code = int(FAKE.s["codename"]) if FAKE else int(read_text(SMU_DIR + "/codename"))
+    except (OSError, ValueError):
+        raise Err("driver ryzen_smu non caricato (%s)" % P(SMU_DIR))
+    if code != GRANITE_RIDGE:
+        raise Err("CPU non supportata (codename %d, atteso Granite Ridge %d)" % (code, GRANITE_RIDGE))
+
+
+def tctl():
+    if FAKE:
+        return FAKE.s["tctl"]
+    for d in sorted(os.listdir(P(HWMON))):
+        try:
+            if read_text("%s/%s/name" % (HWMON, d)) == "k10temp":
+                return int(read_text("%s/%s/temp1_input" % (HWMON, d))) / 1000.0
+        except OSError:
+            pass
+    return None
+
+
+def power_get():
+    if FAKE:
+        return FAKE.s["power"]
+    r = subprocess.run(["busctl", "get-property", "net.hadess.PowerProfiles",
+                        "/net/hadess/PowerProfiles", "net.hadess.PowerProfiles", "ActiveProfile"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return r.stdout.split('"')[1]
+    try:  # nessun demone: EPP di cpu0
+        epp = read_text("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference")
+        return {"power": "power-saver", "performance": "performance"}.get(epp, "balanced")
+    except OSError:
+        return None
+
+
+# ---- File di stato (scritture atomiche) ----------------------------------------------
+def write_atomic(path, text):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    os.chmod(path, 0o644)
+    dfd = os.open(d, os.O_RDONLY)
+    os.fsync(dfd)
+    os.close(dfd)
+
+
+# ---- Letture di stato CPU ------------------------------------------------------------
+def read_co():
+    return [s16(smu("co_get", core << 20)[0]) for core in range(CORES)]
+
+
+def read_fmax():
+    return smu("fmax_get")[0]
+
+
+def read_shaper():
+    return smu("shaper_get")[:5]
+
+
+def read_limits():
+    """Limiti e valori istantanei dalla PM table; {} se la tabella non c'è."""
+    version, t = pm_table()
+    if t is None:
+        return {}
+    return {k: round(t[i], 1) for k, i in PM.items()}
+
+
+def cmd_status(ctx, args):
+    check_cpu()
+    lim = read_limits()
+    st = {
+        "cpu": "Granite Ridge", "cores": CORES,
+        "smu_version": "finto" if FAKE else read_text(SMU_DIR + "/version"),
+        "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
+        "co": read_co(), "fmax": read_fmax(),
+        "shaper": [shaper_decode(w) for w in read_shaper()],
+        "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"),
+                   "edc": lim.get("edc_limit"), "tjmax": lim.get("thm_limit")},
+        "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(),
+                "tctl_pm": lim.get("tctl")},
+        "power": power_get(),
+    }
+    return st
+
+
+def fmt_status(st):
+    f = lambda v, u="": "n/d" if v is None else "%g%s" % (v, u)
+    lines = [
+        "CPU %s, %d core, SMU %s, PM table %s" % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"]),
+        "CO      " + " ".join("%+d" % v for v in st["co"]),
+        "Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])),
+        "FMax    %s MHz" % f(st["fmax"]),
+        "Limiti  PPT %s  TDC %s  EDC %s  Tjmax %s" % (f(st["limits"]["ppt"], " W"), f(st["limits"]["tdc"], " A"),
+                                                       f(st["limits"]["edc"], " A"), f(st["limits"]["tjmax"], " °C")),
+        "Ora     PPT %s  TDC %s  Tctl %s" % (f(st["now"]["ppt"], " W"), f(st["now"]["tdc"], " A"), f(st["now"]["tctl"], " °C")),
+        "Energia %s" % (st["power"] or "n/d"),
+    ]
+    return "\n".join(lines)
+
+
+# ---- Dispatcher ------------------------------------------------------------------------
+COMMANDS = {"status": cmd_status}
+FORMAT = {"status": fmt_status}
+
+
+def run(argv, ctx=None):
+    if not argv or argv[0] not in COMMANDS:
+        raise Err("comando sconosciuto: %s (disponibili: %s)" % (argv[:1], ", ".join(sorted(COMMANDS))))
+    return COMMANDS[argv[0]](ctx or {}, argv[1:])
+
+
+# ---- Selftest --------------------------------------------------------------------------
+def selftest():
+    global ROOT, FAKE
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-")
+    FAKE = Fake()
+    # codifiche
+    assert co_arg(7, -30) == (7 << 20) | 0xFFE2
+    assert s16(0xFFFFFFE2) == -30 and s16(0x0005) == 5
+    assert shaper_arg(2, -10, -5, 3) == (3 << 24) | (0xFB << 16) | (0xF6 << 8) | 0x80 | 2
+    assert shaper_decode(shaper_arg(4, -50, 0, 30)) == [-50, 0, 30]
+    # gate CPU
+    FAKE.s["codename"] = 24
+    FAKE.save()
+    try:
+        run(["status"])
+        raise AssertionError("gate codename non ha rifiutato")
+    except Err as e:
+        assert "non supportata" in str(e)
+    FAKE.s["codename"] = GRANITE_RIDGE
+    FAKE.save()
+    # status sul backend finto
+    st = run(["status"])
+    assert st["co"] == [0] * CORES and st["fmax"] == 5225
+    assert st["limits"] == {"ppt": 162.0, "tdc": 120.0, "edc": 180.0, "tjmax": 95.0}
+    assert st["now"]["tctl"] == 52.0 and st["power"] == "performance"
+    assert "Granite Ridge" in fmt_status(st)
+    # PM table assente: limiti n/d, resto funziona
+    FAKE.s["pm_version"] = 0
+    FAKE.save()
+    st = run(["status"])
+    assert st["limits"]["ppt"] is None and st["co"] == [0] * CORES
+    # comando fuori allowlist → l'SMU finto risponde UNKNOWN_CMD e smu() lo riporta
+    status, _ = FAKE.smu(MP1, 0x10, [0])
+    assert status == 0xFE
+    try:
+        run(["nope"])
+        raise AssertionError("comando sconosciuto accettato")
+    except Err:
+        pass
+    print("selftest ok (%s)" % ROOT)
+
+
+def main():
+    argv = sys.argv[1:]
+    if argv == ["selftest"]:
+        return selftest()
+    try:
+        result = run(argv)
+    except Err as e:
+        print("errore: %s" % e, file=sys.stderr)
+        sys.exit(1)
+    if argv[0] in FORMAT:
+        print(FORMAT[argv[0]](result))
+    elif result is not None:
+        print(json.dumps(result, indent=1, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()
