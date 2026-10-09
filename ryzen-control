@@ -492,14 +492,17 @@ class MonitorPage(Gtk.Box):
             cr.stroke()
 
 
-class AutotuneDialog(Adw.Dialog):
-    """Avanzamento della calibrazione: un `autotune step` alla volta finché phase == done."""
+class AutotuneDialog(Adw.Window):
+    """Avanzamento della calibrazione: un `autotune step` alla volta finché phase == done.
+    Finestra separata e ridimensionabile (Adw.Dialog ha dimensioni fisse e la tabella è alta)."""
 
     def __init__(self, win, mode):
-        super().__init__(title="Calibrazione %s" % mode.capitalize(), content_width=620, content_height=560, can_close=False)
+        super().__init__(title="Calibrazione %s" % mode.capitalize(), transient_for=win, modal=True, destroy_with_parent=True,
+                         default_width=max(640, int(win.get_width() * 0.9)), default_height=max(560, int(win.get_height() * 0.9)))
         self.win, self.mode = win, mode
         self.running = self.aborting = False
-        self.connect("close-attempt", lambda *_: self.win.toast("Calibrazione in corso: usa \"Interrompi\""))
+        self.closable = False
+        self.connect("close-request", self.on_close_request)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         self.header = label("", ["dim-label"], wrap=True)
         self.phase = label("Avvio…", ["title-3"], wrap=True, hexpand=True)
@@ -521,14 +524,15 @@ class AutotuneDialog(Adw.Dialog):
         for c in range(8):
             cell = {"core": label("%d" % c, ["numeric"], valign=Gtk.Align.START)}
             boxes = []
-            for key in ("fab", "prova"):   # due righe: CO sopra, tensione sotto
-                cell[key] = (label("—", ["numeric"]), label("", ["numeric", "caption"], visible=False))
+            for key in ("fab", "prova"):   # due righe: CO sopra, tensione sotto; larghezza fissa = niente riflussi
+                cell[key] = (label("—", ["numeric"], width_chars=4 if key == "fab" else 8),
+                             label("", ["numeric", "caption"], visible=False, width_chars=9 if key == "fab" else 22))
                 box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
                 box.append(cell[key][0])
                 box.append(cell[key][1])
                 boxes.append(box)
-            for key in ("stable", "unstable", "final"):
-                cell[key] = label("—", ["numeric"], valign=Gtk.Align.START)
+            for key, wc in (("stable", 6), ("unstable", 16), ("final", 6)):
+                cell[key] = label("—", ["numeric"], valign=Gtk.Align.START, width_chars=wc)
             for col, w in enumerate([cell["core"]] + boxes + [cell["stable"], cell["unstable"], cell["final"]]):
                 grid.attach(w, col, c + 1, 1, 1)
             self.cells.append(cell)
@@ -550,8 +554,14 @@ class AutotuneDialog(Adw.Dialog):
         tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=body, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
         tv.add_top_bar(Adw.HeaderBar())
         tv.add_bottom_bar(bar)
-        self.set_child(tv)
-        self.present(win)
+        self.set_content(tv)
+        self.present()
+
+    def on_close_request(self, *_):
+        if not self.closable:
+            self.win.toast("Calibrazione in corso: usa \"Interrompi\"")
+            return True     # blocca la chiusura
+        return False
 
     def start(self, params):
         argv = ["autotune", "start", self.mode] + ["%s=%d" % kv for kv in params.items()]
@@ -576,7 +586,7 @@ class AutotuneDialog(Adw.Dialog):
         self.phase.set_text("Errore: " + msg)
         self.abort_btn.set_visible(False)
         self.close_btn.set_visible(True)
-        self.set_can_close(True)
+        setattr(self, "closable", True)
 
     def show(self, st):
         ph, p = st.get("phase"), st.get("params", {})
@@ -694,13 +704,13 @@ class AutotuneDialog(Adw.Dialog):
                 knee["ppt"]["chosen"], knee["fmax"]["chosen"] or 0, st.get("params", {}).get("loss", 0)), ["numeric"], wrap=True))
         self.abort_btn.set_visible(False)
         self.close_btn.set_visible(True)
-        self.set_can_close(True)
+        setattr(self, "closable", True)
 
     def abort(self):
         self.aborting = True
         self.abort_btn.set_sensitive(False)
         self.phase.set_text("Interrompo al termine del test in corso…")
-        self.win.run([["autotune", "abort"]], lambda _: (self.win.toast("Calibrazione annullata, CPU a baseline"), self.set_can_close(True), self.close()))
+        self.win.run([["autotune", "abort"]], lambda _: (self.win.toast("Calibrazione annullata, CPU a baseline"), setattr(self, "closable", True), self.close()))
 
     def finish(self):
         self.close()
