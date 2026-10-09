@@ -1,6 +1,6 @@
 Name:           ryzen-control
 Version:        0.1.0
-Release:        10%{?dist}
+Release:        11%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; driver ryzen_smu incluso (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -10,6 +10,9 @@ BuildArch:      noarch
 BuildRequires:  make
 BuildRequires:  systemd-rpm-macros
 Requires:       python3 >= 3.9
+Requires:       python3-gobject
+Requires:       gtk4
+Requires:       libadwaita >= 1.5
 Requires:       polkit
 Requires:       systemd
 Requires:       dkms
@@ -32,7 +35,7 @@ boost e temperatura massima, profilo energetico e ventole della scheda madre.
 Profili applicati all'avvio con protezione dopo un crash: il profilo non
 viene riapplicato finché non lo decide l'utente.
 
-Un solo pacchetto: l'helper privilegiato ryzenctl (CLI), i servizi systemd e
+Un solo pacchetto: la GUI ryzen-control, l'helper privilegiato ryzenctl (CLI), i servizi systemd e
 il sorgente del modulo kernel ryzen_smu (amkillam/ryzen_smu, con dimensioni
 PM table aggiuntive per Granite Ridge), compilato da DKMS per ogni kernel
 installato. Con Secure Boot attivo il modulo viene firmato con la chiave
@@ -46,7 +49,7 @@ registrare una volta: mokutil --import /var/lib/dkms/mok.pub
 # Nessuna compilazione: script Python; il driver lo compila DKMS sul sistema.
 
 %install
-make install-cli install-dkms-src DESTDIR=%{buildroot} PREFIX=%{_prefix}
+make install DESTDIR=%{buildroot} PREFIX=%{_prefix}
 # Creato dal %%post solo quando la chiave akmods e' registrata; qui solo per tracciarlo (%%ghost).
 install -dm755 %{buildroot}%{_sysconfdir}/dkms/framework.conf.d
 touch %{buildroot}%{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
@@ -96,6 +99,10 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %license LICENSE ryzen_smu/LICENSE
 %doc README.md ryzen_smu/UPSTREAM.md
 %{_bindir}/ryzenctl
+%{_bindir}/ryzen-control
+%{_datadir}/applications/org.ryzencontrol.RyzenControl.desktop
+%{_datadir}/icons/hicolor/scalable/apps/org.ryzencontrol.RyzenControl.svg
+%{_metainfodir}/org.ryzencontrol.RyzenControl.metainfo.xml
 %{_unitdir}/ryzenctl.service
 %{_unitdir}/ryzenctl-resume.service
 %{_presetdir}/80-ryzen-control.preset
@@ -109,6 +116,9 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-11
+- GUI GTK4/libadwaita ryzen-control (monitor, modalità, CPU, curve, ventole), voce nel menu
+
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-10
 - dkms add --rpm_safe_upgrade sempre nel %%post: altrimenti il %%preun del pacchetto
   precedente rimuove il modulo durante l'aggiornamento

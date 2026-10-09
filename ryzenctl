@@ -623,7 +623,60 @@ def cmd_status(ctx, args):
         "power": power_get(),
         "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
         "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
+        "crashed": crashed_info(), "caps": caps(base, s["unlock"]) if base else None,
+        "active": os.path.exists(marker("active")),
     }
+
+
+def caps(base, unlock):
+    """Intervalli ammessi (min, max) per la GUI: stessa logica di cap_of."""
+    out = {"co": [CO_MIN, CO_MAX], "fan_step_ms": [0, FAN_STEP_MAX_MS]}
+    for key, lo in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN), ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
+        if key in base:
+            out[key] = [lo, cap_of(base, key, unlock)]
+    return out
+
+
+PM_CORE_TEMP = 317   # 0x620105: temperature per core d[317..324] (gnr-smu, CONFIRMED)
+
+
+def cmd_telemetry(ctx, args):
+    """Letture rapide per il monitor della GUI (1 Hz): niente scritture."""
+    check_cpu()
+    version, t = pm_table()
+    lim = read_limits()
+    cores = []
+    for c in range(CORES):
+        try:
+            mhz = int(read_text("/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq" % c)) // 1000
+        except (OSError, ValueError):
+            mhz = 3000 + c * 100 if FAKE else None
+        temp = round(t[PM_CORE_TEMP + c], 1) if t is not None and version == 0x620105 and len(t) > PM_CORE_TEMP + c else None
+        cores.append({"mhz": mhz, "temp": temp})
+    co = read_co()
+    for c in range(CORES):
+        cores[c]["co"] = co[c]
+    tccd = None
+    if FAKE:
+        tccd = round(FAKE.s["tctl"] - 15, 1)
+    else:
+        for d in sorted(os.listdir(P(HWMON))):
+            try:
+                if read_text("%s/%s/name" % (HWMON, d)) == "k10temp":
+                    tccd = int(read_text("%s/%s/temp3_input" % (HWMON, d))) / 1000.0
+            except OSError:
+                pass
+    fans = []
+    fd = fans_dir()
+    if fd:
+        for n in fan_channels(fd):
+            rpm = hw_read("%s/fan%d_input" % (fd, n))
+            if rpm > 0 or fan_role(n) != "sconosciuto":
+                info = fan_roles().get(str(n), {})
+                fans.append({"canale": n, "rpm": rpm, "role": info.get("role", "sconosciuto"), "name": info.get("name")})
+    return {"tctl": tctl(), "tccd": tccd, "ppt": lim.get("ppt"), "ppt_limit": lim.get("ppt_limit"),
+            "tdc": lim.get("tdc"), "tdc_limit": lim.get("tdc_limit"), "edc_limit": lim.get("edc_limit"),
+            "tjmax": lim.get("thm_limit"), "fmax": read_fmax(), "cores": cores, "fans": fans, "power": power_get()}
 
 
 def fmt_status(st):
@@ -1226,7 +1279,7 @@ COMMANDS = {
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
-    "fan": cmd_fan,
+    "fan": cmd_fan, "telemetry": cmd_telemetry,
 }
 FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest, "fan": fmt_fan}
 
@@ -1500,6 +1553,17 @@ def selftest():
     run(["default"])
     assert hw_read(Fake.FAN_DIR + "/pwm1_step_up_time") == 400
     run(["profile", "delete", "f"])
+
+    # ---- telemetry e caps ----
+    tele = run(["telemetry"])
+    assert len(tele["cores"]) == CORES and tele["cores"][0]["mhz"] == 3000 and tele["tctl"] == 52.0
+    assert [f["canale"] for f in tele["fans"]] == [1, 2, 3] and tele["fans"][1]["role"] == "pompa"
+    st = run(["status"])
+    assert st["caps"]["ppt"] == [PPT_MIN, 162] and st["caps"]["co"] == [CO_MIN, CO_MAX] and st["crashed"] is None
+    assert st["caps"]["fan_step_ms"] == [0, FAN_STEP_MAX_MS] and st["active"] is False
+    run(["unlock", "on"])
+    assert run(["status"])["caps"]["ppt"] == [PPT_MIN, UNLOCK_PPT] and run(["status"])["caps"]["fmax"][1] == 5225 + FMAX_UNLOCK_EXTRA
+    run(["unlock", "off"])
 
     # ---- hwtest: tutto ok, stato finale = baseline, active rimosso ----
     r = run(["hwtest"])
