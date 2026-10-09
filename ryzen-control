@@ -514,7 +514,7 @@ class AutotuneDialog(Adw.Window):
         self.note = label("", ["warning"], wrap=True, visible=False)
         for w in (self.header, top, self.progress, self.note, label("CO (Curve Optimizer) per core", ["heading"], tooltip_text=CO_TIP)):
             body.append(w)
-        grid = Gtk.Grid(column_spacing=14, row_spacing=4)
+        grid = Gtk.Grid(column_spacing=14, row_spacing=4, hexpand=True)
         heads = (("Core", None), ("Fabbrica", "CO di fabbrica; sotto, la tensione di riferimento misurata all'avvio con lo stesso carico"),
                  ("In prova", "Livello di CO in prova sul core; sotto, l'ultima tensione misurata a pieno carico e la differenza dal riferimento"),
                  ("Ultimo stabile", None), ("Instabile a", None), ("Definitivo", None))
@@ -534,6 +534,7 @@ class AutotuneDialog(Adw.Window):
             for key, wc in (("stable", 6), ("unstable", 16), ("final", 6)):
                 cell[key] = label("—", ["numeric"], valign=Gtk.Align.START, width_chars=wc)
             for col, w in enumerate([cell["core"]] + boxes + [cell["stable"], cell["unstable"], cell["final"]]):
+                w.set_hexpand(col > 0)          # le colonne dati si dividono la larghezza disponibile
                 grid.attach(w, col, c + 1, 1, 1)
             self.cells.append(cell)
         body.append(grid)
@@ -551,7 +552,9 @@ class AutotuneDialog(Adw.Window):
         self.close_btn.set_visible(False)
         bar.append(self.abort_btn)
         bar.append(self.close_btn)
-        tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=body, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        # a finestra larga il contenuto resta centrato e leggibile (max 1100 px), la griglia si allarga
+        clamp = Adw.Clamp(child=body, maximum_size=1100, tightening_threshold=800)
+        tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=clamp, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
         tv.add_top_bar(Adw.HeaderBar())
         tv.add_bottom_bar(bar)
         self.set_content(tv)
