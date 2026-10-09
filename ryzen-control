@@ -23,9 +23,9 @@ APP_ID = "org.ryzencontrol.RyzenControl"
 DEV_RYZENCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryzenctl")
 RYZENCTL = DEV_RYZENCTL if os.path.exists(DEV_RYZENCTL) else "/usr/bin/ryzenctl"
 POWER = ("power-saver", "balanced", "performance")
-PRESETS = ("quiet", "auto", "boost")
+PRESETS = ("eco", "auto", "boost")
 MODES = (("default", "Default", "Valori di fabbrica (baseline), avvio automatico disattivato"),
-         ("quiet", "Quiet", "Silenzio e temperature: limiti ridotti, ventole lente"),
+         ("eco", "Eco", "Silenzio e temperature: undervolt discreto, limiti ridotti, ventole lente"),
          ("auto", "Auto", "Prestazioni per watt: limiti al ginocchio di efficienza"),
          ("boost", "Boost", "Potenza bruta: limiti massimi consentiti"),
          ("custom", "Custom", "Valori impostati a mano nelle pagine CPU, Curve e Ventole"))
@@ -346,7 +346,7 @@ class ModesPage(Adw.PreferencesPage):
         super().__init__()
         self.win = win
         self.loading = False
-        g = Adw.PreferencesGroup(title="Modalità", description="Quiet, Auto e Boost sono profili generati dai valori di fabbrica di questa CPU")
+        g = Adw.PreferencesGroup(title="Modalità", description="Eco, Auto e Boost sono profili generati dai valori di fabbrica di questa CPU (la calibrazione li misurerà)")
         self.rows, first = {}, None
         for key, title, sub in MODES:
             row = Adw.ActionRow(title=title, subtitle=sub, activatable=True)

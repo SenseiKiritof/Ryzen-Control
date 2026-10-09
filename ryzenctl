@@ -799,9 +799,9 @@ def cmd_autostart(ctx, args):
 
 # ---- Preset delle modalità (finché la calibrazione della fase 4 non li sostituisce) ---------
 # ponytail: rapporti fissi rispetto alla baseline (quiet ≈ eco 65 W AMD su un 162 W, auto ≈ eco 105 W);
-# la calibrazione Quiet/Auto li rimpiazzerà con valori misurati su questa CPU.
+# la calibrazione Eco/Auto li rimpiazzerà con valori misurati su questa CPU.
 PRESETS = {
-    "quiet": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
+    "eco": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
     "auto": {"ppt": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
     "boost": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
 }
@@ -832,9 +832,9 @@ def preset_lines(name, base):
 
 
 def cmd_preset(ctx, args):
-    """`preset quiet|auto|boost [show]`: crea (o rigenera) il profilo dalla baseline; `show` solo elenca."""
+    """`preset eco|auto|boost [show]`: crea (o rigenera) il profilo dalla baseline; `show` solo elenca."""
     if not args or args[0] not in PRESETS or len(args) > 2 or (len(args) == 2 and args[1] != "show"):
-        raise Err("uso: preset quiet|auto|boost [show]")
+        raise Err("uso: preset eco|auto|boost [show]")
     lines = preset_lines(args[0], load_baseline())
     if len(args) == 2:
         return {"profile": args[0], "lines": lines}
@@ -1600,7 +1600,7 @@ def selftest():
     run(["profile", "delete", "f"])
 
     # ---- preset ----
-    pl = run(["preset", "quiet", "show"])["lines"]
+    pl = run(["preset", "eco", "show"])["lines"]
     assert "ppt 89" in pl and "tdc 76" in pl and "edc 149" in pl and "fmax 4825" in pl and "tjmax 80" in pl and "power balanced" in pl, pl
     assert "fan 1 step 10000 5000" in pl and not any(l.startswith("fan 2") for l in pl)
     assert run(["preset", "auto"])["saved"] == "auto" and "auto" in run(["profile", "list"])["profiles"]

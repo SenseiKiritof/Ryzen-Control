@@ -25,7 +25,7 @@ kernel): `fan enable/status/autodetect/step/curve/identify` ok; autodetect ha da
 (2125→1898 giri al 21 %), pwm5/pwm6 ventola, pwm7 (100 %, senza tachimetro) non testabile e
 protetto; step 10 s/5 s sui canali ventola elimina gli scatti sui picchi (3 s di carico pieno,
 giri fermi). Il chip arrotonda gli step a ~200 ms. Tag `v0.2.0`. Poi: fase 3 GUI, fase 4
-calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
+calibrazioni Eco/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi).
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
@@ -109,7 +109,7 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   solo `dirty`. `boot` non solleva mai eccezioni (la unit deve restare attiva perché ExecStop
   giri). Via di fuga: parametro kernel `ryzenctl.off` + modulo in blacklist (lo carica solo il
   servizio con modprobe esplicito).
-- **Modalità** statiche (nessun demone, il dinamismo lo fa PBO): Default / Quiet / Auto / Boost /
+- **Modalità** statiche (nessun demone, il dinamismo lo fa PBO): Default / Eco / Auto / Boost /
   Custom. Quiet e Auto si ottengono da calibrazioni in GUI che abbassano solo limiti (fase 4).
 - **Ventole** (fase 2): nessun demone; si cambiano solo `pwmN_step_up_time`/`step_down_time` (e
   punti curva se richiesto) della SmartFan già programmata dal BIOS. Ruoli assegnati da
