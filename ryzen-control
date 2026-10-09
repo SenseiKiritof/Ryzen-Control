@@ -170,6 +170,11 @@ def volts(v, unit=" V"):
     return "n/d" if v is None else ("%.3f" % v).replace(".", ",") + unit
 
 
+def mhz(v):
+    """Frequenza leggibile con lo spazio delle migliaia: '5 175 MHz'; 'n/d' se assente."""
+    return "n/d" if v is None else "{:,} MHz".format(int(v)).replace(",", " ")
+
+
 def at_tested(st, c, level):
     """Il core c è stato davvero provato al livello di CO `level`? In parallelo i campioni riportano
     anche i core già usciti dalla prova, fermi al loro ultimo CO stabile: vanno ignorati."""
@@ -181,7 +186,7 @@ def at_tested(st, c, level):
 
 
 def at_sample(st, c, level=None):
-    """(livello, V) misurati sul core c: al livello più vicino a `level`, o al più profondo se None."""
+    """(livello, V, MHz) misurati sul core c: al livello più vicino a `level`, o al più profondo se None."""
     best = None
     for lvl, smp in st.get("samples", {}).items():
         v = int(lvl)
@@ -190,8 +195,8 @@ def at_sample(st, c, level=None):
             continue
         key = abs(v - level) if level is not None else v
         if best is None or key < best[0]:
-            best = (key, v, volt)
-    return (best[1], best[2]) if best else None
+            best = (key, v, volt, (smp.get("mhz") or [None] * 8)[c] if c < len(smp.get("mhz") or []) else None)
+    return best[1:] if best else None
 
 
 def at_slope(st):
@@ -670,15 +675,18 @@ class AutotuneDialog(Adw.Window):
         res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
         base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
         ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
+        ref_mhz = (st.get("samples", {}).get("0") or {}).get("mhz") or [None] * 8
         active = st.get("active_cores", []) if st.get("parallel") else [st.get("core")]
         for c, cell in enumerate(self.cells):
-            self.two_lines(cell["fab"], "%d" % base_co[c] if base_co[c] is not None else "—", volts(ref[c]) if ref[c] is not None else None)
+            fab_sub = volts(ref[c]) + (" · " + mhz(ref_mhz[c]) if ref_mhz[c] is not None else "") if ref[c] is not None else None
+            self.two_lines(cell["fab"], "%d" % base_co[c] if base_co[c] is not None else "—", fab_sub)
             smp = at_sample(st, c)                      # misura più profonda disponibile per questo core
             cur = st["value"] if ph == "co" and c in active else (smp[0] if smp else None)
             sub, css = None, None
             if smp:
                 dmv = round((smp[1] - ref[c]) * 1000) if ref[c] is not None else None
-                sub = ("" if smp[0] == cur else "a %d: " % smp[0]) + volts(smp[1]) + ("" if dmv is None else " · %+d mV" % dmv)
+                sub = (("" if smp[0] == cur else "a %d: " % smp[0]) + volts(smp[1]) + (" · " + mhz(smp[2]) if smp[2] is not None else "")
+                       + ("" if dmv is None else " · %+d mV" % dmv))
                 css = "success" if dmv is not None and dmv < 0 else None
             self.two_lines(cell["prova"], "%d" % cur if cur is not None else "—", sub, css)
             for lab, text, cls in ((cell["stable"], "%d" % res[str(c)] if str(c) in res else None, "success"),
@@ -691,7 +699,7 @@ class AutotuneDialog(Adw.Window):
         if slope is not None:
             self.slope.set_text("Misurato su questa CPU: ≈ %s mV per passo di CO" % ("%.1f" % slope).rstrip("0").rstrip(".").replace(".", ","))
         tests = st.get("fmax", {}).get("tests", [])
-        text = "Test FMax:\n" + "\n".join("%d MHz → picco Tctl %.1f °C" % tuple(t) for t in tests) if tests else ""
+        text = "Test FMax:\n" + "\n".join("%s → picco Tctl %s °C" % (mhz(t[0]), ("%.1f" % t[1]).replace(".", ",")) for t in tests) if tests else ""
         knee = st.get("knee")
         if knee:
             for key, unit in (("ppt", "W"), ("fmax", "MHz")):
@@ -725,7 +733,8 @@ class AutotuneDialog(Adw.Window):
                 smp = at_sample(st, c, st["final"][c])
                 if smp and ref[c] is not None:
                     dmv = round((smp[1] - ref[c]) * 1000)
-                    lab = label("%+d mV (%s → %s a CO %d)" % (dmv, volts(ref[c]), volts(smp[1]), smp[0]), ["numeric", "success" if dmv < 0 else "dim-label"])
+                    lab = label("%+d mV (%s → %s%s a CO %d)" % (dmv, volts(ref[c]), volts(smp[1]), ", " + mhz(smp[2]) if smp[2] is not None else "", smp[0]),
+                                ["numeric", "success" if dmv < 0 else "dim-label"])
                 else:
                     lab = label("n/d", ["numeric", "dim-label"])
                 grid.attach(lab, 2, c + 1, 1, 1)
