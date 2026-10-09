@@ -1867,6 +1867,9 @@ def cmd_fan(ctx, args):
         finally:
             hw_write("%s/pwm%d" % (d, n), pwm)
             hw_write("%s/pwm%d_enable" % (d, n), enable)
+        s = load_settings()
+        s.setdefault("fans", {}).setdefault(str(n), {"role": "sconosciuto"})["rpm_max"] = rpm   # per stimare i giri dalla %
+        save_settings(s)
         return {"canale": n, "rpm_al_100": rpm}
     if len(args) == 3 and args[0] == "role":
         n = to_int(args[1], "canale")
@@ -2321,6 +2324,7 @@ def selftest():
     assert run(["fan", "1", "curve", "40:77", "60:150", "75:255"])["curva"] == ["40:77", "60:150", "75:255"]   # riempimento nascosto
     r = run(["fan", "identify", "2"])
     assert r["rpm_al_100"] == 2800 and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 5
+    assert run(["fan", "status"])["canali"][1]["rpm_max"] == 2800          # salvato per la stima dei giri
     run(["fan", "role", "1", "pompa"])
     expect_err(["fan", "1", "step", "10000", "5000"], "pompa")
     assert run(["fan", "autodetect"])[1]["ruolo"] == "ventola"
