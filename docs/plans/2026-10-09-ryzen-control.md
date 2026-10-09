@@ -12,6 +12,7 @@ hwtest` automatizza la verifica reversibile su hardware. Resta manuale solo ciò
 impone (registrazione MOK al riavvio, se nessuna chiave è già registrata) e il test di crash.
 In fase 2 `ryzenctl fan enable` imposterà da sé il parametro kernel (grubby / /etc/default/grub)
 con conferma esplicita, reversibile con `fan disable`.
+Revisione 7 (2026-10-09): curva ventole per modalità (Quiet dal target, Auto step moderato).
 Revisione 6 (2026-10-09): fase 1 verificata su hardware e taggata `v0.1.0`; un solo pacchetto
 di installazione (driver DKMS dentro `ryzen-control`); nuova fase 6: icona nel vassoio di
 sistema con comandi rapidi.
@@ -338,6 +339,12 @@ passi di 100 MHz (minimo 4000): per ogni passo 12 cicli `stress-ng --cpu 2 -t 2s
 campiona solo k10temp a 20 Hz (niente letture PM durante la misura: scaldano il die), prende il
 p95 dei picchi; primo FMax con p95 ≤ target → profilo Quiet. `# ponytail:` euristica, la
 temperatura del liquido deriva nel tempo.
+
+Ventole nelle modalità (rev. 7, solo canali classificati "ventola"; pompa mai toccata):
+- **Quiet**: curva ricavata dal target: pwm minimo della curva BIOS fino a `target − 10 °C`,
+  salita lineare al 100 % a `Tjmax − 5 °C`; step 10 s / 5 s.
+- **Auto**: curva del BIOS, step 3 s / 2 s (toglie i picchi senza ritardare troppo).
+- **Boost / Default**: curva e step del BIOS.
 
 ### Calibrazione Auto (in GUI, sicura: abbassa solo limiti)
 
