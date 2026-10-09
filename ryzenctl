@@ -20,6 +20,13 @@ PM_FAMILY = 0x62               # pm_table_version >> 16 — ponytail: euristica 
                                # mappa misurata solo su 0x620105 (gnr-smu)
 PM = {"ppt_limit": 2, "ppt": 3, "tdc_limit": 8, "tdc": 9,
       "thm_limit": 10, "tctl": 11, "edc_limit": 63}   # indici float nella PM table
+CO_MIN, CO_MAX = -50, 30       # Curve Optimizer e Curve Shaper
+FMAX_MIN, FMAX_UNLOCK_EXTRA = 3000, 200
+TJMAX_MIN, TJMAX_ABS_MAX = 60, 95
+PPT_MIN, TDC_MIN, EDC_MIN = 45, 30, 45           # W, A, A — mai 0: PPT 0 blocca a 606 MHz
+UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC = 230, 160, 230
+READBACK_TOL = 0.6             # W/A: i limiti tornano come float dalla PM table
+POWER_PROFILES = ("power-saver", "balanced", "performance")
 
 # ---- Percorsi ------------------------------------------------------------------------
 ROOT = os.environ.get("RYZENCTL_ROOT", "")
@@ -243,6 +250,25 @@ def power_get():
         return None
 
 
+def power_set(profile):
+    if FAKE:
+        FAKE.s["power"] = profile
+        FAKE.save()
+        return
+    r = subprocess.run(["busctl", "set-property", "net.hadess.PowerProfiles",
+                        "/net/hadess/PowerProfiles", "net.hadess.PowerProfiles", "ActiveProfile",
+                        "s", profile], capture_output=True, text=True)
+    if r.returncode == 0:
+        return
+    epp = {"power-saver": "power", "balanced": "balance_performance", "performance": "performance"}[profile]
+    cpus = P("/sys/devices/system/cpu")
+    for d in os.listdir(cpus):
+        f = "%s/%s/cpufreq/energy_performance_preference" % (cpus, d)
+        if d.startswith("cpu") and d[3:].isdigit() and os.path.exists(f):
+            with open(f, "w") as fh:
+                fh.write(epp)
+
+
 # ---- File di stato (scritture atomiche) ----------------------------------------------
 def write_atomic(path, text):
     d = os.path.dirname(path)
@@ -259,6 +285,48 @@ def write_atomic(path, text):
     os.close(dfd)
 
 
+def touch_sync(path):
+    write_atomic(path, "")
+
+
+def load_settings():
+    s = {"autostart": False, "profile": None, "unlock": False, "fans": {}}
+    try:
+        s.update(json.loads(open(P(ETC + "/settings.json")).read()))
+    except (OSError, ValueError):
+        pass
+    return s
+
+
+def save_settings(s):
+    write_atomic(P(ETC + "/settings.json"), json.dumps(s, indent=1))
+
+
+def parse_lines(text):
+    """Righe-comando di profilo/baseline → liste di token. `#` commenta."""
+    out = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            out.append(line.split())
+    return out
+
+
+def values_from_lines(lines):
+    """Interpreta le righe come stato: {"co": [...], "ppt": 162, "shaper": {tier: [...]}, ...}."""
+    v = {"shaper": {}}
+    for t in lines:
+        if t[0] == "co" and len(t) == CORES + 1:
+            v["co"] = [int(x) for x in t[1:]]
+        elif t[0] in ("ppt", "tdc", "edc", "fmax", "tjmax") and len(t) == 2:
+            v[t[0]] = int(t[1])
+        elif t[0] == "shaper" and len(t) == 5:
+            v["shaper"][int(t[1])] = [int(x) for x in t[2:]]
+        elif t[0] == "power" and len(t) == 2:
+            v["power"] = t[1]
+    return v
+
+
 # ---- Letture di stato CPU ------------------------------------------------------------
 def read_co():
     return [s16(smu("co_get", core << 20)[0]) for core in range(CORES)]
@@ -269,7 +337,7 @@ def read_fmax():
 
 
 def read_shaper():
-    return smu("shaper_get")[:5]
+    return [shaper_decode(w) for w in smu("shaper_get")[:5]]
 
 
 def read_limits():
@@ -280,41 +348,233 @@ def read_limits():
     return {k: round(t[i], 1) for k, i in PM.items()}
 
 
+def capture_lines():
+    """Stato corrente nel formato profilo (la baseline è un profilo come gli altri)."""
+    lim = read_limits()
+    lines = ["co " + " ".join(str(v) for v in read_co()), "fmax %d" % read_fmax()]
+    for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
+        if pm_key in lim:
+            lines.append("%s %d" % (key, round(lim[pm_key])))
+    for tier, v in enumerate(read_shaper()):
+        lines.append("shaper %d %d %d %d" % (tier, *v))
+    power = power_get()
+    if power:
+        lines.append("power " + power)
+    return lines
+
+
+# ---- Baseline e tetti -------------------------------------------------------------------
+def cmd_baseline(ctx, args):
+    """`baseline`: cattura lo stato attuale come baseline di questo boot (solo se nessuna
+    scrittura è già avvenuta). `baseline show`: la stampa."""
+    if args == ["show"]:
+        return load_baseline(strict=False)
+    if args:
+        raise Err("uso: baseline [show]")
+    check_cpu()
+    if os.path.exists(P(STATE + "/active")):
+        raise Err("baseline non catturata: stato CPU già modificato in questo boot")
+    lines = capture_lines()
+    write_atomic(P(STATE + "/baseline.conf"), "# baseline catturata da ryzenctl\n" + "\n".join(lines) + "\n")
+    touch_sync(P(RUN + "/baseline-done"))
+    return values_from_lines(parse_lines("\n".join(lines)))
+
+
+def load_baseline(strict=True):
+    """Valori baseline. strict: deve essere stata catturata in QUESTO boot."""
+    try:
+        text = open(P(STATE + "/baseline.conf")).read()
+    except OSError:
+        raise Err("baseline assente: scritture CPU rifiutate (il servizio ryzenctl non ha girato?)")
+    if strict and not os.path.exists(P(RUN + "/baseline-done")):
+        raise Err("baseline non catturata in questo boot: scritture CPU rifiutate")
+    return values_from_lines(parse_lines(text))
+
+
+def cap_of(base, key, unlock):
+    if key not in base:
+        raise Err("nessuna baseline per %s (PM table assente?): scrittura rifiutata" % key)
+    if key == "tjmax":
+        return min(base[key], TJMAX_ABS_MAX)
+    if key == "fmax":
+        return base[key] + (FMAX_UNLOCK_EXTRA if unlock else 0)
+    hard = {"ppt": UNLOCK_PPT, "tdc": UNLOCK_TDC, "edc": UNLOCK_EDC}[key]
+    return max(base[key], hard) if unlock else base[key]
+
+
+def check_range(name, v, lo, hi, unit=""):
+    if not lo <= v <= hi:
+        raise Err("%s %d%s fuori dal consentito %d..%d%s" % (name, v, unit, lo, hi, unit))
+
+
+def to_int(s, name):
+    try:
+        return int(s)
+    except ValueError:
+        raise Err("%s: '%s' non è un intero" % (name, s))
+
+
+# ---- Scrittura con readback e ripristino -----------------------------------------------
+def write_verify(ctx, name, value, write, read, base_value, equal=lambda a, b: a == b):
+    """Scrive, rilegge, ripete una volta, altrimenti ripristina la baseline ed errore.
+    Il marker `active` precede la prima scrittura SMU (crash-guard)."""
+    if ctx.get("dry"):
+        return value
+    if not equal(base_value, value):
+        touch_sync(P(STATE + "/active"))
+    for _ in range(2):
+        write(value)
+        got = read()
+        if equal(got, value):
+            return got
+    if base_value is not None:
+        write(base_value)
+    raise Err("%s: scritto %s ma riletto %s; ripristinato %s" % (name, value, got, base_value))
+
+
+def near(a, b):
+    return a is not None and b is not None and abs(a - b) <= READBACK_TOL
+
+
+def limit_setter(key, pm_key, cmd_name, unit, lo):
+    def cmd(ctx, args):
+        if len(args) != 1:
+            raise Err("uso: %s <%s>" % (key, unit))
+        v = to_int(args[0], key)
+        check_cpu()
+        s = load_settings()
+        base = load_baseline()
+        check_range(key, v, lo, cap_of(base, key, s["unlock"]), " " + unit)
+        if not read_limits():
+            raise Err("PM table assente: impossibile verificare %s, scrittura rifiutata" % key)
+        scale = 1 if key == "tjmax" else 1000
+        got = write_verify(ctx, key, float(v), lambda x: smu(cmd_name, int(x * scale)),
+                           lambda: read_limits().get(pm_key), float(base[key]), near)
+        return {key: got}
+    return cmd
+
+
+def cmd_co(ctx, args):
+    """`co <core> <v>` | `co all <v>` | `co v0 … v7`."""
+    if len(args) == CORES:
+        wanted = {c: to_int(x, "co") for c, x in enumerate(args)}
+    elif len(args) == 2 and args[0] == "all":
+        wanted = {c: to_int(args[1], "co") for c in range(CORES)}
+    elif len(args) == 2:
+        core = to_int(args[0], "core")
+        check_range("core", core, 0, CORES - 1)
+        wanted = {core: to_int(args[1], "co")}
+    else:
+        raise Err("uso: co <core|all> <valore> | co v0 … v%d" % (CORES - 1))
+    for v in wanted.values():
+        check_range("co", v, CO_MIN, CO_MAX)
+    check_cpu()
+    base = load_baseline()
+    for core, v in wanted.items():
+        write_verify(ctx, "co core %d" % core, v, lambda x, c=core: smu("co_set", co_arg(c, x)),
+                     lambda c=core: read_co()[c], base["co"][core])
+    return {"co": None if ctx.get("dry") else read_co()}
+
+
+def cmd_fmax(ctx, args):
+    if len(args) != 1:
+        raise Err("uso: fmax <MHz>")
+    v = to_int(args[0], "fmax")
+    check_cpu()
+    base = load_baseline()
+    check_range("fmax", v, FMAX_MIN, cap_of(base, "fmax", load_settings()["unlock"]), " MHz")
+    return {"fmax": write_verify(ctx, "fmax", v, lambda x: smu("fmax_set", x & 0xFFFFF), read_fmax, base["fmax"])}
+
+
+def cmd_shaper(ctx, args):
+    if len(args) != 4:
+        raise Err("uso: shaper <tier 0-4> <bassaT> <mediaT> <altaT>")
+    tier = to_int(args[0], "tier")
+    check_range("tier", tier, 0, 4)
+    v = [to_int(x, "shaper") for x in args[1:]]
+    for m in v:
+        check_range("shaper", m, CO_MIN, CO_MAX)
+    check_cpu()
+    base = load_baseline()
+    got = write_verify(ctx, "shaper tier %d" % tier, v, lambda x: smu("shaper_set", shaper_arg(tier, *x)),
+                       lambda: read_shaper()[tier], base["shaper"].get(tier))
+    return {"shaper": {tier: got}}
+
+
+def cmd_power(ctx, args):
+    if len(args) != 1 or args[0] not in POWER_PROFILES:
+        raise Err("uso: power <%s>" % "|".join(POWER_PROFILES))
+    if not ctx.get("dry"):
+        power_set(args[0])
+    return {"power": args[0]}
+
+
+def cmd_unlock(ctx, args):
+    if args not in (["on"], ["off"]):
+        raise Err("uso: unlock on|off")
+    s = load_settings()
+    s["unlock"] = args == ["on"]
+    save_settings(s)
+    if s["unlock"]:
+        return ("ATTENZIONE: limiti oltre i valori di fabbrica abilitati (PPT fino a %d W, TDC %d A, "
+                "EDC %d A, FMax +%d MHz). Più calore e consumo; Tjmax resta comunque <= baseline."
+                % (UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC, FMAX_UNLOCK_EXTRA))
+    return "limiti riportati ai tetti di fabbrica"
+
+
+# ---- Status ------------------------------------------------------------------------------
 def cmd_status(ctx, args):
     check_cpu()
     lim = read_limits()
-    st = {
+    s = load_settings()
+    try:
+        base = load_baseline(strict=False)
+    except Err:
+        base = None
+    return {
         "cpu": "Granite Ridge", "cores": CORES,
         "smu_version": "finto" if FAKE else read_text(SMU_DIR + "/version"),
         "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
-        "co": read_co(), "fmax": read_fmax(),
-        "shaper": [shaper_decode(w) for w in read_shaper()],
+        "co": read_co(), "fmax": read_fmax(), "shaper": read_shaper(),
         "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"),
                    "edc": lim.get("edc_limit"), "tjmax": lim.get("thm_limit")},
-        "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(),
-                "tctl_pm": lim.get("tctl")},
+        "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
         "power": power_get(),
+        "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
+        "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
     }
-    return st
 
 
 def fmt_status(st):
-    f = lambda v, u="": "n/d" if v is None else "%g%s" % (v, u)
+    f = lambda v, u="": "n/d" if v is None else ("%g%s" % (v, u) if isinstance(v, (int, float)) else str(v))
+    b = st["baseline"] or {}
+    bl = lambda k, u="": (" (base %s)" % f(b.get(k), u)) if k in b else ""
     lines = [
         "CPU %s, %d core, SMU %s, PM table %s" % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"]),
-        "CO      " + " ".join("%+d" % v for v in st["co"]),
+        "CO      " + " ".join("%+d" % v for v in st["co"]) + ("  (base %s)" % " ".join("%+d" % v for v in b["co"]) if "co" in b else ""),
         "Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])),
-        "FMax    %s MHz" % f(st["fmax"]),
-        "Limiti  PPT %s  TDC %s  EDC %s  Tjmax %s" % (f(st["limits"]["ppt"], " W"), f(st["limits"]["tdc"], " A"),
-                                                       f(st["limits"]["edc"], " A"), f(st["limits"]["tjmax"], " °C")),
+        "FMax    %s MHz%s" % (f(st["fmax"]), bl("fmax", " MHz")),
+        "Limiti  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s" % (
+            f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
+            f(st["limits"]["edc"], " A"), bl("edc", " A"), f(st["limits"]["tjmax"], " °C"), bl("tjmax", " °C")),
         "Ora     PPT %s  TDC %s  Tctl %s" % (f(st["now"]["ppt"], " W"), f(st["now"]["tdc"], " A"), f(st["now"]["tctl"], " °C")),
-        "Energia %s" % (st["power"] or "n/d"),
+        "Energia %s%s" % (st["power"] or "n/d", bl("power")),
+        "Baseline %s, sblocco %s, avvio automatico %s, profilo %s" % (
+            "di questo boot" if st["baseline_fresh"] else ("vecchia" if b else "assente"),
+            "ON" if st["unlock"] else "off", "ON" if st["autostart"] else "off", st["profile"] or "-"),
     ]
     return "\n".join(lines)
 
 
 # ---- Dispatcher ------------------------------------------------------------------------
-COMMANDS = {"status": cmd_status}
+COMMANDS = {
+    "status": cmd_status, "baseline": cmd_baseline, "co": cmd_co,
+    "ppt": limit_setter("ppt", "ppt_limit", "ppt_set", "W", PPT_MIN),
+    "tdc": limit_setter("tdc", "tdc_limit", "tdc_set", "A", TDC_MIN),
+    "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
+    "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
+    "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "unlock": cmd_unlock,
+}
 FORMAT = {"status": fmt_status}
 
 
@@ -325,6 +585,15 @@ def run(argv, ctx=None):
 
 
 # ---- Selftest --------------------------------------------------------------------------
+def expect_err(argv, needle, ctx=None):
+    try:
+        run(argv, ctx)
+    except Err as e:
+        assert needle in str(e), "atteso '%s' in: %s" % (needle, e)
+        return
+    raise AssertionError("%s accettato, atteso errore '%s'" % (argv, needle))
+
+
 def selftest():
     global ROOT, FAKE
     ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-")
@@ -337,32 +606,77 @@ def selftest():
     # gate CPU
     FAKE.s["codename"] = 24
     FAKE.save()
-    try:
-        run(["status"])
-        raise AssertionError("gate codename non ha rifiutato")
-    except Err as e:
-        assert "non supportata" in str(e)
+    expect_err(["status"], "non supportata")
     FAKE.s["codename"] = GRANITE_RIDGE
     FAKE.save()
-    # status sul backend finto
+    # status
     st = run(["status"])
-    assert st["co"] == [0] * CORES and st["fmax"] == 5225
+    assert st["co"] == [0] * CORES and st["fmax"] == 5225 and st["baseline"] is None
     assert st["limits"] == {"ppt": 162.0, "tdc": 120.0, "edc": 180.0, "tjmax": 95.0}
-    assert st["now"]["tctl"] == 52.0 and st["power"] == "performance"
     assert "Granite Ridge" in fmt_status(st)
-    # PM table assente: limiti n/d, resto funziona
+    expect_err(["nope"], "sconosciuto")
+    assert FAKE.smu(MP1, 0x10, [0])[0] == 0xFE   # fuori allowlist → UNKNOWN_CMD
+    # senza baseline nessuna scrittura CPU
+    expect_err(["ppt", "150"], "baseline")
+    expect_err(["co", "7", "-3"], "baseline")
+    base = run(["baseline"])
+    assert base["ppt"] == 162 and base["co"] == [0] * CORES and base["shaper"][0] == [0, 0, 0]
+    assert run(["baseline", "show"]) == base and run(["status"])["baseline_fresh"]
+    assert "(base performance)" in fmt_status(run(["status"]))
+    # validazione
+    expect_err(["co", "7", "-51"], "fuori")
+    expect_err(["co", "7", "31"], "fuori")
+    expect_err(["co", "8", "0"], "fuori")
+    expect_err(["ppt", "44"], "fuori")
+    expect_err(["ppt", "0"], "fuori")
+    expect_err(["ppt", "163"], "fuori")
+    expect_err(["fmax", "5226"], "fuori")
+    expect_err(["tjmax", "96"], "fuori")
+    expect_err(["shaper", "5", "0", "0", "0"], "fuori")
+    expect_err(["ppt", "x"], "intero")
+    expect_err(["power", "turbo"], "uso")
+    # scritture con readback
+    assert run(["co", "7", "-3"])["co"][7] == -3
+    assert run(["co", "all", "-10"])["co"] == [-10] * CORES
+    assert run(["co"] + ["-5"] * 7 + ["0"])["co"] == [-5] * 7 + [0]
+    assert run(["ppt", "150"]) == {"ppt": 150.0}
+    assert run(["tdc", "100"]) == {"tdc": 100.0} and run(["edc", "150"]) == {"edc": 150.0}
+    assert run(["fmax", "5000"]) == {"fmax": 5000}
+    assert run(["tjmax", "85"]) == {"tjmax": 85.0}
+    assert run(["shaper", "2", "-10", "-5", "3"]) == {"shaper": {2: [-10, -5, 3]}}
+    assert run(["power", "balanced"]) == {"power": "balanced"} and FAKE.s["power"] == "balanced"
+    assert os.path.exists(P(STATE + "/active")) and FAKE.s["log"][-1]["active"]
+    # sblocco
+    assert "ATTENZIONE" in run(["unlock", "on"])
+    assert run(["ppt", "200"]) == {"ppt": 200.0}
+    expect_err(["ppt", "231"], "fuori")
+    expect_err(["tdc", "161"], "fuori")
+    assert run(["fmax", "5425"]) == {"fmax": 5425}
+    expect_err(["fmax", "5426"], "fuori")
+    expect_err(["tjmax", "96"], "fuori")             # mai sopra baseline, nemmeno sbloccato
+    run(["unlock", "off"])
+    expect_err(["ppt", "163"], "fuori")
+    assert run(["ppt", "162"]) == {"ppt": 162.0}     # il valore baseline è sempre ammesso
+    # readback fallito: ripetizione, poi ripristino baseline
+    FAKE.s["drop"] = 1
+    FAKE.save()
+    assert run(["ppt", "150"]) == {"ppt": 150.0}     # prima scrittura ignorata, seconda ok
+    FAKE.s["drop"] = 2
+    FAKE.save()
+    expect_err(["ppt", "140"], "ripristinato")
+    assert run(["status"])["limits"]["ppt"] == 162.0
+    # dry-run: valida senza toccare l'hardware
+    assert run(["ppt", "150"], {"dry": True}) == {"ppt": 150.0} and FAKE.s["ppt"] == 162.0
+    expect_err(["ppt", "500"], "fuori", {"dry": True})
+    # PM table assente: limiti rifiutati, CO ok
     FAKE.s["pm_version"] = 0
     FAKE.save()
-    st = run(["status"])
-    assert st["limits"]["ppt"] is None and st["co"] == [0] * CORES
-    # comando fuori allowlist → l'SMU finto risponde UNKNOWN_CMD e smu() lo riporta
-    status, _ = FAKE.smu(MP1, 0x10, [0])
-    assert status == 0xFE
-    try:
-        run(["nope"])
-        raise AssertionError("comando sconosciuto accettato")
-    except Err:
-        pass
+    expect_err(["ppt", "150"], "PM table")
+    assert run(["co", "7", "0"])["co"][7] == 0
+    FAKE.s["pm_version"] = 0x620105
+    FAKE.save()
+    # baseline non si ricattura con stato modificato
+    expect_err(["baseline"], "già modificato")
     print("selftest ok (%s)" % ROOT)
 
 
@@ -377,8 +691,10 @@ def main():
         sys.exit(1)
     if argv[0] in FORMAT:
         print(FORMAT[argv[0]](result))
+    elif isinstance(result, str):
+        print(result)
     elif result is not None:
-        print(json.dumps(result, indent=1, ensure_ascii=False))
+        print(json.dumps(result, ensure_ascii=False))
 
 
 if __name__ == "__main__":
