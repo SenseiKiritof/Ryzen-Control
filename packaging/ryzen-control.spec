@@ -1,6 +1,6 @@
 Name:           ryzen-control
 Version:        0.1.0
-Release:        7%{?dist}
+Release:        8%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; driver ryzen_smu incluso (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -101,6 +101,9 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-8
+- Curve ventole: pwm minimo 51 (20 %%) come le curve BIOS
+
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-7
 - Autodetect ventole con pwm di prova relativo al valore attuale; curve con ultimo punto fino a 125 °C
 

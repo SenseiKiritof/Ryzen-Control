@@ -91,7 +91,7 @@ sudo ryzenctl fan enable             # carica nct6775 e lo rende permanente; se 
 sudo ryzenctl fan status             # canali, giri, pwm, step, curva, ruolo
 sudo ryzenctl fan autodetect         # ~30 s per canale sotto carico: assegna i ruoli ventola/pompa/non-controllabile
 sudo ryzenctl fan 1 step 10000 5000  # ritardo di reazione della SmartFan (ms, salita/discesa): ignora i picchi brevi
-sudo ryzenctl fan 1 curve 40:77 60:150 75:255   # punti temperatura:pwm (pwm >= 77, ultimo 255 entro 90 °C)
+sudo ryzenctl fan 1 curve 40:77 60:150 75:255   # punti temperatura:pwm (pwm >= 51, ultimo 255 entro 125 °C)
 sudo ryzenctl fan identify 2         # 100 % per 5 s per riconoscere fisicamente il canale
 sudo ryzenctl fan name 1 "radiatore alto"; sudo ryzenctl fan role 3 pompa   # a mano si può solo declassare
 sudo ryzenctl fan disable

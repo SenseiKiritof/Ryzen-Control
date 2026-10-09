@@ -39,7 +39,7 @@ FAN_PUMP_DT, FAN_FAN_DT, FAN_PUMP_RPM = 2.0, 1.0, 1500
 FAN_ABORT_TCTL, FAN_ABORT_DT = 80.0, 8.0
 FAN_RPM_CHANGE = 0.05          # sotto: il canale non risponde al PWM
 FAN_STEP_MAX_MS, FAN_STEP_TOL_MS = 60000, 200
-FAN_PWM_MIN, FAN_CURVE_LAST_TEMP_MAX = 77, 125   # 125 = ultimo punto delle curve BIOS
+FAN_PWM_MIN, FAN_CURVE_LAST_TEMP_MAX = 51, 125    # 51 = 20 %, minimo delle curve BIOS; 125 = loro ultimo punto
 FAN_ROLES = ("ventola", "pompa", "non-controllabile", "sconosciuto")
 POWER_PROFILES = ("power-saver", "balanced", "performance")
 
