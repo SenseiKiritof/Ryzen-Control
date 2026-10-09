@@ -1,0 +1,1148 @@
+#!/usr/bin/python3
+"""ryzenctl — helper privilegiato di Ryzen Control (Ryzen 7 9800X3D, Granite Ridge).
+
+Unico punto che parla con l'SMU (driver ryzen_smu) e con le ventole. Stessa grammatica
+di comandi per CLI, file profilo e protocollo `serve`. Con RYZENCTL_ROOT impostato usa
+un backend finto (stesso del selftest): nessun driver, nessun root.
+"""
+import fcntl
+import json
+import os
+import re
+import struct
+import subprocess
+import sys
+import tempfile
+import time
+import traceback
+
+# ---- Manopole di calibrazione (tutte qui, non sparpagliarle) -----------------------
+CORES = 8                      # 9800X3D: 1 CCD, 8 core, nessun core fuso
+GRANITE_RIDGE = 23             # indice codename del driver ryzen_smu
+PM_FAMILY = 0x62               # pm_table_version >> 16 — ponytail: euristica famiglia,
+                               # mappa misurata solo su 0x620105 (gnr-smu)
+PM = {"ppt_limit": 2, "ppt": 3, "tdc_limit": 8, "tdc": 9,
+      "thm_limit": 10, "tctl": 11, "edc_limit": 63}   # indici float nella PM table
+CO_MIN, CO_MAX = -50, 30       # Curve Optimizer e Curve Shaper
+FMAX_MIN, FMAX_UNLOCK_EXTRA = 3000, 200
+TJMAX_MIN, TJMAX_ABS_MAX = 60, 95
+PPT_MIN, TDC_MIN, EDC_MIN = 45, 30, 45           # W, A, A — mai 0: PPT 0 blocca a 606 MHz
+UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC = 230, 160, 230
+READBACK_TOL = 0.6             # W/A: i limiti tornano come float dalla PM table
+READBACK_WAIT = 1.0            # s: l'SMU aggiorna la PM table col suo passo, non subito
+READBACK_POLL = 0.02
+POWER_PROFILES = ("power-saver", "balanced", "performance")
+
+# ---- Percorsi ------------------------------------------------------------------------
+ROOT = os.environ.get("RYZENCTL_ROOT", "")
+SMU_DIR = "/sys/kernel/ryzen_smu_drv"
+HWMON = "/sys/class/hwmon"
+ETC = "/etc/ryzenctl"
+STATE = "/var/lib/ryzenctl"
+RUN = "/run/ryzenctl"
+
+
+def P(path):
+    return ROOT + path
+
+
+# ---- Allowlist SMU: nient'altro viene mai inviato ------------------------------------
+MP1, RSMU = "mp1_smu_cmd", "rsmu_cmd"
+CMD = {
+    "co_set": (MP1, 0x35),      # SetDldoPsmMargin: core<<20 | margin&0xFFFF
+    "ppt_set": (MP1, 0x3E),     # mW
+    "tdc_set": (MP1, 0x3C),     # mA
+    "edc_set": (MP1, 0x3D),     # mA
+    "co_get": (RSMU, 0xD5),     # GetDldoPsmMargin: arg0 = core<<20
+    "fmax_set": (RSMU, 0x70),   # SetBoostLimitFrequencyAllCores, MHz
+    "fmax_get": (RSMU, 0x6E),   # GetBoostLimitFrequency
+    "tjmax_set": (RSMU, 0x59),  # SetTctlMax, °C
+    "shaper_set": (RSMU, 0xA6),  # hi<<24 | med<<16 | lo<<8 | 0x80 | tier
+    "shaper_get": (RSMU, 0x84),  # 5 parole, una per tier
+}
+SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
+              0xFD: "REJECTED_PREREQ", 0xFC: "BUSY", 0xFB: "TIMEOUT", 0xFA: "INVALID_ARG",
+              0xF9: "UNSUPPORTED_PLATFORM", 0xF8: "BUFFER", 0xF7: "MMAP", 0xF6: "PCI"}
+
+
+class Err(Exception):
+    """Errore riportato all'utente (CLI: stderr + exit 1; serve: {"ok": false})."""
+
+
+def s8(v):
+    return v - 0x100 if v & 0x80 else v
+
+
+def s16(v):
+    v &= 0xFFFF
+    return v - 0x10000 if v & 0x8000 else v
+
+
+def co_arg(core, margin):
+    return (core << 20) | (margin & 0xFFFF)
+
+
+def shaper_arg(tier, lo, med, hi):
+    return ((hi & 0xFF) << 24) | ((med & 0xFF) << 16) | ((lo & 0xFF) << 8) | 0x80 | (tier & 0x7F)
+
+
+def shaper_decode(word):
+    return [s8((word >> 8) & 0xFF), s8((word >> 16) & 0xFF), s8((word >> 24) & 0xFF)]
+
+
+# ---- Trasporto SMU (reale) -----------------------------------------------------------
+def read_text(path):
+    with open(P(path)) as f:
+        return f.read().strip()
+
+
+def _lock():
+    os.makedirs(P(RUN), exist_ok=True)
+    fd = os.open(P(RUN + "/lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    return fd
+
+
+def smu_raw(mailbox, cmd, args):
+    """Una transazione: args → cmd → (stato, args di risposta). smu_args del driver è
+    globale: lock obbligatorio."""
+    fd = _lock()
+    try:
+        with open(P(SMU_DIR + "/smu_args"), "wb") as f:
+            f.write(struct.pack("<6I", *(list(args) + [0] * (6 - len(args)))))
+        with open(P(SMU_DIR + "/" + mailbox), "wb") as f:
+            f.write(struct.pack("<I", cmd))
+        with open(P(SMU_DIR + "/" + mailbox), "rb") as f:
+            status = struct.unpack("<I", f.read(4))[0]
+        with open(P(SMU_DIR + "/smu_args"), "rb") as f:
+            out = list(struct.unpack("<6I", f.read(24)))
+    finally:
+        os.close(fd)
+    return status, out
+
+
+def pm_raw():
+    """(versione, [float]) oppure (None, None) se il driver non espone la tabella."""
+    try:
+        with open(P(SMU_DIR + "/pm_table_version"), "rb") as f:
+            version = struct.unpack("<I", f.read(4))[0]
+        fd = _lock()
+        try:
+            with open(P(SMU_DIR + "/pm_table"), "rb") as f:
+                data = f.read()
+        finally:
+            os.close(fd)
+    except OSError:
+        return None, None
+    return version, list(struct.unpack("<%df" % (len(data) // 4), data[:len(data) // 4 * 4]))
+
+
+# ---- Backend finto (selftest, RYZENCTL_ROOT, GUI --mock) -----------------------------
+class Fake:
+    """Simula SMU, PM table, k10temp e profilo energetico di un 9800X3D. Stato su file
+    così più invocazioni CLI lo condividono. `drop` = prossime scritture accettate ma
+    ignorate (prova del readback). `log` registra i marker presenti a ogni scrittura."""
+
+    DEFAULT = {"codename": GRANITE_RIDGE, "co": [0] * CORES, "fmax": 5225,
+               "ppt": 162.0, "tdc": 120.0, "edc": 180.0, "thm": 95.0,
+               "shaper": [0x80 | t for t in range(5)], "tctl": 52.0, "power": "performance",
+               "pm_version": 0x620105, "drop": 0, "log": []}
+
+    def __init__(self):
+        self.path = P("/fake_smu.json")
+        self.s = json.loads(open(self.path).read() if os.path.exists(self.path) else json.dumps(self.DEFAULT))
+
+    def save(self):
+        write_atomic(self.path, json.dumps(self.s))
+
+    def _write(self, apply):
+        self.s["log"].append({"dirty": os.path.exists(P(STATE + "/dirty")),
+                              "active": os.path.exists(P(STATE + "/active"))})
+        if self.s["drop"] > 0:
+            self.s["drop"] -= 1
+        else:
+            apply()
+        self.save()
+
+    def smu(self, mailbox, cmd, args):
+        a = args[0] if args else 0
+        s = self.s
+        if (mailbox, cmd) == CMD["co_set"]:
+            self._write(lambda: s["co"].__setitem__((a >> 20) & 0xF, s16(a)))
+        elif (mailbox, cmd) in (CMD["ppt_set"], CMD["tdc_set"], CMD["edc_set"]):
+            key = {CMD["ppt_set"]: "ppt", CMD["tdc_set"]: "tdc", CMD["edc_set"]: "edc"}[(mailbox, cmd)]
+            self._write(lambda: s.__setitem__(key, a / 1000.0))
+        elif (mailbox, cmd) == CMD["co_get"]:
+            return 1, [s["co"][(a >> 20) & 0xF] & 0xFFFFFFFF, 0, 0, 0, 0, 0]
+        elif (mailbox, cmd) == CMD["fmax_set"]:
+            self._write(lambda: s.__setitem__("fmax", a & 0xFFFFF))
+        elif (mailbox, cmd) == CMD["fmax_get"]:
+            return 1, [s["fmax"], 0, 0, 0, 0, 0]
+        elif (mailbox, cmd) == CMD["tjmax_set"]:
+            self._write(lambda: s.__setitem__("thm", float(a)))
+        elif (mailbox, cmd) == CMD["shaper_set"]:
+            self._write(lambda: s["shaper"].__setitem__(a & 0x7F, a))
+        elif (mailbox, cmd) == CMD["shaper_get"]:
+            return 1, list(s["shaper"]) + [0]
+        else:
+            return 0xFE, [0] * 6
+        return 1, [0] * 6
+
+    def pm(self):
+        s = self.s
+        if not s["pm_version"]:
+            return None, None
+        t = [0.0] * 457
+        t[PM["ppt_limit"]], t[PM["ppt"]] = s["ppt"], 61.0
+        t[PM["tdc_limit"]], t[PM["tdc"]] = s["tdc"], 23.0
+        t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
+        t[PM["edc_limit"]] = s["edc"]
+        return s["pm_version"], t
+
+
+FAKE = Fake() if ROOT else None
+
+
+def smu(name, *args):
+    mailbox, cmd = CMD[name]
+    status, out = FAKE.smu(mailbox, cmd, args) if FAKE else smu_raw(mailbox, cmd, args)
+    if status != 1:
+        hint = " (PBO disabilitato nel BIOS? impostarlo su Advanced/Motherboard)" if status == 0xFD else ""
+        raise Err("SMU %s 0x%02X: %s%s" % (mailbox, cmd, SMU_STATUS.get(status, hex(status)), hint))
+    return out
+
+
+def pm_table():
+    version, t = FAKE.pm() if FAKE else pm_raw()
+    if version is None or (version >> 16) != PM_FAMILY:
+        return None, None
+    return version, t
+
+
+def check_cpu():
+    try:
+        code = int(FAKE.s["codename"]) if FAKE else int(read_text(SMU_DIR + "/codename"))
+    except (OSError, ValueError):
+        raise Err("driver ryzen_smu non caricato (%s)" % P(SMU_DIR))
+    if code != GRANITE_RIDGE:
+        raise Err("CPU non supportata (codename %d, atteso Granite Ridge %d)" % (code, GRANITE_RIDGE))
+
+
+def tctl():
+    if FAKE:
+        return FAKE.s["tctl"]
+    for d in sorted(os.listdir(P(HWMON))):
+        try:
+            if read_text("%s/%s/name" % (HWMON, d)) == "k10temp":
+                return int(read_text("%s/%s/temp1_input" % (HWMON, d))) / 1000.0
+        except OSError:
+            pass
+    return None
+
+
+def power_get():
+    if FAKE:
+        return FAKE.s["power"]
+    r = subprocess.run(["busctl", "get-property", "net.hadess.PowerProfiles",
+                        "/net/hadess/PowerProfiles", "net.hadess.PowerProfiles", "ActiveProfile"],
+                       capture_output=True, text=True)
+    if r.returncode == 0:
+        return r.stdout.split('"')[1]
+    try:  # nessun demone: EPP di cpu0
+        epp = read_text("/sys/devices/system/cpu/cpu0/cpufreq/energy_performance_preference")
+        return {"power": "power-saver", "performance": "performance"}.get(epp, "balanced")
+    except OSError:
+        return None
+
+
+def power_set(profile):
+    if FAKE:
+        FAKE.s["power"] = profile
+        FAKE.save()
+        return
+    r = subprocess.run(["busctl", "set-property", "net.hadess.PowerProfiles",
+                        "/net/hadess/PowerProfiles", "net.hadess.PowerProfiles", "ActiveProfile",
+                        "s", profile], capture_output=True, text=True)
+    if r.returncode == 0:
+        return
+    epp = {"power-saver": "power", "balanced": "balance_performance", "performance": "performance"}[profile]
+    cpus = P("/sys/devices/system/cpu")
+    for d in os.listdir(cpus):
+        f = "%s/%s/cpufreq/energy_performance_preference" % (cpus, d)
+        if d.startswith("cpu") and d[3:].isdigit() and os.path.exists(f):
+            with open(f, "w") as fh:
+                fh.write(epp)
+
+
+# ---- File di stato (scritture atomiche) ----------------------------------------------
+def write_atomic(path, text):
+    d = os.path.dirname(path)
+    os.makedirs(d, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=d)
+    with os.fdopen(fd, "w") as f:
+        f.write(text)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+    os.chmod(path, 0o644)
+    dfd = os.open(d, os.O_RDONLY)
+    os.fsync(dfd)
+    os.close(dfd)
+
+
+def touch_sync(path):
+    write_atomic(path, "")
+
+
+def load_settings():
+    s = {"autostart": False, "profile": None, "unlock": False, "fans": {}}
+    try:
+        s.update(json.loads(open(P(ETC + "/settings.json")).read()))
+    except (OSError, ValueError):
+        pass
+    return s
+
+
+def save_settings(s):
+    write_atomic(P(ETC + "/settings.json"), json.dumps(s, indent=1))
+
+
+def parse_lines(text):
+    """Righe-comando di profilo/baseline → liste di token. `#` commenta."""
+    out = []
+    for n, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].strip()
+        if line:
+            out.append(line.split())
+    return out
+
+
+def values_from_lines(lines):
+    """Interpreta le righe come stato: {"co": [...], "ppt": 162, "shaper": {tier: [...]}, ...}."""
+    v = {"shaper": {}}
+    for t in lines:
+        if t[0] == "co" and len(t) == CORES + 1:
+            v["co"] = [int(x) for x in t[1:]]
+        elif t[0] in ("ppt", "tdc", "edc", "fmax", "tjmax") and len(t) == 2:
+            v[t[0]] = int(t[1])
+        elif t[0] == "shaper" and len(t) == 5:
+            v["shaper"][int(t[1])] = [int(x) for x in t[2:]]
+        elif t[0] == "power" and len(t) == 2:
+            v["power"] = t[1]
+    return v
+
+
+# ---- Letture di stato CPU ------------------------------------------------------------
+def read_co():
+    return [s16(smu("co_get", core << 20)[0]) for core in range(CORES)]
+
+
+def read_fmax():
+    return smu("fmax_get")[0]
+
+
+def read_shaper():
+    return [shaper_decode(w) for w in smu("shaper_get")[:5]]
+
+
+def read_limits():
+    """Limiti e valori istantanei dalla PM table; {} se la tabella non c'è."""
+    version, t = pm_table()
+    if t is None:
+        return {}
+    return {k: round(t[i], 1) for k, i in PM.items()}
+
+
+def capture_lines():
+    """Stato corrente nel formato profilo (la baseline è un profilo come gli altri)."""
+    lim = read_limits()
+    lines = ["co " + " ".join(str(v) for v in read_co()), "fmax %d" % read_fmax()]
+    for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
+        if pm_key in lim:
+            lines.append("%s %d" % (key, round(lim[pm_key])))
+    # Curve Shaper escluso: sul 9800X3D (SMU 98.81.0) 0xA6 risponde OK ma 0x84 non cambia,
+    # quindi non è verificabile; resta solo come comando sperimentale (`shaper probe`).
+    power = power_get()
+    if power:
+        lines.append("power " + power)
+    return lines
+
+
+# ---- Baseline e tetti -------------------------------------------------------------------
+def cmd_baseline(ctx, args):
+    """`baseline`: cattura lo stato attuale come baseline di questo boot (solo se nessuna
+    scrittura è già avvenuta). `baseline show`: la stampa."""
+    if args == ["show"]:
+        return load_baseline(strict=False)
+    if args:
+        raise Err("uso: baseline [show]")
+    check_cpu()
+    if os.path.exists(P(STATE + "/active")):
+        raise Err("baseline non catturata: stato CPU già modificato in questo boot")
+    lines = capture_lines()
+    write_atomic(P(STATE + "/baseline.conf"), "# baseline catturata da ryzenctl\n" + "\n".join(lines) + "\n")
+    touch_sync(P(RUN + "/baseline-done"))
+    return values_from_lines(parse_lines("\n".join(lines)))
+
+
+def load_baseline(strict=True):
+    """Valori baseline. strict: deve essere stata catturata in QUESTO boot."""
+    try:
+        text = open(P(STATE + "/baseline.conf")).read()
+    except OSError:
+        raise Err("baseline assente: scritture CPU rifiutate (il servizio ryzenctl non ha girato?)")
+    if strict and not os.path.exists(P(RUN + "/baseline-done")):
+        raise Err("baseline non catturata in questo boot: scritture CPU rifiutate")
+    return values_from_lines(parse_lines(text))
+
+
+def cap_of(base, key, unlock):
+    if key not in base:
+        raise Err("nessuna baseline per %s (PM table assente?): scrittura rifiutata" % key)
+    if key == "tjmax":
+        return min(base[key], TJMAX_ABS_MAX)
+    if key == "fmax":
+        return base[key] + (FMAX_UNLOCK_EXTRA if unlock else 0)
+    hard = {"ppt": UNLOCK_PPT, "tdc": UNLOCK_TDC, "edc": UNLOCK_EDC}[key]
+    return max(base[key], hard) if unlock else base[key]
+
+
+def check_range(name, v, lo, hi, unit=""):
+    if not lo <= v <= hi:
+        raise Err("%s %d%s fuori dal consentito %d..%d%s" % (name, v, unit, lo, hi, unit))
+
+
+def to_int(s, name):
+    try:
+        return int(s)
+    except ValueError:
+        raise Err("%s: '%s' non è un intero" % (name, s))
+
+
+# ---- Scrittura con readback e ripristino -----------------------------------------------
+def write_verify(ctx, name, value, write, read, base_value, equal=lambda a, b: a == b):
+    """Scrive, rilegge, ripete una volta, altrimenti ripristina la baseline ed errore.
+    Il marker `active` precede la prima scrittura SMU (crash-guard)."""
+    if ctx.get("dry"):
+        return value
+    if not equal(base_value, value):
+        touch_sync(P(STATE + "/active"))
+    wait = 0.05 if FAKE else READBACK_WAIT
+    for _ in range(2):
+        write(value)
+        deadline = time.monotonic() + wait
+        while True:
+            got = read()
+            if equal(got, value) or time.monotonic() >= deadline:
+                break
+            time.sleep(READBACK_POLL)
+        if equal(got, value):
+            return got
+    if base_value is not None:
+        write(base_value)
+    raise Err("%s: scritto %s ma riletto %s; ripristinato %s" % (name, value, got, base_value))
+
+
+def near(a, b):
+    return a is not None and b is not None and abs(a - b) <= READBACK_TOL
+
+
+def limit_setter(key, pm_key, cmd_name, unit, lo):
+    def cmd(ctx, args):
+        if len(args) != 1:
+            raise Err("uso: %s <%s>" % (key, unit))
+        v = to_int(args[0], key)
+        check_cpu()
+        s = load_settings()
+        base = load_baseline()
+        check_range(key, v, lo, cap_of(base, key, s["unlock"]), " " + unit)
+        if not read_limits():
+            raise Err("PM table assente: impossibile verificare %s, scrittura rifiutata" % key)
+        scale = 1 if key == "tjmax" else 1000
+        got = write_verify(ctx, key, float(v), lambda x: smu(cmd_name, int(x * scale)),
+                           lambda: read_limits().get(pm_key), float(base[key]), near)
+        return {key: got}
+    return cmd
+
+
+def cmd_co(ctx, args):
+    """`co <core> <v>` | `co all <v>` | `co v0 … v7`."""
+    if len(args) == CORES:
+        wanted = {c: to_int(x, "co") for c, x in enumerate(args)}
+    elif len(args) == 2 and args[0] == "all":
+        wanted = {c: to_int(args[1], "co") for c in range(CORES)}
+    elif len(args) == 2:
+        core = to_int(args[0], "core")
+        check_range("core", core, 0, CORES - 1)
+        wanted = {core: to_int(args[1], "co")}
+    else:
+        raise Err("uso: co <core|all> <valore> | co v0 … v%d" % (CORES - 1))
+    for v in wanted.values():
+        check_range("co", v, CO_MIN, CO_MAX)
+    check_cpu()
+    base = load_baseline()
+    for core, v in wanted.items():
+        write_verify(ctx, "co core %d" % core, v, lambda x, c=core: smu("co_set", co_arg(c, x)),
+                     lambda c=core: read_co()[c], base["co"][core])
+    return {"co": None if ctx.get("dry") else read_co()}
+
+
+def cmd_fmax(ctx, args):
+    if len(args) != 1:
+        raise Err("uso: fmax <MHz>")
+    v = to_int(args[0], "fmax")
+    check_cpu()
+    base = load_baseline()
+    check_range("fmax", v, FMAX_MIN, cap_of(base, "fmax", load_settings()["unlock"]), " MHz")
+    return {"fmax": write_verify(ctx, "fmax", v, lambda x: smu("fmax_set", x & 0xFFFFF), read_fmax, base["fmax"])}
+
+
+def cmd_shaper(ctx, args):
+    """Sperimentale: non verificato su hardware. `shaper raw` = parole di 0x84;
+    `shaper probe` = scrive tier 4 -2/-2/-2, legge subito e dopo 1 s, ripristina."""
+    raw = lambda: ["0x%08X" % w for w in smu("shaper_get")]
+    if args == ["raw"]:
+        check_cpu()
+        return {"raw": raw()}
+    if args == ["probe"]:
+        check_cpu()
+        base = load_baseline()
+        out = {"prima": raw()}
+        smu("shaper_set", shaper_arg(4, -2, -2, -2))
+        out["subito"] = raw()
+        time.sleep(1)
+        out["dopo_1s"] = raw()
+        smu("shaper_set", shaper_arg(4, *base["shaper"].get(4, [0, 0, 0])))
+        out["ripristino"] = raw()
+        out["per_tier_arg0"] = ["0x%08X" % smu("shaper_get", t)[0] for t in range(5)]   # 0x84 con arg0 = tier
+        return out
+    if len(args) != 4:
+        raise Err("uso: shaper <tier 0-4> <bassaT> <mediaT> <altaT> | shaper raw | shaper probe")
+    tier = to_int(args[0], "tier")
+    check_range("tier", tier, 0, 4)
+    v = [to_int(x, "shaper") for x in args[1:]]
+    for m in v:
+        check_range("shaper", m, CO_MIN, CO_MAX)
+    check_cpu()
+    base = load_baseline()
+    got = write_verify(ctx, "shaper tier %d" % tier, v, lambda x: smu("shaper_set", shaper_arg(tier, *x)),
+                       lambda: read_shaper()[tier], base["shaper"].get(tier))
+    return {"shaper": {tier: got}}
+
+
+def cmd_power(ctx, args):
+    if len(args) != 1 or args[0] not in POWER_PROFILES:
+        raise Err("uso: power <%s>" % "|".join(POWER_PROFILES))
+    if not ctx.get("dry"):
+        power_set(args[0])
+    return {"power": args[0]}
+
+
+def cmd_unlock(ctx, args):
+    if args not in (["on"], ["off"]):
+        raise Err("uso: unlock on|off")
+    s = load_settings()
+    s["unlock"] = args == ["on"]
+    save_settings(s)
+    if s["unlock"]:
+        return ("ATTENZIONE: limiti oltre i valori di fabbrica abilitati (PPT fino a %d W, TDC %d A, "
+                "EDC %d A, FMax +%d MHz). Più calore e consumo; Tjmax resta comunque <= baseline."
+                % (UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC, FMAX_UNLOCK_EXTRA))
+    return "limiti riportati ai tetti di fabbrica"
+
+
+# ---- Status ------------------------------------------------------------------------------
+def cmd_status(ctx, args):
+    check_cpu()
+    lim = read_limits()
+    s = load_settings()
+    try:
+        base = load_baseline(strict=False)
+    except Err:
+        base = None
+    return {
+        "cpu": "Granite Ridge", "cores": CORES,
+        "smu_version": "finto" if FAKE else read_text(SMU_DIR + "/version"),
+        "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
+        "co": read_co(), "fmax": read_fmax(), "shaper": read_shaper(),
+        "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"),
+                   "edc": lim.get("edc_limit"), "tjmax": lim.get("thm_limit")},
+        "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
+        "power": power_get(),
+        "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
+        "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
+    }
+
+
+def fmt_status(st):
+    f = lambda v, u="": "n/d" if v is None else ("%g%s" % (v, u) if isinstance(v, (int, float)) else str(v))
+    b = st["baseline"] or {}
+    bl = lambda k, u="": (" (base %s)" % f(b.get(k), u)) if k in b else ""
+    lines = [
+        "CPU %s, %d core, SMU %s, PM table %s" % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"]),
+        "CO      " + " ".join("%+d" % v for v in st["co"]) + ("  (base %s)" % " ".join("%+d" % v for v in b["co"]) if "co" in b else ""),
+        "Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + "  (sperimentale, non verificato)",
+        "FMax    %s MHz%s" % (f(st["fmax"]), bl("fmax", " MHz")),
+        "Limiti  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s" % (
+            f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
+            f(st["limits"]["edc"], " A"), bl("edc", " A"), f(st["limits"]["tjmax"], " °C"), bl("tjmax", " °C")),
+        "Ora     PPT %s  TDC %s  Tctl %s" % (f(st["now"]["ppt"], " W"), f(st["now"]["tdc"], " A"), f(st["now"]["tctl"], " °C")),
+        "Energia %s%s" % (st["power"] or "n/d", bl("power")),
+        "Baseline %s, sblocco %s, avvio automatico %s, profilo %s" % (
+            "di questo boot" if st["baseline_fresh"] else ("vecchia" if b else "assente"),
+            "ON" if st["unlock"] else "off", "ON" if st["autostart"] else "off", st["profile"] or "-"),
+    ]
+    return "\n".join(lines)
+
+
+# ---- Profili -----------------------------------------------------------------------------
+PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power"}  # + fan (fase 2); shaper: sperimentale
+NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
+
+
+def profile_path(name):
+    if name == "baseline":
+        return P(STATE + "/baseline.conf")
+    if not NAME_RE.match(name):
+        raise Err("nome profilo non valido '%s' (solo a-z 0-9 _ -)" % name)
+    return P(ETC + "/profiles/" + name + ".conf")
+
+
+def profile_lines(name):
+    try:
+        lines = parse_lines(open(profile_path(name)).read())
+    except OSError:
+        raise Err("profilo '%s' inesistente" % name)
+    if name == "baseline":  # scritta da noi: una versione precedente può avere righe oggi escluse (shaper)
+        lines = [t for t in lines if t[0] in PROFILE_CMDS]
+    return lines
+
+
+def apply_lines(lines, ctx, part=None):
+    """Esegue le righe (part: 'cpu' | 'fan' | None=tutte). Si ferma al primo errore."""
+    done = []
+    for n, t in enumerate(lines, 1):
+        is_fan = t[0] == "fan"
+        if part == "fan" and not is_fan or part == "cpu" and is_fan:
+            continue
+        if t[0] not in PROFILE_CMDS:
+            raise Err("riga %d: '%s' non ammesso in un profilo" % (n, t[0]))
+        try:
+            run(t, ctx)
+        except Err as e:
+            raise Err("riga %d (%s): %s" % (n, " ".join(t), e))
+        done.append(" ".join(t))
+    return done
+
+
+def cmd_apply(ctx, args):
+    if len(args) not in (1, 2) or (len(args) == 2 and args[1] not in ("cpu", "fan")):
+        raise Err("uso: apply <profilo|baseline> [cpu|fan]")
+    return {"applied": apply_lines(profile_lines(args[0]), ctx, args[1] if len(args) == 2 else None)}
+
+
+def cmd_profile(ctx, args):
+    """profile list | show <n> | save <n> <riga>… | delete <n>"""
+    s = load_settings()
+    if args == ["list"]:
+        d = P(ETC + "/profiles")
+        names = sorted(f[:-5] for f in os.listdir(d) if f.endswith(".conf")) if os.path.isdir(d) else []
+        return {"profiles": names, "active": s["profile"]}
+    if len(args) == 2 and args[0] == "show":
+        return {"lines": [" ".join(t) for t in profile_lines(args[1])]}
+    if len(args) >= 2 and args[0] == "save":
+        name, path = args[1], profile_path(args[1])
+        if name == "baseline":
+            raise Err("'baseline' è riservato")
+        lines = parse_lines("\n".join(args[2:]))
+        apply_lines(lines, {"dry": True})          # valida tutto, non tocca l'hardware
+        write_atomic(path, "# profilo ryzenctl '%s'\n" % name + "\n".join(" ".join(t) for t in lines) + "\n")
+        return {"saved": name, "lines": len(lines)}
+    if len(args) == 2 and args[0] == "delete":
+        path = profile_path(args[1])
+        if args[1] == "baseline" or not os.path.exists(path):
+            raise Err("profilo '%s' inesistente o riservato" % args[1])
+        os.remove(path)
+        if s["profile"] == args[1]:
+            s["profile"] = None
+            save_settings(s)
+        return {"deleted": args[1]}
+    raise Err("uso: profile list | show <nome> | save <nome> <riga>… | delete <nome>")
+
+
+def cmd_use(ctx, args):
+    if len(args) != 1:
+        raise Err("uso: use <profilo>")
+    profile_lines(args[0])
+    s = load_settings()
+    s["profile"] = args[0]
+    save_settings(s)
+    return {"profile": args[0]}
+
+
+def cmd_autostart(ctx, args):
+    if args not in (["on"], ["off"]):
+        raise Err("uso: autostart on|off")
+    s = load_settings()
+    if args == ["on"] and not s["profile"]:
+        raise Err("nessun profilo selezionato (use <profilo>)")
+    s["autostart"] = args == ["on"]
+    save_settings(s)
+    return {"autostart": s["autostart"], "profile": s["profile"]}
+
+
+# ---- Crash-guard: marker dirty / active / crashed -----------------------------------------
+def marker(name):
+    return P(STATE + "/" + name)
+
+
+def rm(path):
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def crashed_info():
+    try:
+        return json.loads(open(marker("crashed")).read())
+    except (OSError, ValueError):
+        return None
+
+
+def apply_autostart(ctx, parts):
+    """Applica il profilo di avvio (se attivo e non in stato crashed). Mai un'eccezione:
+    il servizio deve restare attivo perché ExecStop possa rimuovere `dirty`."""
+    s = load_settings()
+    out = {"profile": s["profile"], "autostart": s["autostart"], "crashed": crashed_info(), "applied": {}, "errors": {}}
+    if not (s["autostart"] and s["profile"]):
+        return out
+    for part in parts:
+        if part == "cpu" and out["crashed"]:
+            out["errors"][part] = "profilo CPU non applicato: crash nel boot precedente"
+            continue
+        try:
+            out["applied"][part] = apply_lines(profile_lines(s["profile"]), ctx, part)
+        except Err as e:
+            out["errors"][part] = str(e)
+    return out
+
+
+def cmd_boot(ctx, args):
+    os.makedirs(P(STATE), exist_ok=True)
+    os.makedirs(P(RUN), exist_ok=True)
+    out = {}
+    if os.path.exists(P(RUN + "/booted")):          # restart nello stesso boot: ExecStop ha tolto dirty
+        touch_sync(marker("dirty"))
+    else:
+        s = load_settings()
+        if os.path.exists(marker("dirty")) and os.path.exists(marker("active")):
+            write_atomic(marker("crashed"), json.dumps({"time": time.strftime("%Y-%m-%d %H:%M"),
+                                                        "profile": s["profile"]}))
+        rm(marker("active"))
+        touch_sync(marker("dirty"))                 # prima di qualunque scrittura SMU
+        touch_sync(P(RUN + "/booted"))
+        try:
+            cmd_baseline(ctx, [])
+        except Err as e:
+            out["baseline_error"] = str(e)
+    out.update(apply_autostart(ctx, ("fan", "cpu")))
+    return out
+
+
+def cmd_shutdown(ctx, args):
+    rm(marker("dirty"))
+    return {"dirty": False}
+
+
+def cmd_resume(ctx, args):
+    return apply_autostart(ctx, ("fan", "cpu"))
+
+
+def cmd_default(ctx, args):
+    done = apply_lines(profile_lines("baseline"), ctx)
+    rm(marker("active"))
+    s = load_settings()
+    s["autostart"] = False
+    save_settings(s)
+    return {"applied": done, "autostart": False}
+
+
+def cmd_crashed(ctx, args):
+    if args == ["clear"]:
+        rm(marker("crashed"))
+        return {"crashed": None}
+    if args:
+        raise Err("uso: crashed [clear]")
+    return {"crashed": crashed_info()}
+
+
+def cmd_notify(ctx, args):
+    """Da autostart XDG dell'utente: avvisa se il boot precedente è finito con un crash."""
+    info = crashed_info()
+    if info:
+        msg = "Il profilo '%s' è stato disattivato: il sistema è andato in crash (%s). Apri Ryzen Control per decidere." % (
+            info.get("profile") or "-", info.get("time", "?"))
+        if FAKE:  # il selftest gira nella sessione dell'utente: niente notifiche vere
+            FAKE.s["notified"] = msg
+            FAKE.save()
+        else:
+            subprocess.run(["notify-send", "-u", "critical", "-a", "Ryzen Control", "Ryzen Control", msg],
+                           capture_output=True)
+    return {"crashed": info}
+
+
+# ---- hwtest: verifica su hardware automatica e reversibile ------------------------------
+def cmd_hwtest(ctx, args):
+    """Per ogni comando: un valore poco distante dalla baseline, readback, poi il valore
+    baseline. Continua anche se un passo fallisce; alla fine riapplica la baseline."""
+    check_cpu()
+    base = load_baseline()
+    steps = [("co", ["7", str(max(CO_MIN, base["co"][7] - 3))], ["7", str(base["co"][7])]),
+             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])])]
+    for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
+        if key in base:
+            steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
+        else:
+            steps.append((key, None, None))
+    results = {}
+    for key, test, restore in steps:
+        if test is None:
+            results[key] = "saltato: nessuna baseline (PM table assente)"
+            continue
+        try:
+            run([key] + test, ctx)
+            run([key] + restore, ctx)
+            results[key] = "ok (%s -> %s)" % (" ".join(test), " ".join(restore))
+        except Err as e:
+            results[key] = "errore: %s" % e
+    try:
+        apply_lines(profile_lines("baseline"), ctx)
+        rm(marker("active"))
+        results["baseline"] = "ripristinata"
+    except Err as e:
+        results["baseline"] = "errore nel ripristino: %s" % e
+    results["esito"] = "ok" if all(v.startswith(("ok", "ripristinata", "saltato")) for v in results.values()) else "FALLITO"
+    return results
+
+
+def fmt_hwtest(r):
+    return "\n".join("%-9s %s" % (k, v) for k, v in r.items())
+
+
+# ---- serve: protocollo per la GUI (una riga JSON per richiesta e per risposta) ---------
+SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}
+
+
+def cmd_serve(ctx, args):
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            argv = json.loads(line)
+            if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv) or not argv:
+                raise Err("richiesta non valida: atteso un array JSON di stringhe")
+            if argv[0] in SERVE_DENY:
+                raise Err("comando '%s' non disponibile via serve" % argv[0])
+            reply = {"ok": True, "data": run(argv)}
+        except Err as e:
+            reply = {"ok": False, "error": str(e)}
+        except Exception as e:  # mai morire su un bug: la GUI mostra l'errore
+            reply = {"ok": False, "error": "interno: %r" % e}
+        sys.stdout.write(json.dumps(reply, ensure_ascii=False) + "\n")
+        sys.stdout.flush()
+
+
+# ---- Dispatcher ------------------------------------------------------------------------
+COMMANDS = {
+    "status": cmd_status, "baseline": cmd_baseline, "co": cmd_co,
+    "ppt": limit_setter("ppt", "ppt_limit", "ppt_set", "W", PPT_MIN),
+    "tdc": limit_setter("tdc", "tdc_limit", "tdc_set", "A", TDC_MIN),
+    "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
+    "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
+    "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "unlock": cmd_unlock,
+    "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
+    "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
+    "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
+}
+FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest}
+
+
+def run(argv, ctx=None):
+    if not argv or argv[0] not in COMMANDS:
+        raise Err("comando sconosciuto: %s (disponibili: %s)" % (argv[:1], ", ".join(sorted(COMMANDS))))
+    return COMMANDS[argv[0]](ctx or {}, argv[1:])
+
+
+# ---- Selftest --------------------------------------------------------------------------
+def expect_err(argv, needle, ctx=None):
+    try:
+        run(argv, ctx)
+    except Err as e:
+        assert needle in str(e), "atteso '%s' in: %s" % (needle, e)
+        return
+    raise AssertionError("%s accettato, atteso errore '%s'" % (argv, needle))
+
+
+def selftest():
+    global ROOT, FAKE
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-")
+    FAKE = Fake()
+    # codifiche
+    assert co_arg(7, -30) == (7 << 20) | 0xFFE2
+    assert s16(0xFFFFFFE2) == -30 and s16(0x0005) == 5
+    assert shaper_arg(2, -10, -5, 3) == (3 << 24) | (0xFB << 16) | (0xF6 << 8) | 0x80 | 2
+    assert shaper_decode(shaper_arg(4, -50, 0, 30)) == [-50, 0, 30]
+    # gate CPU
+    FAKE.s["codename"] = 24
+    FAKE.save()
+    expect_err(["status"], "non supportata")
+    FAKE.s["codename"] = GRANITE_RIDGE
+    FAKE.save()
+    # status
+    st = run(["status"])
+    assert st["co"] == [0] * CORES and st["fmax"] == 5225 and st["baseline"] is None
+    assert st["limits"] == {"ppt": 162.0, "tdc": 120.0, "edc": 180.0, "tjmax": 95.0}
+    assert "Granite Ridge" in fmt_status(st)
+    expect_err(["nope"], "sconosciuto")
+    assert FAKE.smu(MP1, 0x10, [0])[0] == 0xFE   # fuori allowlist → UNKNOWN_CMD
+    # senza baseline nessuna scrittura CPU
+    expect_err(["ppt", "150"], "baseline")
+    expect_err(["co", "7", "-3"], "baseline")
+    base = run(["baseline"])
+    assert base["ppt"] == 162 and base["co"] == [0] * CORES and base["shaper"] == {}   # shaper sperimentale: fuori
+    assert run(["baseline", "show"]) == base and run(["status"])["baseline_fresh"]
+    assert "(base performance)" in fmt_status(run(["status"]))
+    # validazione
+    expect_err(["co", "7", "-51"], "fuori")
+    expect_err(["co", "7", "31"], "fuori")
+    expect_err(["co", "8", "0"], "fuori")
+    expect_err(["ppt", "44"], "fuori")
+    expect_err(["ppt", "0"], "fuori")
+    expect_err(["ppt", "163"], "fuori")
+    expect_err(["fmax", "5226"], "fuori")
+    expect_err(["tjmax", "96"], "fuori")
+    expect_err(["shaper", "5", "0", "0", "0"], "fuori")
+    expect_err(["ppt", "x"], "intero")
+    expect_err(["power", "turbo"], "uso")
+    # scritture con readback
+    assert run(["co", "7", "-3"])["co"][7] == -3
+    assert run(["co", "all", "-10"])["co"] == [-10] * CORES
+    assert run(["co"] + ["-5"] * 7 + ["0"])["co"] == [-5] * 7 + [0]
+    assert run(["ppt", "150"]) == {"ppt": 150.0}
+    assert run(["tdc", "100"]) == {"tdc": 100.0} and run(["edc", "150"]) == {"edc": 150.0}
+    assert run(["fmax", "5000"]) == {"fmax": 5000}
+    assert run(["tjmax", "85"]) == {"tjmax": 85.0}
+    assert run(["shaper", "2", "-10", "-5", "3"]) == {"shaper": {2: [-10, -5, 3]}}
+    assert run(["shaper", "raw"])["raw"][2] == "0x%08X" % shaper_arg(2, -10, -5, 3)
+    probe = run(["shaper", "probe"])
+    assert probe["subito"][4] == "0x%08X" % shaper_arg(4, -2, -2, -2) and probe["ripristino"][4] == "0x%08X" % shaper_arg(4, 0, 0, 0)
+    assert run(["power", "balanced"]) == {"power": "balanced"} and FAKE.s["power"] == "balanced"
+    assert os.path.exists(P(STATE + "/active")) and FAKE.s["log"][-1]["active"]
+    # sblocco
+    assert "ATTENZIONE" in run(["unlock", "on"])
+    assert run(["ppt", "200"]) == {"ppt": 200.0}
+    expect_err(["ppt", "231"], "fuori")
+    expect_err(["tdc", "161"], "fuori")
+    assert run(["fmax", "5425"]) == {"fmax": 5425}
+    expect_err(["fmax", "5426"], "fuori")
+    expect_err(["tjmax", "96"], "fuori")             # mai sopra baseline, nemmeno sbloccato
+    run(["unlock", "off"])
+    expect_err(["ppt", "163"], "fuori")
+    assert run(["ppt", "162"]) == {"ppt": 162.0}     # il valore baseline è sempre ammesso
+    # readback fallito: ripetizione, poi ripristino baseline
+    FAKE.s["drop"] = 1
+    FAKE.save()
+    assert run(["ppt", "150"]) == {"ppt": 150.0}     # prima scrittura ignorata, seconda ok
+    FAKE.s["drop"] = 2
+    FAKE.save()
+    expect_err(["ppt", "140"], "ripristinato")
+    assert run(["status"])["limits"]["ppt"] == 162.0
+    # dry-run: valida senza toccare l'hardware
+    assert run(["ppt", "150"], {"dry": True}) == {"ppt": 150.0} and FAKE.s["ppt"] == 162.0
+    expect_err(["ppt", "500"], "fuori", {"dry": True})
+    # PM table assente: limiti rifiutati, CO ok
+    FAKE.s["pm_version"] = 0
+    FAKE.save()
+    expect_err(["ppt", "150"], "PM table")
+    assert run(["co", "7", "0"])["co"][7] == 0
+    FAKE.s["pm_version"] = 0x620105
+    FAKE.save()
+    # baseline non si ricattura con stato modificato
+    expect_err(["baseline"], "già modificato")
+
+    # ---- profili ----
+    expect_err(["profile", "save", "Bad Name", "ppt 150"], "non valido")
+    expect_err(["profile", "save", "baseline", "ppt 150"], "riservato")
+    expect_err(["profile", "save", "q", "ppt 500"], "riga 1")
+    expect_err(["profile", "save", "q", "boot"], "non ammesso")
+    expect_err(["profile", "save", "q", "shaper 4 -2 -2 -2"], "non ammesso")
+    assert run(["profile", "save", "quiet", "ppt 150", "co all -10", "# commento", "fmax 5000", "power balanced"])["lines"] == 4
+    assert run(["profile", "list"]) == {"profiles": ["quiet"], "active": None}
+    assert run(["profile", "show", "quiet"])["lines"][0] == "ppt 150"
+    expect_err(["apply", "nope"], "inesistente")
+    expect_err(["autostart", "on"], "nessun profilo")
+    assert run(["use", "quiet"]) == {"profile": "quiet"}
+
+    # ---- crash-guard ----
+    def reboot():
+        """Riavvio simulato: /run svuotato, SMU torna ai valori BIOS."""
+        for f in os.listdir(P(RUN)):
+            os.remove(P(RUN + "/" + f))
+        FAKE.s.update({k: Fake.DEFAULT[k] for k in ("co", "fmax", "ppt", "tdc", "edc", "thm", "shaper")})
+        FAKE.s["co"] = list(Fake.DEFAULT["co"])
+        FAKE.s["shaper"] = list(Fake.DEFAULT["shaper"])
+        FAKE.save()
+
+    def exists(name):
+        return os.path.exists(marker(name))
+
+    # 1. primo boot (dirty mai esistito): marker a posto, nulla applicato
+    reboot()
+    out = run(["boot"])
+    assert exists("dirty") and not exists("active") and not exists("crashed") and out["applied"] == {}
+    assert os.path.exists(P(RUN + "/booted")) and run(["status"])["baseline_fresh"]
+    # 2. modifica a runtime, spegnimento pulito → nessun crash
+    run(["ppt", "150"])
+    assert exists("active")
+    run(["shutdown"])
+    assert not exists("dirty")
+    reboot()
+    out = run(["boot"])
+    assert not exists("crashed") and run(["status"])["limits"]["ppt"] == 162.0
+    # 3. profilo con autostart, poi crash → al boot niente CPU, marker crashed
+    run(["autostart", "on"])
+    run(["apply", "quiet"])
+    assert run(["status"])["limits"]["ppt"] == 150.0 and exists("active")
+    reboot()                                           # nessun shutdown = crash
+    out = run(["boot"])
+    assert out["crashed"] and out["crashed"]["profile"] == "quiet" and exists("crashed")
+    assert "crash" in out["errors"]["cpu"] and run(["status"])["limits"]["ppt"] == 162.0
+    assert exists("dirty") and not exists("active")
+    assert run(["notify"])["crashed"]["profile"] == "quiet" and "quiet" in FAKE.s["notified"]
+    # 3b. crash di nuovo mentre nulla è applicato: resta il crashed di prima, nessun nuovo active
+    reboot()
+    out = run(["boot"])
+    assert out["crashed"]["profile"] == "quiet" and not exists("active")
+    # "Resta su Default"
+    run(["crashed", "clear"])
+    run(["autostart", "off"])
+    reboot()
+    out = run(["boot"])
+    assert not exists("crashed") and out["applied"] == {} and run(["status"])["limits"]["ppt"] == 162.0
+    # 4. "Riattiva": applicato subito e a ogni boot pulito
+    run(["autostart", "on"])
+    out = run(["apply", "quiet"])
+    assert out["applied"][0] == "ppt 150"
+    run(["shutdown"])
+    reboot()
+    out = run(["boot"])
+    assert out["applied"]["cpu"] and run(["status"])["limits"]["ppt"] == 150.0 and run(["status"])["co"] == [-10] * CORES
+    assert not exists("crashed")
+    # ordine dei marker: a ogni scrittura SMU del boot dirty e active erano già presenti
+    assert all(e["dirty"] and e["active"] for e in FAKE.s["log"][-3:])
+    # 5. restart nello stesso boot: ExecStop toglie dirty, boot lo rimette, active e baseline restano
+    run(["shutdown"])
+    out = run(["boot"])
+    assert exists("dirty") and exists("active") and run(["baseline", "show"])["ppt"] == 162
+    reboot()                                           # crash dopo il restart → rilevato
+    assert run(["boot"])["crashed"]
+    run(["crashed", "clear"])
+    # 6. resume: riapplica solo senza crashed
+    reboot()
+    run(["boot"])
+    run(["ppt", "162"])
+    assert run(["resume"])["applied"]["cpu"] and run(["status"])["limits"]["ppt"] == 150.0
+    write_atomic(marker("crashed"), json.dumps({"time": "x", "profile": "quiet"}))
+    run(["ppt", "162"])
+    assert "crash" in run(["resume"])["errors"]["cpu"] and run(["status"])["limits"]["ppt"] == 162.0
+    run(["crashed", "clear"])
+    # 7. default: tutto a baseline, active via, autostart off; un crash dopo non è colpa nostra
+    run(["apply", "quiet"])
+    with open(P(STATE + "/baseline.conf"), "a") as f:   # baseline di una versione vecchia con riga shaper
+        f.write("shaper 4 0 0 0\n")
+    out = run(["default"])
+    assert not out["autostart"] and not exists("active")
+    st = run(["status"])
+    assert st["limits"]["ppt"] == 162.0 and st["co"] == [0] * CORES and st["fmax"] == 5225
+    assert st["power"] == run(["baseline", "show"])["power"]
+    reboot()
+    assert not run(["boot"])["crashed"]
+    # 8. boot non muore se l'apply fallisce (PM table assente): errore riportato, unit resta attiva
+    run(["use", "quiet"])
+    run(["autostart", "on"])
+    FAKE.s["pm_version"] = 0
+    FAKE.save()
+    reboot()
+    out = run(["boot"])
+    assert "PM table" in out["errors"]["cpu"] and "baseline_error" not in out
+    FAKE.s["pm_version"] = 0x620105
+    FAKE.save()
+    run(["autostart", "off"])
+    # 9. boot con SMU assente: baseline_error, nessuna eccezione
+    FAKE.s["codename"] = 0
+    FAKE.save()
+    reboot()
+    out = run(["boot"])
+    assert "baseline_error" in out
+    FAKE.s["codename"] = GRANITE_RIDGE
+    FAKE.save()
+    reboot()
+    run(["boot"])
+
+    # ---- hwtest: tutto ok, stato finale = baseline, active rimosso ----
+    r = run(["hwtest"])
+    assert r["esito"] == "ok" and r["co"].startswith("ok (7 -3 -> 7 0)") and r["ppt"].startswith("ok (150 -> 162)"), r
+    assert run(["status"])["limits"]["ppt"] == 162.0 and not exists("active")
+    FAKE.s["drop"] = 2                                   # il primo passo (co) fallisce, gli altri continuano
+    FAKE.s["log"] = []
+    FAKE.s["tctl"] = 60.0
+    FAKE.save()
+    r = run(["hwtest"])
+    assert r["esito"] == "FALLITO" and r["co"].startswith("errore") and r["fmax"].startswith("ok"), r
+    assert run(["status"])["co"] == [0] * CORES
+    assert "FALLITO" in fmt_hwtest(r)
+
+    # ---- serve ----
+    import io
+    stdin, stdout = sys.stdin, sys.stdout
+    sys.stdin = io.StringIO('["status"]\n["ppt","500"]\n["boot"]\nnon json\n["co","7","-3"]\n')
+    sys.stdout = io.StringIO()
+    try:
+        run(["serve"])
+        replies = [json.loads(l) for l in sys.stdout.getvalue().splitlines()]
+    finally:
+        sys.stdin, sys.stdout = stdin, stdout
+    assert replies[0]["ok"] and replies[0]["data"]["fmax"] == 5225
+    assert not replies[1]["ok"] and "fuori" in replies[1]["error"]
+    assert not replies[2]["ok"] and "serve" in replies[2]["error"]
+    assert not replies[3]["ok"]
+    assert replies[4]["ok"] and replies[4]["data"]["co"][7] == -3
+    print("selftest ok (%s)" % ROOT)
+
+
+def main():
+    argv = sys.argv[1:]
+    try:
+        if argv == ["selftest"]:
+            return selftest()
+        result = run(argv)
+    except Err as e:
+        print("errore: %s" % e, file=sys.stderr)
+        sys.exit(1)
+    except Exception:  # mai un'eccezione non gestita: ABRT la segnalerebbe come "crash"
+        traceback.print_exc()
+        sys.exit(2)
+    if argv[0] in ("boot", "resume") and result.get("errors") or result and result.get("baseline_error"):
+        print("ryzenctl %s: %s" % (argv[0], json.dumps(result, ensure_ascii=False)), file=sys.stderr)
+    if argv[0] in FORMAT:
+        print(FORMAT[argv[0]](result))
+    elif isinstance(result, str):
+        print(result)
+    elif result is not None:
+        print(json.dumps(result, ensure_ascii=False))
+
+
+if __name__ == "__main__":
+    main()

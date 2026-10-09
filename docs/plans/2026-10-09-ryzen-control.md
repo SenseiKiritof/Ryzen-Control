@@ -5,6 +5,13 @@ Revisione 2 (2026-10-09): installazione via pacchetti (RPM + base cross-distro),
 Revisione 3 (2026-10-09): modalità Auto; repo git personale, sviluppo a passi con verifica e commit.
 Revisione 4 (2026-10-09): revisione di sicurezza (crash-guard riscritto, cosa non si tocca mai,
 protezione pompa); ventole prima della GUI.
+Revisione 5 (2026-10-09): zero passi manuali dove possibile — il `%post` del pacchetto -dkms
+riusa la chiave akmods se già registrata in MOK (drop-in dkms creato solo in quel caso,
+`%ghost`), rebuild forzato, `ryzen-control` avvia il servizio all'installazione; `ryzenctl
+hwtest` automatizza la verifica reversibile su hardware. Resta manuale solo ciò che Secure Boot
+impone (registrazione MOK al riavvio, se nessuna chiave è già registrata) e il test di crash.
+In fase 2 `ryzenctl fan enable` imposterà da sé il parametro kernel (grubby / /etc/default/grub)
+con conferma esplicita, reversibile con `fan disable`.
 
 ## Context
 

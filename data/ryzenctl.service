@@ -1,0 +1,19 @@
+[Unit]
+Description=Ryzen Control: baseline CPU, crash-guard e profilo all'avvio
+# Il modulo è in blacklist (modprobe.d): lo carica solo questo servizio, così il parametro
+# kernel ryzenctl.off è una via di fuga completa.
+After=dkms.service systemd-modules-load.service
+ConditionKernelCommandLine=!ryzenctl.off
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStartPre=-/usr/sbin/modprobe ryzen_smu
+ExecStart=/usr/bin/ryzenctl boot
+# Spegnimento pulito: toglie il marker `dirty`. Se manca al boot successivo con un profilo
+# attivo, il sistema è andato in crash e il profilo CPU non viene riapplicato.
+ExecStop=/usr/bin/ryzenctl shutdown
+StateDirectory=ryzenctl
+
+[Install]
+WantedBy=multi-user.target

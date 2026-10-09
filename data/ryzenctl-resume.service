@@ -1,0 +1,11 @@
+[Unit]
+Description=Ryzen Control: riapplica il profilo dopo il resume (S3 riporta l'SMU ai valori BIOS)
+After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
+ConditionKernelCommandLine=!ryzenctl.off
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/ryzenctl resume
+
+[Install]
+WantedBy=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
