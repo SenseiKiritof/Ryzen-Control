@@ -41,6 +41,8 @@ FAN_RPM_CHANGE = 0.05          # sotto: il canale non risponde al PWM
 FAN_STEP_MAX_MS, FAN_STEP_TOL_MS = 60000, 200
 FAN_PWM_MIN, FAN_CURVE_LAST_TEMP_MAX = 51, 125    # 51 = 20 %, minimo delle curve BIOS; 125 = loro ultimo punto
 FAN_ROLES = ("ventola", "pompa", "non-controllabile", "sconosciuto")
+FAN_PUMP_MIN_PCT = 50          # pompa: solo velocità fissa esplicita, mai sotto il 50 % (flusso), mai curve/step
+FAN_PUMP_TOL = 2
 POWER_PROFILES = ("power-saver", "balanced", "performance")
 
 # ---- Percorsi ------------------------------------------------------------------------
@@ -740,7 +742,7 @@ def fmt_status(st):
 
 # ---- Profili -----------------------------------------------------------------------------
 PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "fan"}  # shaper: sperimentale, fuori
-FAN_PROFILE_SUBCMDS = ("step", "curve")   # in un profilo: `fan <N> step …` | `fan <N> curve …`
+FAN_PROFILE_SUBCMDS = ("step", "curve", "pump")   # `fan <N> step …` | `fan <N> curve …` | `fan <N> pump auto|<pct>`
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
 
@@ -1820,10 +1822,14 @@ def fan_capture_lines():
         return []
     lines = []
     for n in fan_channels(d):
-        if fan_role(n) == "ventola":
+        role = fan_role(n)
+        if role == "ventola":
             i = fan_info(d, n)
             lines.append("fan %d step %d %d" % (n, i["step_up_ms"], i["step_down_ms"]))
             lines.append("fan %d curve %s" % (n, " ".join(i["curva"])))
+        elif role == "pompa":
+            i = fan_info(d, n)
+            lines.append("fan %d pump %s" % (n, "auto" if i["modo"] != 1 else str(round(i["pwm"] * 100 / 255))))
     return lines
 
 
@@ -1968,6 +1974,31 @@ def cmd_fan(ctx, args):
             if abs(got - v) > FAN_STEP_TOL_MS:
                 raise Err("fan %d %s: scritto %d ma riletto %d" % (n, attr, v, got))
         return {"canale": n, "step": [hw_read("%s/pwm%d_step_up_time" % (d, n)), hw_read("%s/pwm%d_step_down_time" % (d, n))]}
+    if len(args) == 3 and args[1] == "pump":
+        if fan_role(n) != "pompa":
+            raise Err("canale %d non è classificato 'pompa' (ruolo '%s')" % (n, fan_role(n)))
+        if args[2] == "auto":
+            if ctx.get("dry"):
+                return {"canale": n, "pump": "auto"}
+            enable = load_settings().get("fans", {}).get(str(n), {}).get("enable_auto", 5)
+            hw_write("%s/pwm%d_enable" % (d, n), enable)       # torna alla SmartFan del BIOS
+            return {"canale": n, "pump": "auto", "modo": hw_read("%s/pwm%d_enable" % (d, n))}
+        pct = to_int(args[2], "pompa %")
+        check_range("pompa", pct, FAN_PUMP_MIN_PCT, 100, " %")
+        if ctx.get("dry"):
+            return {"canale": n, "pump": pct}
+        enable = hw_read("%s/pwm%d_enable" % (d, n))
+        if enable != 1:                                       # ricorda il modo BIOS per `pump auto`
+            s = load_settings()
+            s.setdefault("fans", {}).setdefault(str(n), {"role": "pompa"})["enable_auto"] = enable
+            save_settings(s)
+            hw_write("%s/pwm%d_enable" % (d, n), 1)
+        pwm = round(pct * 255 / 100)
+        hw_write("%s/pwm%d" % (d, n), pwm)
+        got = hw_read("%s/pwm%d" % (d, n))
+        if abs(got - pwm) > FAN_PUMP_TOL:
+            raise Err("pompa %d: scritto pwm %d ma riletto %d" % (n, pwm, got))
+        return {"canale": n, "pump": pct, "pwm": got, "rpm": hw_read("%s/fan%d_input" % (d, n))}
     if len(args) >= 3 and args[1] == "curve":
         pts = []
         for p in args[2:]:
@@ -1994,7 +2025,7 @@ def cmd_fan(ctx, args):
             hw_write("%s/pwm%d_auto_point%d_temp" % (d, n, i), t * 1000)
             hw_write("%s/pwm%d_auto_point%d_pwm" % (d, n, i), pw)
         return {"canale": n, "curva": fan_info(d, n)["curva"]}
-    raise Err("uso: fan <N> step <su_ms> <giù_ms> | fan <N> curve t:pwm …")
+    raise Err("uso: fan <N> step <su_ms> <giù_ms> | fan <N> curve t:pwm … | fan <N> pump auto|<50-100>")
 
 
 def fan_enable(ctx):
@@ -2398,6 +2429,16 @@ def selftest():
     expect_err(["fan", "1", "step", "10000", "5000"], "pompa")
     assert run(["fan", "autodetect"])[1]["ruolo"] == "ventola"
     assert run(["fan", "name", "1", "radiatore alto"])["nome"] == "radiatore alto"
+    # pompa: velocità fissa esplicita (min 50 %) o automatica; mai su una ventola
+    expect_err(["fan", "2", "pump", "40"], "fuori")
+    expect_err(["fan", "1", "pump", "60"], "pompa")
+    r = run(["fan", "2", "pump", "60"])
+    assert r["pwm"] == 153 and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 1 and r["rpm"] == 1500 + int(1300 * 153 / 255)
+    assert "fan 2 pump 60" in fan_capture_lines()
+    assert run(["fan", "2", "pump", "auto"])["modo"] == 5 and "fan 2 pump auto" in fan_capture_lines()
+    assert run(["profile", "save", "pp", "fan 2 pump 70"])["lines"] == 1 and run(["apply", "pp"])["applied"] == ["fan 2 pump 70"]
+    run(["fan", "2", "pump", "auto"])
+    run(["profile", "delete", "pp"])
     expect_err(["profile", "save", "f", "fan autodetect"], "non ammesso")
     expect_err(["profile", "save", "f", "fan 2 step 10000 5000"], "pompa")
     assert run(["profile", "save", "f", "fan 1 step 12000 6000", "ppt 150"])["lines"] == 2

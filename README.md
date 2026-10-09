@@ -92,6 +92,7 @@ sudo ryzenctl fan status             # canali, giri, pwm, step, curva, ruolo
 sudo ryzenctl fan autodetect         # ~30 s per canale sotto carico: assegna i ruoli ventola/pompa/non-controllabile
 sudo ryzenctl fan 1 step 10000 5000  # ritardo di reazione della SmartFan (ms, salita/discesa): ignora i picchi brevi
 sudo ryzenctl fan 1 curve 40:77 60:150 75:255   # punti temperatura:pwm (pwm >= 51, ultimo 255 entro 125 °C)
+sudo ryzenctl fan 2 pump 65          # pompa a velocità fissa (50–100 %); `pump auto` = curva del BIOS
 sudo ryzenctl fan identify 2         # 100 % per 5 s per riconoscere fisicamente il canale
 sudo ryzenctl fan name 1 "radiatore alto"; sudo ryzenctl fan role 3 pompa   # a mano si può solo declassare
 sudo ryzenctl fan disable
@@ -99,8 +100,10 @@ sudo ryzenctl fan disable
 
 Si scrive solo su canali classificati **ventola** da `fan autodetect` (test fisico: canale al 40 %
 per 20 s sotto carico, la pompa fa salire Tctl di gradi in secondi, una ventola no); la pompa e i
-canali che non rispondono al PWM restano in sola lettura, `pwmN_enable` (modalità SmartFan del
-BIOS) non viene mai cambiato fuori dai test. Nei profili: `fan <N> step …` e `fan <N> curve …`.
+canali che non rispondono al PWM restano in sola lettura. Unica eccezione per la pompa: velocità
+fissa esplicita (`fan N pump 65`, minimo 50 %) o automatica (BIOS), perché la curva del BIOS la
+modula con la temperatura e a pieno carico ronza; mai curve o step sulla pompa. Nei profili:
+`fan <N> step …`, `fan <N> curve …`, `fan <N> pump auto|<pct>`.
 
 ### Modalità e calibrazione automatica
 

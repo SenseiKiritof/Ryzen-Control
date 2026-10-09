@@ -127,7 +127,10 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   punti curva se richiesto) della SmartFan già programmata dal BIOS. Ruoli assegnati da
   `fan autodetect` (test fisico: canale al 40 % per 20 s sotto carico, ΔTctl distingue la pompa);
   a mano si può solo declassare, mai promuovere a "ventola". `pwmN_enable` non si tocca mai
-  fuori dai test (ripristino in `finally`). Il parametro kernel `acpi_enforce_resources=lax` lo
+  fuori dai test (ripristino in `finally`), con una sola eccezione esplicita: `fan N pump <50-100>`
+  mette la pompa a velocità fissa (modo manuale, minimo 50 %), `fan N pump auto` la restituisce al
+  BIOS; mai curve o step sulla pompa (il BIOS la modulava con la temperatura e ronzava a pieno
+  carico). Il parametro kernel `acpi_enforce_resources=lax` lo
   mette `ryzenctl fan enable` (azione esplicita dell'utente, grubby), mai il pacchetto.
   Il backend finto simula l'hwmon con file veri sotto `$ROOT/sys/class/hwmon/hwmon0` e la
   fisica in `Fake.after_fan_write`.
