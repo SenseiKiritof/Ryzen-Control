@@ -246,6 +246,13 @@ class Fake:
         cores = [int(args[args.index("--taskset") + 1])] if "--taskset" in args else range(CORES)
         return all(self.s["co"][c] >= self.s.get("co_limits", {}).get(str(c), -100) for c in cores)
 
+    def bench(self, threads):
+        """(bogo-ops/s, W) simulati: multi-thread satura con il PPT, single-thread segue FMax."""
+        import math
+        if threads > 1:
+            return round(1000 * (1 - math.exp(-self.s["ppt"] / 50)), 1), round(self.s["ppt"] * 0.9, 1)
+        return round(self.s["fmax"] / 5.0, 1), 45.0
+
     def peak_tctl(self):
         """Picco Tctl sotto raffica: 60 °C a 4000 MHz, +20 °C ogni 1250 MHz."""
         return round(60 + (self.s["fmax"] - 4000) / 1250 * 20, 1)
@@ -857,7 +864,8 @@ def cmd_preset(ctx, args):
 # ---- Autotune: macchina a passi (Eco/Auto), stato su disco, ripresa dopo crash ----------
 AT_PATH = STATE + "/autotune.json"
 AT_DEFAULTS = {"eco": {"target": 70, "colimit": -25, "margin": 5, "step": 90},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90}}
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10}}
+PPT_SWEEP_STEP, PPT_SWEEP_MIN, BENCH_SEC, FMAX_KNEE_SPAN = 0.10, 0.50, 15, 800   # Auto: ginocchio prestazioni/W
 CO_STEP, FINAL_SEC, FINAL_RETRIES = 5, 300, 3
 FMAX_STEP, FMAX_SWEEP_MIN, BURSTS = 100, 4000, 12
 
@@ -923,6 +931,130 @@ def tctl_p95():
     return sorted(peaks)[max(0, int(len(peaks) * 0.95) - 1)]
 
 
+def rapl_energy():
+    """Energia package in µJ e range di wrap, o (None, None)."""
+    try:
+        d = "/sys/class/powercap/intel-rapl:0"
+        return int(read_text(d + "/energy_uj")), int(read_text(d + "/max_energy_range_uj"))
+    except (OSError, ValueError):
+        return None, None
+
+
+def bench(threads, core=None):
+    """(bogo-ops/s, W medi) di stress-ng matrixprod per BENCH_SEC secondi; W da RAPL, fallback PM d[3]."""
+    if FAKE:
+        return FAKE.bench(threads)
+    args = ["stress-ng", "--cpu", str(threads), "--cpu-method", "matrixprod", "--metrics", "-Y", "/dev/stdout",
+            "-t", str(BENCH_SEC), "-q"]
+    if core is not None:
+        args += ["--taskset", str(core)]
+    e0, rng = rapl_energy()
+    pm_samples = []
+    t0 = time.monotonic()
+    p = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+    while p.poll() is None:
+        if e0 is None:
+            pm_samples.append(read_limits().get("ppt") or 0)
+        time.sleep(0.5)
+    out = p.stdout.read()
+    dt = max(0.1, time.monotonic() - t0)
+    m = re.search(r"bogo-ops-per-second-real-time:\s*([0-9.]+)", out)
+    if not m:
+        raise Err("stress-ng non ha riportato le metriche")
+    if e0 is not None:
+        e1, _ = rapl_energy()
+        watts = ((e1 - e0) % rng) / 1e6 / dt
+    else:
+        watts = sum(pm_samples) / max(1, len(pm_samples))
+    return float(m.group(1)), round(watts, 1)
+
+
+def best_core():
+    """Core con prefcore più alto (per il test single-thread)."""
+    if FAKE:
+        return 1
+    best, rank = 0, -1
+    for c in range(CORES):
+        try:
+            r = int(read_text("/sys/devices/system/cpu/cpu%d/cpufreq/amd_pstate_prefcore_ranking" % c))
+        except (OSError, ValueError):
+            r = 0
+        if r > rank:
+            best, rank = c, r
+    return best
+
+
+def at_scaled_limits(base, ppt):
+    """TDC/EDC in proporzione al PPT scelto, mai sotto i floor."""
+    k = ppt / float(base["ppt"])
+    return {"ppt": ppt, "tdc": max(TDC_MIN, round(base["tdc"] * k)) if "tdc" in base else None,
+            "edc": max(EDC_MIN, round(base["edc"] * k)) if "edc" in base else None}
+
+
+def at_knee_step(ctx, st, base):
+    """Auto: un punto dello sweep PPT (multi-thread) o FMax (single-thread); sceglie il valore più
+    basso con prestazioni ≥ (100 − loss) % del massimo misurato."""
+    k = st["knee"]
+    loss = st["params"]["loss"] / 100.0
+    if st["phase"] == "ppt":
+        v = k["ppt"]["current"]
+        lim = at_scaled_limits(base, v)
+        for key in ("ppt", "tdc", "edc"):
+            if lim[key] is not None:
+                run([key, str(lim[key])], ctx)
+        pause(5)
+        ops, watts = bench(CORES * 2)
+        k["ppt"]["tests"].append([v, ops, watts])
+        best = max(t[1] for t in k["ppt"]["tests"])
+        nxt = round(v - base["ppt"] * PPT_SWEEP_STEP)
+        if ops < best * (1 - loss):
+            k["ppt"]["chosen"] = k["ppt"]["tests"][-2][0] if len(k["ppt"]["tests"]) > 1 else v
+        elif nxt < base["ppt"] * PPT_SWEEP_MIN or nxt < PPT_MIN:
+            k["ppt"]["chosen"] = v
+        else:
+            k["ppt"]["current"] = nxt
+            return
+        lim = at_scaled_limits(base, k["ppt"]["chosen"])
+        for key in ("ppt", "tdc", "edc"):
+            if lim[key] is not None:
+                run([key, str(lim[key])], ctx)
+        st["phase"] = "fmax_knee"
+        k["fmax"]["current"] = base["fmax"]
+        return
+    if st["phase"] == "fmax_knee":
+        v = k["fmax"]["current"]
+        run(["fmax", str(v)], ctx)
+        pause(3)
+        ops, watts = bench(1, best_core())
+        k["fmax"]["tests"].append([v, ops, watts])
+        best = max(t[1] for t in k["fmax"]["tests"])
+        nxt = v - FMAX_STEP
+        if ops < best * (1 - loss):
+            k["fmax"]["chosen"] = k["fmax"]["tests"][-2][0] if len(k["fmax"]["tests"]) > 1 else v
+        elif nxt < base["fmax"] - FMAX_KNEE_SPAN or nxt < FMAX_MIN:
+            k["fmax"]["chosen"] = v
+        else:
+            k["fmax"]["current"] = nxt
+            return
+        at_finish_auto(ctx, st, base)
+
+
+def at_finish_auto(ctx, st, base):
+    """Profili auto (CO, limiti e FMax al ginocchio, ventole 3 s/2 s) e boost (fabbrica + CO)."""
+    k = st["knee"]
+    lim = at_scaled_limits(base, k["ppt"]["chosen"])
+    co = "co " + " ".join(str(v) for v in st["final"])
+    lines = [co] + ["%s %d" % (key, lim[key]) for key in ("ppt", "tdc", "edc") if lim[key] is not None]
+    lines.append("fmax %d" % k["fmax"]["chosen"])
+    lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("ppt", "tdc", "edc", "fmax")]
+    cmd_profile(ctx, ["save", "auto"] + lines)
+    cmd_profile(ctx, ["save", "boost", co] + preset_lines("boost", base))
+    run(["apply", "auto"], ctx)
+    run(["use", "auto"], ctx)
+    st["phase"] = "done"
+    st["profile_lines"] = lines
+
+
 def at_final_values(st):
     m = st["params"]["margin"]
     return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
@@ -956,6 +1088,8 @@ def cmd_autotune(ctx, args):
         check_range("margin", params["margin"], 0, 20)
         check_range("step", params["step"], 3, 3600, " s")
         check_range("target", params["target"], 50, 90, " °C")
+        if "loss" in params:
+            check_range("loss", params["loss"], 1, 50, " %")
         apply_lines(profile_lines("baseline"), ctx, "cpu")      # tutti i core a baseline
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
               "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
@@ -1006,9 +1140,13 @@ def cmd_autotune(ctx, args):
         st["in_progress"] = None
         if ok:
             st["final"] = vals
-            st["phase"] = "fmax" if st["mode"] == "eco" else "done"
-            if st["phase"] == "fmax":
+            if st["mode"] == "eco":
+                st["phase"] = "fmax"
                 st["fmax"]["current"] = base["fmax"]
+            else:
+                st["phase"] = "ppt"
+                st["knee"] = {"ppt": {"current": base["ppt"], "tests": [], "chosen": None},
+                              "fmax": {"current": None, "tests": [], "chosen": None}}
         else:
             at_final_failed(st)
         at_save(st)
@@ -1023,6 +1161,10 @@ def cmd_autotune(ctx, args):
             at_finish_eco(ctx, st, base)
         else:
             st["fmax"]["current"] = f - FMAX_STEP
+        at_save(st)
+        return st
+    if st["phase"] in ("ppt", "fmax_knee"):
+        at_knee_step(ctx, st, base)
         at_save(st)
         return st
     raise Err("fase sconosciuta: %s" % st["phase"])
@@ -1872,6 +2014,29 @@ def selftest():
     assert run(["status"])["co"] == [0] * CORES          # abort riporta la CPU a baseline
     run(["profile", "delete", "eco"])
     run(["use", "quiet"]) if "quiet" in run(["profile", "list"])["profiles"] else None
+
+    # ---- autotune auto: CO spinto + ginocchio PPT/FMax ----
+    FAKE.s["co_limits"] = {}
+    FAKE.save()
+    st = run(["autotune", "start", "auto", "step=3", "loss=10"])
+    for _ in range(300):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and "error" not in st, st
+    assert st["final"] == [-37] * CORES, st["final"]                      # limite -40 + margine 3
+    ppt_tests = [t[0] for t in st["knee"]["ppt"]["tests"]]
+    assert ppt_tests == [162, 146, 130, 114, 98] and st["knee"]["ppt"]["chosen"] == 114, st["knee"]["ppt"]
+    assert st["knee"]["fmax"]["chosen"] == 4725, st["knee"]["fmax"]
+    auto = run(["profile", "show", "auto"])["lines"]
+    assert "ppt 114" in auto and "tdc 84" in auto and "edc 127" in auto and "fmax 4725" in auto and "power balanced" in auto, auto
+    assert "co -37 -37 -37 -37 -37 -37 -37 -37" in run(["profile", "show", "boost"])["lines"]
+    assert run(["status"])["profile"] == "auto" and run(["status"])["limits"]["ppt"] == 114.0
+    run(["default"])
+    for n in ("auto", "boost"):
+        run(["profile", "delete", n])
+    FAKE.s["co_limits"] = {"7": -15, "3": -25}
+    FAKE.save()
 
     # ---- telemetry e caps ----
     tele = run(["telemetry"])

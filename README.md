@@ -102,6 +102,33 @@ per 20 s sotto carico, la pompa fa salire Tctl di gradi in secondi, una ventola 
 canali che non rispondono al PWM restano in sola lettura, `pwmN_enable` (modalità SmartFan del
 BIOS) non viene mai cambiato fuori dai test. Nei profili: `fan <N> step …` e `fan <N> curve …`.
 
+### Modalità e calibrazione automatica
+
+Nella GUI (pagina Modalità) o da CLI. Preset fissi (nessun test): **Default** = valori BIOS,
+**Quiet** = limiti ×0.55/0.63/0.83, FMax −400, Tjmax 80, ventole 10 s/5 s, **Boost** = valori
+di fabbrica con energia al massimo. Modalità **calibrate sull'hardware** con test di carico:
+
+```sh
+sudo ryzenctl preset quiet|eco|auto|boost        # crea il profilo dai valori di fabbrica (segnaposto)
+sudo ryzenctl autotune start eco [target=70 colimit=-25 margin=5 step=90]
+sudo ryzenctl autotune step                      # un test alla volta; ripetere finché phase == done
+sudo ryzenctl autotune status | abort
+```
+
+- **Eco**: per ogni core cerca il Curve Optimizer negativo stabile (passi di −5 fino a `colimit`,
+  tre fasi di carico: pieno con verifica, 50 %, 10 %; controllo errori MCE) e tiene l'ultimo
+  stabile + `margin` (undervolt *discreto*); passata finale su tutti i core; poi abbassa FMax di
+  100 MHz alla volta finché il 95° percentile dei picchi di Tctl sotto raffiche resta sotto
+  `target`; scrive il profilo `eco` con limiti Quiet, ventole lente e curva dal target.
+- **Auto**: stessa ricerca CO ma più spinta (−40, margine 3), poi il ginocchio prestazioni/watt:
+  sweep di PPT (multi-thread) e FMax (single-thread) misurando bogo-ops/s di stress-ng e potenza
+  RAPL, scegliendo il valore più basso che perde al massimo `loss` % (default 10) rispetto al
+  massimo. Aggiorna anche `boost` con il CO trovato.
+
+**Attenzione**: un CO instabile può riavviare il PC durante la calibrazione (nessun danno,
+lavoro non salvato perso). Lo stato è su disco: al riavvio il passo interrotto viene marcato
+instabile e si riprende. Durata: Eco ~25–40 min, Auto di più.
+
 **Curve Shaper**: sperimentale e di fatto disattivato. Sul 9800X3D con SMU 98.81.0 il comando
 di scrittura (RSMU 0xA6) risponde OK ma quello di lettura (0x84) restituisce solo zeri o
 l'argomento stesso, quindi nessuna scrittura è verificabile: `shaper` resta fuori da profili e
