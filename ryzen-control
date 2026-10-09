@@ -48,6 +48,7 @@ class Helper:
     """Un solo processo `ryzenctl serve`; chiamate serializzate. `call` blocca: usarla via `bg`."""
 
     def __init__(self, mock):
+        self.mock = mock
         env = dict(os.environ)
         if mock:
             root = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
@@ -593,7 +594,7 @@ class Window(Adw.ApplicationWindow):
         self.pages = [P(self) for P in (MonitorPage, ModesPage, CpuPage, CurvePage, FansPage)]
         for p in self.pages:
             self.stack.add_titled_with_icon(p, p.NAME, p.TITLE, p.ICON)
-        self.connect("close-request", lambda *_: helper.close())
+        self.connect("close-request", lambda *_: self.h.close())
         self.reload()
 
     # -- helper e ricarica --
@@ -602,7 +603,31 @@ class Window(Adw.ApplicationWindow):
             st = self.h.call("status")
             st["profiles"] = self.h.call("profile", "list")["profiles"]
             return st
-        bg(work, self.got_status, self.toast)
+        bg(work, self.got_status, self.helper_failed)
+
+    def helper_failed(self, msg):
+        """Senza `ryzenctl serve` (autenticazione annullata/fallita) la finestra resta vuota:
+        meglio un dialogo chiaro con Riprova (nuovo pkexec) che un toast che sparisce."""
+        if "non risponde" not in str(msg):
+            self.toast(msg)
+            return
+        d = Adw.AlertDialog(heading="Autenticazione necessaria",
+                            body="Ryzen Control legge e scrive le impostazioni del processore tramite ryzenctl, "
+                                 "che richiede i privilegi di amministratore. L'autenticazione è stata annullata "
+                                 "o è fallita.\n\n" + str(msg))
+        d.add_response("quit", "Chiudi")
+        d.add_response("retry", "Riprova")
+        d.set_default_response("retry")
+        d.set_response_appearance("retry", Adw.ResponseAppearance.SUGGESTED)
+        def resp(_d, r):
+            if r == "retry":
+                self.h.close()
+                self.h = Helper(self.h.mock)
+                self.reload()
+            else:
+                self.get_application().quit()
+        d.connect("response", resp)
+        d.present(self)
 
     def got_status(self, st):
         self.status = st
