@@ -33,8 +33,9 @@ in ryzenctl è una macchina a passi (`start/step/status/abort/estimate`, stato i
 `/var/lib/ryzenctl/autotune.json`, ripresa dopo crash, parallelo di default). Eco verificata su
 hardware (CO −20 su 8 core, ≈ 3,4 mV/passo, FMax invariata); Auto (ginocchio PPT/FMax con RAPL)
 in verifica; Boost calibrata, pompa con tetto o velocità fissa, scelta a fine calibrazione (Annulla / Salva /
-Salva e applica), `trust`, avvio al login, notifica cliccabile. Tag `v0.4.0` (VERSION 0.4.0). Poi: fase 5 icona nel vassoio (StatusNotifierItem + dbusmenu via Gio,
-`ryzen-control --tray`, comandi rapidi), fase 6 deb/PKGBUILD.
+Salva e applica), `trust`, avvio al login, notifica cliccabile. Tag `v0.4.1` (VERSION 0.4.1). Poi: fase 5 supporto a tutti i Ryzen (tabella `FAMILIES` per
+codename, `CORES` dinamico, gate fail closed), fase 6 icona nel vassoio (StatusNotifierItem +
+dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi), fase 7 deb/PKGBUILD.
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
 attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
@@ -74,7 +75,7 @@ git appena creati.
   ricompila il modulo solo se manca per il kernel in uso o cambia la chiave: **quando cambia il
   sorgente in `ryzen_smu/` va bumpata `VERSION`** (Makefile + spec), altrimenti dkms tiene il
   modulo vecchio;
-  `packaging/debian/` e `packaging/PKGBUILD` in fase 6.
+  `packaging/debian/` e `packaging/PKGBUILD` in fase 7.
 
 Vincoli di compatibilità: sintassi Python ≥ 3.9 (nessuna feature più recente), libadwaita ≥ 1.5,
 niente dipendenze Python oltre PyGObject, nessun framework di test.
@@ -159,7 +160,8 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   0xD5. Nessun altro ID viene inviato. Mai MP1 0x58–0x6F (congela l'SMU sul 9800X3D) né MP1
   0x10 (spegne il display). Mai comandi di tensione, OC mode (RSMU 0x5D), VID fisso (0x61),
   PBO scalar (0x5B), scritture `smn`, FCLK/memoria.
-- Gate: `codename` deve essere 23 (Granite Ridge), altrimenti rifiuto totale.
+- Gate: `codename` deve essere 23 (Granite Ridge), altrimenti rifiuto totale. (fase 5: codename in
+  `FAMILIES`, ogni famiglia con la sua allowlist; fuori tabella rifiuto totale)
 - Ogni transazione SMU sotto `flock(/run/ryzenctl/lock)` (`smu_args` del driver è globale).
 - Ogni scrittura è seguita da readback; discrepanza → una ripetizione → ripristino del valore
   baseline → errore. Nessun fallback automatico su altri ID.

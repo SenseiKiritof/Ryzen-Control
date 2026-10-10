@@ -4,6 +4,7 @@
 *~
 *.swp
 .claude/settings.local.json
+.mcp.json
 
 # Python
 __pycache__/

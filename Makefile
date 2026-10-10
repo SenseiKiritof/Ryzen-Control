@@ -1,6 +1,6 @@
 # Ryzen Control — unica fonte del layout installato. I pacchetti (RPM, deb, Arch) chiamano
 # `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` sono i pezzi.
-VERSION := 0.4.0
+VERSION := 0.4.1
 APPID := org.ryzencontrol.RyzenControl
 PREFIX ?= /usr
 DESTDIR ?=
