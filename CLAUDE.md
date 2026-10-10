@@ -119,8 +119,10 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   giri). Via di fuga: parametro kernel `ryzenctl.off` + modulo in blacklist (lo carica solo il
   servizio con modprobe esplicito).
 - **Modalità** statiche (nessun demone, il dinamismo lo fa PBO): Default / Quiet (preset) /
-  Eco (calibrata) / Auto (calibrata) / Boost (preset) / Custom. `preset <nome>` genera i profili
-  dalla baseline (rapporti in `PRESETS`); `autotune` li sostituisce con misure. `serve` esegue
+  Eco (calibrata) / Auto (calibrata) / Performance (preset) / Boost (calibrata) / Custom. `preset <nome>` genera i profili
+  dalla baseline (rapporti in `PRESETS`); `autotune` li sostituisce con misure, ma solo su
+  `autotune save [apply]`: a `phase == done` la CPU è a baseline e il profilo è proposto in
+  `profile_lines` (la GUI chiede Annulla / Salva / Salva e applica; `abort` scarta). `serve` esegue
   le richieste in ordine su un thread e legge su un altro: `autotune abort` alza il flag
   `/run/ryzenctl/autotune-abort` e termina gli stress-ng registrati in `_children`.
 - **Ventole** (fase 2): nessun demone; si cambiano solo `pwmN_step_up_time`/`step_down_time` (e

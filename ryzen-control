@@ -29,6 +29,9 @@ from gi.repository import Pango, Adw, Gdk, GLib, Gtk  # noqa: E402
 APP_ID = "org.ryzencontrol.RyzenControl"
 DEV_RYZENCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryzenctl")
 RYZENCTL = DEV_RYZENCTL if os.path.exists(DEV_RYZENCTL) else "/usr/bin/ryzenctl"
+# Autostart XDG dell'utente per "Avvia Ryzen Control al login"; in --mock resta nella directory del mock.
+LOGIN_DESKTOP = os.path.join(os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
+                             if "--mock" in sys.argv else os.path.join(GLib.get_user_config_dir(), "autostart"), APP_ID + ".desktop")
 POWER = ("power-saver", "balanced", "performance")
 PRESETS = ("quiet", "performance", "eco", "auto", "boost")
 CALIBRATED = ("eco", "auto", "boost")   # si adattano all'hardware con test di carico; gli altri sono preset fissi
@@ -752,10 +755,16 @@ class AutotuneDialog(Adw.Window):
         body.append(self.result)
         bar = Gtk.Box(spacing=12, halign=Gtk.Align.END, css_classes=["toolbar"])
         self.abort_btn = button("Interrompi", self.abort, "destructive-action")
-        self.close_btn = button("Chiudi", self.finish, "suggested-action")
-        self.close_btn.set_visible(False)
-        bar.append(self.abort_btn)
-        bar.append(self.close_btn)
+        self.close_btn = button("Chiudi", self.discard)                        # errore: niente da salvare
+        self.discard_btn = button("Annulla", self.discard, "destructive-action")
+        self.save_btn = button("Salva", lambda: self.save(False))
+        self.save_apply_btn = button("Salva e applica", lambda: self.save(True), "suggested-action")
+        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+            b.set_visible(False)
+        self.save_btn.set_tooltip_text("Scrive il profilo %s senza attivarlo: si applica dalla pagina Modalità" % mode)
+        self.save_apply_btn.set_tooltip_text("Scrive il profilo %s, lo applica subito e lo seleziona" % mode)
+        for b in (self.abort_btn, self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+            bar.append(b)
         # a finestra larga il contenuto resta centrato e leggibile (max 1100 px), la griglia si allarga
         clamp = Adw.Clamp(child=body, maximum_size=1100, tightening_threshold=800)
         tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=clamp, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
@@ -967,18 +976,32 @@ class AutotuneDialog(Adw.Window):
             self.result.append(label("Il carico di prova non ha raggiunto il limite di potenza impostato: il ginocchio vale per carichi di questa intensità",
                                      ["warning"], wrap=True))
         self.abort_btn.set_visible(False)
-        self.close_btn.set_visible(True)
-        setattr(self, "closable", True)
+        if st.get("profile_lines"):
+            self.phase.set_text("Calibrazione completata: annullare, salvare o salvare e applicare?")
+            for b in (self.discard_btn, self.save_btn, self.save_apply_btn):
+                b.set_visible(True)
+        else:
+            self.phase.set_text("Calibrazione terminata senza un profilo da salvare")
+            self.close_btn.set_visible(True)
+        # la scelta è obbligatoria: la finestra si chiude solo dopo (lo stato resta su disco e viene riproposto)
+
+    def choose(self, argv, msg):
+        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+            b.set_sensitive(False)
+        self.win.run([argv], lambda _: (self.win.toast(msg), setattr(self, "closable", True), self.close()))
+
+    def discard(self):
+        self.choose(["autotune", "abort"], "Calibrazione annullata, CPU a baseline")
+
+    def save(self, apply):
+        self.choose(["autotune", "save"] + (["apply"] if apply else []),
+                    "Profilo %s salvato e applicato" % self.mode if apply else "Profilo %s salvato (non applicato)" % self.mode)
 
     def abort(self):
         self.aborting = True
         self.abort_btn.set_sensitive(False)
         self.phase.set_text("Interrompo…")
         self.win.run([["autotune", "abort"]], lambda _: (self.win.toast("Calibrazione annullata, CPU a baseline"), setattr(self, "closable", True), self.close()))
-
-    def finish(self):
-        self.close()
-        self.win.reload()
 
 
 class ModesPage(Adw.PreferencesPage):
@@ -1028,6 +1051,10 @@ class ModesPage(Adw.PreferencesPage):
         g = Adw.PreferencesGroup(title="Avvio e limiti")
         self.autostart = Adw.SwitchRow(title="Applica all'avvio", subtitle="Riapplica il profilo selezionato al boot e al resume")
         self.autostart.connect("notify::active", self.on_autostart)
+        self.login = Adw.SwitchRow(title="Avvia Ryzen Control al login", active=os.path.exists(LOGIN_DESKTOP),
+                                   subtitle="Apre la finestra a ogni accesso (chiede la password di amministratore). Dopo un crash mostra "
+                                            "l'avviso e lascia il profilo disattivato: non riapplica nulla da sola")
+        self.login.connect("notify::active", self.on_login)
         self.unlock = Adw.SwitchRow(title="Consenti oltre i valori di fabbrica", subtitle="PPT/TDC/EDC fino ai tetti di sblocco, FMax oltre la baseline")
         self.unlock.connect("notify::active", self.on_unlock)
         hw = Adw.ActionRow(title="Verifica hardware", subtitle="Scrive e rilegge un valore per comando, poi ripristina la baseline")
@@ -1035,7 +1062,7 @@ class ModesPage(Adw.PreferencesPage):
         self.hw_btn = button("Esegui", self.hwtest)
         hw.add_suffix(self.hw_spin)
         hw.add_suffix(self.hw_btn)
-        for r in (self.autostart, self.unlock, hw):
+        for r in (self.autostart, self.login, self.unlock, hw):
             g.add(r)
         self.add(g)
 
@@ -1180,6 +1207,19 @@ class ModesPage(Adw.PreferencesPage):
     def on_autostart(self, row, _):
         if not self.loading:
             self.win.run([["autostart", "on" if row.get_active() else "off"]])
+
+    def on_login(self, row, _):
+        """Autostart XDG dell'utente (~/.config/autostart): nessun privilegio, solo la finestra al login."""
+        try:
+            if row.get_active():
+                os.makedirs(os.path.dirname(LOGIN_DESKTOP), exist_ok=True)
+                with open(LOGIN_DESKTOP, "w") as f:
+                    f.write("[Desktop Entry]\nType=Application\nName=Ryzen Control\nExec=ryzen-control\nIcon=%s\n"
+                            "Terminal=false\nX-GNOME-Autostart-enabled=true\n" % APP_ID)
+            elif os.path.exists(LOGIN_DESKTOP):
+                os.remove(LOGIN_DESKTOP)
+        except OSError as e:
+            self.win.toast(str(e))
 
     def on_unlock(self, row, _):
         if self.loading:
@@ -1512,9 +1552,14 @@ class Window(Adw.ApplicationWindow):
         for p in self.pages:
             p.refresh(st)
         at = st.get("autotune") or {}
-        if at.get("phase") not in (None, "done") and not getattr(self, "at_asked", False):
+        if at.get("phase") and not getattr(self, "at_asked", False):
             self.at_asked = True   # una sola volta per sessione
-            self.ask_resume(at)
+            if at["phase"] == "done":   # finita senza scelta (GUI chiusa): si ripropone annulla / salva / salva e applica
+                dlg = AutotuneDialog(self, at.get("mode", "eco"))
+                dlg.show(at)
+                dlg.done(at)
+            else:
+                self.ask_resume(at)
 
     def ask_resume(self, at):
         d = Adw.AlertDialog(heading="Calibrazione interrotta",

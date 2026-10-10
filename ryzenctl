@@ -1337,8 +1337,8 @@ def boost_lines(st, base):
 
 
 def at_boost_bench(ctx, st, base):
-    """Un solo passo: prestazioni MT e ST a fabbrica e con il profilo boost → guadagno misurato;
-    poi il profilo boost viene scritto e applicato."""
+    """Un solo passo: prestazioni MT e ST a fabbrica e con il profilo boost → guadagno misurato.
+    Il profilo viene proposto (`autotune save [apply]`), non scritto."""
     core, m = best_core(), heaviest_method()
     apply_lines(profile_lines("baseline"), ctx, "cpu")
     pause(5)
@@ -1351,10 +1351,7 @@ def at_boost_bench(ctx, st, base):
     st["bench"] = {"fabbrica": fab, "boost": bst,
                    "gain_mt_pct": round((bst["mt"][0] / fab["mt"][0] - 1) * 100, 1) if fab["mt"][0] else None,
                    "gain_st_pct": round((bst["st"][0] / fab["st"][0] - 1) * 100, 1) if fab["st"][0] else None}
-    cmd_profile(ctx, ["save", "boost"] + lines)
-    run(["use", "boost"], ctx)
-    st["phase"] = "done"
-    st["profile_lines"] = lines
+    at_done(ctx, st, lines)
 
 
 def at_finish_auto(ctx, st, base):
@@ -1365,9 +1362,14 @@ def at_finish_auto(ctx, st, base):
     lines = [co] + ["%s %d" % (key, lim[key]) for key in ("ppt", "tdc", "edc") if lim[key] is not None]
     lines.append("fmax %d" % k["fmax"]["chosen"])
     lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax")]
-    cmd_profile(ctx, ["save", "auto"] + lines)
-    run(["apply", "auto"], ctx)
-    run(["use", "auto"], ctx)
+    at_done(ctx, st, lines)
+
+
+def at_done(ctx, st, lines):
+    """Calibrazione finita: CPU di nuovo a baseline, profilo solo proposto. Lo scrive
+    `autotune save [apply]`; `autotune abort` lo scarta."""
+    apply_lines(profile_lines("baseline"), ctx, "cpu")
+    rm(marker("active"))
     st["phase"] = "done"
     st["profile_lines"] = lines
 
@@ -1397,7 +1399,7 @@ def at_mv_per_step(st):
 
 
 def cmd_autotune(ctx, args):
-    """autotune start eco|auto|boost [chiave=valore…] | step | status | abort | estimate eco|auto|boost [chiave=valore…]"""
+    """autotune start eco|auto|boost [chiave=valore…] | step | status | abort | save [apply] | estimate eco|auto|boost [chiave=valore…]"""
     st = _autotune(ctx, args)
     if isinstance(st, dict) and st.get("phase"):
         st["eta"] = at_estimate(st)
@@ -1407,7 +1409,7 @@ def cmd_autotune(ctx, args):
 
 def _autotune(ctx, args):
     if not args:
-        raise Err("uso: autotune start eco|auto [target=70 colimit=-25 margin=5 step=90 parallel=1] | step | status | abort | estimate eco|auto […]")
+        raise Err("uso: autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]")
     if args[0] == "status":
         return at_load() or {"phase": None}
     if args[0] == "estimate":
@@ -1427,6 +1429,18 @@ def _autotune(ctx, args):
             rm(marker("active"))                       # stato CPU = baseline
         rm(P(AT_ABORT_FLAG))
         return {"phase": None, "aborted": bool(st)}
+    if args[0] == "save":
+        st = at_load()
+        if not st or st["phase"] != "done" or not st.get("profile_lines"):
+            raise Err("nessuna calibrazione completata da salvare")
+        if args[1:] not in ([], ["apply"]):
+            raise Err("uso: autotune save [apply]")
+        cmd_profile(ctx, ["save", st["mode"]] + st["profile_lines"])
+        if args[1:]:
+            run(["apply", st["mode"]], ctx)
+            run(["use", st["mode"]], ctx)
+        rm(P(AT_PATH))
+        return {"phase": None, "saved": st["mode"], "applied": bool(args[1:])}
     if args[0] == "start":
         if len(args) < 2 or args[1] not in AT_DEFAULTS:
             raise Err("uso: autotune start eco|auto [chiave=valore…]")
@@ -1450,7 +1464,7 @@ def _autotune(ctx, args):
         at_save(st)
         return st
     if args[0] != "step":
-        raise Err("uso: autotune start|step|status|abort")
+        raise Err("uso: autotune start|step|status|abort|save|estimate")
     st = at_load()
     if not st or st["phase"] == "done":
         raise Err("nessuna calibrazione in corso (autotune start eco|auto|boost)")
@@ -1618,11 +1632,7 @@ def at_finish_eco(ctx, st, base):
                 cur = fan_info(d, n)["curva"]
                 pwm_min = int(cur[0].split(":")[1]) if cur else FAN_PWM_MIN
                 lines.append("fan %d curve %d:%d %d:255" % (n, st["params"]["target"] - 10, max(FAN_PWM_MIN, pwm_min), tj - 5))
-    cmd_profile(ctx, ["save", "eco"] + lines)
-    run(["apply", "eco"], ctx)
-    run(["use", "eco"], ctx)
-    st["phase"] = "done"
-    st["profile_lines"] = lines
+    at_done(ctx, st, lines)
 
 
 # ---- Crash-guard: marker dirty / active / crashed -----------------------------------------
@@ -2559,8 +2569,18 @@ def selftest():
     assert st["samples"]["0"]["volt"][0] == 1.25 and st["samples"]["-20"]["volt"][0] == 1.19, st["samples"]   # −20 ≈ −60 mV nel finto
     assert st["samples"]["-25"]["volt"][7] is None and st["samples"]["-25"]["volt"][0] == 1.175   # core 7 fuori prova a −25
     assert run(["telemetry"])["cores"][0]["volt"] is not None
-    assert run(["status"])["limits"]["ppt"] == 89.0 and run(["status"])["limits"]["tjmax"] == 80.0
     assert st["phase"] == "done" and "error" not in st, st
+    # finita: CPU a baseline, profilo solo proposto finché non si sceglie save / save apply / abort
+    assert run(["status"])["limits"]["ppt"] == 162.0 and run(["status"])["co"][7] == 0 and not os.path.exists(marker("active"))
+    assert "eco" not in run(["profile", "list"])["profiles"] and run(["autotune", "status"])["phase"] == "done"
+    expect_err(["autotune", "save", "ora"], "uso")
+    r = run(["autotune", "save"])                                # salva senza applicare
+    assert r["saved"] == "eco" and not r["applied"] and run(["autotune", "status"])["phase"] is None
+    assert run(["status"])["profile"] is None and run(["status"])["co"][7] == 0 and "eco" in run(["profile", "list"])["profiles"]
+    expect_err(["autotune", "save"], "nessuna")
+    run(["apply", "eco"])
+    run(["use", "eco"])
+    assert run(["status"])["limits"]["ppt"] == 89.0 and run(["status"])["limits"]["tjmax"] == 80.0
     # core 7 stabile fino a -15 (instabile a -20) → -10; core 3 fino a -25 → -20; gli altri al fondo scala -50 → -45
     assert st["final"] == [-45, -45, -45, -20, -45, -45, -45, -10] and st["unstable"]["7"]["value"] == -20, st["final"]
     assert st["fmax"]["chosen"] == 4625 and st["fmax"]["tests"][0][0] == 5225, st["fmax"]
@@ -2610,8 +2630,8 @@ def selftest():
     assert st["final_tries"] == 1 and st["final_failures"][0]["why"] == "simulato", st
     assert st["results"]["0"] == -50 and st["final"][0] == -44 and st["final"][7] == -9, (st["results"], st["final"])
     assert st["eta"]["total_s"] == 300 + 4 * 6 + 4 * 20          # totale fissato all'avvio
-    run(["autotune", "abort"])
-    run(["profile", "delete", "boost"])
+    run(["autotune", "abort"])                                   # scarta la proposta: nessun profilo scritto
+    assert "boost" not in run(["profile", "list"])["profiles"]
     FAKE.s["combined_stricter"] = 0
     FAKE.save()
     # ---- riuso del limite misurato: auto parte dalla passata finale col suo margine ----
@@ -2636,6 +2656,8 @@ def selftest():
     ppt_tests = [t[0] for t in st["knee"]["ppt"]["tests"]]
     assert ppt_tests == [162, 146, 130, 114, 98] and st["knee"]["ppt"]["chosen"] == 114, st["knee"]["ppt"]
     assert st["knee"]["fmax"]["chosen"] == 4725, st["knee"]["fmax"]
+    assert run(["status"])["limits"]["ppt"] == 162.0 and run(["status"])["co"] == [0] * CORES   # in attesa della scelta
+    assert run(["autotune", "save", "apply"]) == {"phase": None, "saved": "auto", "applied": True}
     auto = run(["profile", "show", "auto"])["lines"]
     assert "ppt 114" in auto and "tdc 84" in auto and "edc 127" in auto and "fmax 4725" in auto and "power balanced" in auto, auto
     assert run(["status"])["profile"] == "auto" and run(["status"])["limits"]["ppt"] == 114.0
@@ -2652,6 +2674,7 @@ def selftest():
             break
     assert st["phase"] == "done" and st["final"] == [-37] * CORES and st["bench"]["gain_mt_pct"] is not None, st
     assert st["method"] == "matrixprod" and st["mv_per_step"] == 3.0
+    assert run(["status"])["co"] == [0] * CORES and run(["autotune", "save", "apply"])["applied"]
     bl = run(["profile", "show", "boost"])["lines"]
     assert "co -37 -37 -37 -37 -37 -37 -37 -37" in bl and "ppt 162" in bl and "fmax 5225" in bl and "power performance" in bl, bl
     assert run(["status"])["profile"] == "boost" and run(["status"])["co"] == [-37] * CORES

@@ -121,10 +121,15 @@ sudo ryzenctl autotune estimate eco              # durata stimata (parallelo e c
 sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1]
 sudo ryzenctl autotune step                      # un test alla volta; ripetere finché phase == done
 sudo ryzenctl autotune status | abort            # abort interrompe subito anche un passo in corso
+sudo ryzenctl autotune save [apply]              # a phase == done: scrive il profilo proposto (e lo applica); abort lo scarta
 ```
 
-Dalla GUI: Modalità → "Calibra…" su Eco o Auto, poi "Automatica" (valori di default) o "Scegli i
-valori…". Di default i core si provano **tutti insieme** a ogni livello di CO (un worker per
+A calibrazione finita la CPU torna ai valori di fabbrica e il profilo è solo **proposto**: si
+sceglie se annullare, salvare (il profilo compare in Modalità, non attivo) o salvare e
+applicare. Senza scelta lo stato resta su disco e la GUI lo ripropone all'avvio successivo.
+
+Dalla GUI: Modalità → "Calibra…" su Eco, Auto o Boost, poi "Automatica" (valori di default) o
+"Scegli i valori…"; alla fine i pulsanti **Annulla / Salva / Salva e applica**. Di default i core si provano **tutti insieme** a ogni livello di CO (un worker per
 core, ~8× più veloce; `parallel=0` = un core alla volta, che attribuisce con certezza anche un
 riavvio). Durante i test la GUI mostra il tempo rimanente stimato, la tensione reale misurata
 per core a ogni livello e quanti mV vale un passo di CO su questa CPU.
@@ -168,6 +173,10 @@ dal BIOS.
   boot successivo entrambi esistono, il sistema è andato in crash: il profilo CPU **non viene
   riapplicato**, viene scritto `/var/lib/ryzenctl/crashed`, al login arriva una notifica e si
   decide (`ryzenctl crashed clear` + `autostart on` per riattivare, o restare sui valori BIOS).
+  L'interruttore "Avvia Ryzen Control al login" (Modalità) aggiunge solo un autostart XDG
+  dell'utente (`~/.config/autostart/`): la finestra si apre al login con il prompt pkexec e,
+  dopo un crash, mostra l'avviso con Riattiva / Resta su Default. Il riapplicare al boot resta
+  compito esclusivo di `ryzenctl.service` (`autostart` ∧ nessun crash): la GUI non applica nulla.
 - Via di fuga totale: al boot, in GRUB, `e` e aggiungere `ryzenctl.off` alla riga del kernel:
   il servizio non parte e il modulo non viene caricato (è in blacklist, lo carica solo il
   servizio).
