@@ -1217,10 +1217,26 @@ class ModesPage(Gtk.ScrolledWindow):
                 regen.connect("clicked", lambda *_a, k=key: self.regen(k))
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
+            if key == "boost":
+                self.boost_widgets = (chk, cal, regen)
             lists["calibrate" if key in CALIBRATED else "preset"].append(row)
+        self.lock_boost(True)   # until the status says that unlock is on
+
+    def lock_boost(self, locked):
+        """Boost only with unlock (ryzenctl refuses it too): radio and buttons insensitive, row dimmed,
+        the reason in the tooltip of the row, which stays sensitive: GTK 4 hides a tooltip owned by an
+        insensitive widget at the first pointer motion. The buttons' own tooltips are off meanwhile,
+        so they do not cover the row's."""
+        row = self.rows["boost"][0]
+        for w in self.boost_widgets:
+            w.set_sensitive(not locked)
+            w.set_has_tooltip(not locked)
+        (row.add_css_class if locked else row.remove_css_class)("dim-label")
+        row.set_tooltip_text(_("Boost needs \"Allow beyond the stock values\": turn it on in Preferences") if locked else None)
 
     def refresh(self, st):
         self.loading = True
+        self.lock_boost(not st.get("unlock"))
         prof = st.get("profile")
         shown = st.get("profile_lines", {})
         for key, title, sub in MODES:
@@ -1996,6 +2012,7 @@ class App(Adw.Application):
         h.call("autotune", "save")
         dlg.closable = True
         dlg.close()
+        h.call("unlock", "on")   # Boost is calibrated and used only with the unlock: the screenshots show it usable
         for mode in ("auto", "boost"):
             st = h.call("autotune", "start", mode, "step=3")
             while st["phase"] != "done":
@@ -2022,6 +2039,12 @@ class App(Adw.Application):
         win = self.props.active_window
         try:
             win.h.call("autotune", "abort")
+            modes = next(p for p in win.pages if isinstance(p, ModesPage))
+            for on in (False, True):   # Boost only with unlock: disabled without it, usable as soon as the status says on
+                modes.refresh(dict(win.status, unlock=on))
+                row, chk, regen = modes.rows["boost"]
+                assert chk.get_sensitive() == regen.get_sensitive() == on and (row.get_tooltip_text() is None) == on
+            win.h.call("unlock", "on")   # needed by the Boost calibration below
             # the first Eco measures from scratch, the last one reuses the final passes just recorded: done at once
             for i, mode in enumerate(("eco", "auto", "boost", "eco")):
                 dlg = AutotuneDialog(win, mode)
