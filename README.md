@@ -199,7 +199,7 @@ level and how many mV one CO step is worth on this CPU.
   MCE error check) and keeps the last stable one + `margin` (*conservative* undervolt); final
   pass on all cores; then, with the eco limits already applied, lowers FMax by 100 MHz at a
   time until the 95th percentile of the Tctl peaks under mixed bursts (all cores / one core)
-  stays below `target`; writes the `eco` profile with Quiet limits, slow fans and a curve from
+  stays below `target`; writes the `eco` profile with Quiet limits, slow-reacting fans and a curve from
   the target. Result on the development 9800X3D: all cores stable down to −25 → CO −20,
   ≈ 3.4 mV per step (−69 mV real at full load), FMax unchanged (peak 64 °C < 70 with the eco
   profile).

@@ -51,9 +51,9 @@ POWER = ("power-saver", "balanced", "performance")
 PRESETS = ("quiet", "performance", "eco", "auto", "boost")
 CALIBRATED = ("eco", "auto", "boost")   # adapt to the hardware with load tests; the others are fixed presets
 MODES = (("default", _("Default"), _("Stock values (baseline), automatic start disabled")),
-         ("quiet", _("Quiet"), _("Fixed preset: reduced limits, FMax −400, slow fans")),
+         ("quiet", _("Quiet"), _("Fixed preset: reduced limits, FMax −400, slow-reacting fans")),
          ("performance", _("Performance"), _("Fixed preset: stock values, power mode at maximum")),
-         ("eco", _("Eco"), _("Calibrated with load tests: moderate undervolt (measured limit + margin 5), FMax for silence, slow fans")),
+         ("eco", _("Eco"), _("Calibrated with load tests: moderate undervolt (measured limit + margin 5), FMax for silence, fans at the minimum at light load")),
          ("auto", _("Auto"), _("Calibrated with load tests: undervolt (measured limit + margin 3), PPT and FMax at the performance/watt knee")),
          ("boost", _("Boost"), _("Calibrated with load tests, maximum power: aggressive undervolt (measured limit + margin 3), limits and FMax at the allowed ceilings, measured gain")),
          ("custom", _("Custom"), _("Values set by hand in the CPU, Curves and Fans pages")))
@@ -90,7 +90,7 @@ AT_PARAMS = (("target", _("Target Tctl"), "°C", (50, 90)),
              ("margin", _("Safety margin"), "", (0, 20)),
              ("step", _("Duration of each test"), "s", (30, 600)))
 FAN_LEVELS = (_("BIOS: fans untouched"), _("Moderate: rise 3 s, fall 2 s, BIOS curve +10 % with 100 % at 100 °C"),
-              _("Quiet: rise 10 s, fall 5 s, minimum up to target Tctl −10 °C"))
+              _("Quiet: rise 10 s, fall 5 s, minimum up to target Tctl −10 °C, 100 % at Tjmax −5 °C"))
 AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays "
                "stable, then a final pass on all cores; finally, for Eco the search for the FMax that keeps Tctl below the "
                "target, for Auto the performance/watt knee, for Boost the measurement of the gain (MT and ST) over stock. "
@@ -112,6 +112,7 @@ CSS = """
 .tile { padding: 12px; }
 .chip { padding: 2px 10px; border-radius: 99px; font-weight: bold; background: alpha(currentColor, 0.12); }
 .pad { padding: 6px 12px; }
+.profile-table > flowboxchild { padding: 3px 6px 3px 0; }
 """
 
 
@@ -316,8 +317,8 @@ def crash_story(st):
 
 def curve_label(base_txt, new_txt):
     """Profile curve under the stock one: two curves with an arrow in between were unreadable.
-    Always a Box, which is how profile_table recognises a full-width row."""
-    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    Baseline = the first line: profile_table aligns the row's label with it, not with the middle of the box."""
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, valign=Gtk.Align.BASELINE_FILL, baseline_child=0)
     if base_txt is None or base_txt == new_txt:
         box.append(label(new_txt or "—", ["numeric", "dim-label"], wrap=True))
         return box
@@ -416,6 +417,7 @@ def profile_table(lines, st):
     rows = [(title, diff_label(base.get(key), v[key], unit)) for key, title, unit in CPU_PARAMS if key in v]
     if "power" in v:
         rows.append((_("Power mode"), diff_label(base.get("power"), v["power"])))
+    n_flow = len(rows)   # the rows after these (CO, fans) go one per line in the grid, in order
     if "co" in v:
         chips, bco = Gtk.Box(spacing=4), base.get("co") or [None] * 8
         for c in range(8):
@@ -426,33 +428,38 @@ def profile_table(lines, st):
                 chip.add_css_class("chip")
                 chips.append(chip)
         rows.append((_("CO (Curve Optimizer) per core"), chips, CO_TIP))
+    step_cells = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)   # one width for every rise/fall: "fall" in one column
     for n, f in sorted(v["fan"].items()):
         cur, stock = fans.get(n, {}), stock_fans.get(n, {})   # no stock value (fan roles assigned after boot): no comparison
         if "step" in f:
             tol = (st.get("caps") or {}).get("fan_step_tol_ms", 0)   # the chip rounds (e.g. 5000 → 5200)
             sec = lambda ms: None if ms is None else round(ms / 1000.0, 1)   # the chip works in ms, the user reads seconds
             stock_step = stock.get("step", (None, None))
+            steps = Gtk.Box(spacing=18)   # rise and fall of a channel on its own line (in the FlowBox they mixed channels)
             for name, base_v, new_v in ((_("rise"), stock_step[0], f["step"][0]), (_("fall"), stock_step[1], f["step"][1])):
                 same = base_v is not None and abs(base_v - new_v) <= tol
-                rows.append((_("Fan %d %s") % (n, name), diff_label(sec(new_v if same else base_v), sec(new_v), "s", lower_is_better=False)))
+                cell = Gtk.Box(spacing=6)
+                cell.append(label(name, ["dim-label"]))
+                cell.append(diff_label(sec(new_v if same else base_v), sec(new_v), "s", lower_is_better=False))
+                step_cells.add_widget(cell)
+                steps.append(cell)
+            rows.append((_("Fan %d") % n, steps))
         if "curve" in f:
             rm = cur.get("rpm_max")
             rows.append((_("Fan %d curve") % n, curve_label(curve_text(stock["curve"], rm) if stock.get("curve") else None, curve_text(f["curve"], rm))))
         if "pump" in f:   # stock and profile state as text: "auto" | "cap 70 %" | "fixed 65 %"
             rows.append((_("Pump %d") % n, diff_label(pump_text(stock["pump"]) if "pump" in stock else None, pump_text(f["pump"]))))
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
-    # short values (limits, FMax, Tjmax, power mode, step, pump) side by side, wrapping when space runs out
+    # short CPU values (limits, FMax, Tjmax, power mode) side by side, wrapping when space runs out
     flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=18, row_spacing=4, homogeneous=False,
-                       min_children_per_line=1, max_children_per_line=6, halign=Gtk.Align.START)
+                       min_children_per_line=1, max_children_per_line=6, halign=Gtk.Align.START,
+                       css_classes=["profile-table"])   # no left padding: labels in line with the grid's
     wide = Gtk.Grid(column_spacing=18, row_spacing=4)
-    n_wide = 0
-    for row in rows:
-        is_wide = isinstance(row[1], Gtk.Box)      # CO chips and curve points: full row
-        head = label(row[0], ["dim-label"], tooltip_text=row[2] if len(row) > 2 else None)
-        if is_wide:
-            wide.attach(head, 0, n_wide, 1, 1)
-            wide.attach(row[1], 1, n_wide, 1, 1)
-            n_wide += 1
+    for i, row in enumerate(rows):
+        head = label(row[0], ["dim-label"], tooltip_text=row[2] if len(row) > 2 else None, valign=Gtk.Align.BASELINE_FILL)
+        if i >= n_flow:      # CO chips and fan channels: full row, labels in one column
+            wide.attach(head, 0, i - n_flow, 1, 1)
+            wide.attach(row[1], 1, i - n_flow, 1, 1)
         else:
             cell = Gtk.Box(spacing=6)
             cell.append(head)
@@ -1269,8 +1276,10 @@ class ModesPage(Gtk.ScrolledWindow):
             else:
                 auto = _("all cores together, %s — %sCO (Curve Optimizer) down to %d with margin %d, %d s per test.") % (
                     mins(est["parallel_total_s"]), target, p["colimit"], p["margin"], p["step"])
-            fans = Adw.ComboRow(title=_("Fans"), model=Gtk.StringList.new(list(FAN_LEVELS)), selected=p.get("fans", 0),
-                                subtitle=_("Also in automatic mode: how much the mode touches the fans (only the channels recognised as fans)"))
+            # the chosen level as the subtitle (as a value at the end of the row the dialog cut it down to "…");
+            # use_subtitle before model/selected: set after them, libadwaita leaves the subtitle empty
+            fans = Adw.ComboRow(title=_("Fans"), use_subtitle=True, model=Gtk.StringList.new(list(FAN_LEVELS)), selected=p.get("fans", 0),
+                                tooltip_text=_("Also in automatic mode: how much the mode touches the fans (only the channels recognised as fans)"))
             lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
             lb.append(fans)
             d = Adw.AlertDialog(heading=_("Calibrate the %s mode?") % mode.capitalize(),
@@ -1302,7 +1311,7 @@ class ModesPage(Gtk.ScrolledWindow):
             group.add(r)
         parallel = Adw.SwitchRow(title=_("Test all cores together (fast, recommended)"), active=bool(est["params"].get("parallel", 1)))
         group.add(parallel)
-        fans = Adw.ComboRow(title=_("Fans"), model=Gtk.StringList.new(list(FAN_LEVELS)), selected=est["params"].get("fans", 0))
+        fans = Adw.ComboRow(title=_("Fans"), use_subtitle=True, model=Gtk.StringList.new(list(FAN_LEVELS)), selected=est["params"].get("fans", 0))
         group.add(fans)
         repeat = Adw.SwitchRow(title=_("Repeat the CO limit search"), active=False, sensitive=bool(est.get("co_reuse")))
         group.add(repeat)
