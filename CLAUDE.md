@@ -73,8 +73,8 @@ git appena creati.
 - `packaging/ryzen-control.spec` (RPM: **un solo pacchetto** `ryzen-control`, noarch, con il
   sorgente DKMS del driver dentro; `Obsoletes: ryzen-smu-dkms` per le release 1-4). Il `%post`
   ricompila il modulo solo se manca per il kernel in uso o cambia la chiave: **quando cambia il
-  sorgente in `ryzen_smu/` va bumpata `VERSION`** (Makefile + spec), altrimenti dkms tiene il
-  modulo vecchio;
+  sorgente in `ryzen_smu/` va bumpata `DRV_VERSION`** (Makefile) **= `%drv_version`** (spec), altrimenti
+  dkms tiene il modulo vecchio; `VERSION` (app) non tocca il modulo, così una release non ricompila;
   `packaging/debian/` e `packaging/PKGBUILD` in fase 7.
 
 Vincoli di compatibilità: sintassi Python ≥ 3.9 (nessuna feature più recente), libadwaita ≥ 1.5,

@@ -1,6 +1,9 @@
 Name:           ryzen-control
+# Versione del modulo DKMS: cambia solo con il sorgente in ryzen_smu/ (= DRV_VERSION nel Makefile);
+# così una release dell'app non ricompila il modulo.
+%global drv_version 0.4.1
 Version:        0.4.1
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; driver ryzen_smu incluso (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -68,12 +71,12 @@ if [ ! -s "$DROPIN" ] && [ -f "$AKMODS_KEY" ] && [ -f "$AKMODS_CERT" ] \
 fi
 # `dkms add --rpm_safe_upgrade` SEMPRE: crea il lock che annulla il `dkms remove` del %%preun
 # del pacchetto vecchio nella stessa transazione (senza, l'aggiornamento cancella il modulo).
-dkms add -m ryzen_smu -v %{version} -q --rpm_safe_upgrade || :
+dkms add -m ryzen_smu -v %{drv_version} -q --rpm_safe_upgrade || :
 # Ricompila solo se serve: un rebuild + dracut di tutte le initramfs costa circa un minuto.
-# Quando cambia il sorgente del driver va bumpata la versione (nuova directory /usr/src).
-if [ -n "$FORCE" ] || ! dkms status -m ryzen_smu -v %{version} -k "$(uname -r)" 2>/dev/null | grep -q ': installed'; then
-    dkms build -m ryzen_smu -v %{version} -q $FORCE || :
-    dkms install -m ryzen_smu -v %{version} -q $FORCE || :
+# Quando cambia il sorgente del driver va bumpata %%drv_version (nuova directory /usr/src).
+if [ -n "$FORCE" ] || ! dkms status -m ryzen_smu -v %{drv_version} -k "$(uname -r)" 2>/dev/null | grep -q ': installed'; then
+    dkms build -m ryzen_smu -v %{drv_version} -q $FORCE || :
+    dkms install -m ryzen_smu -v %{drv_version} -q $FORCE || :
 fi
 if [ ! -s "$DROPIN" ] && grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/security/lockdown 2>/dev/null \
    && ! mokutil --test-key /var/lib/dkms/mok.pub 2>/dev/null | grep -q 'already enrolled'; then
@@ -90,7 +93,7 @@ fi
 
 %preun
 %systemd_preun ryzenctl.service ryzenctl-resume.service
-dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
+dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 
 %postun
 %systemd_postun ryzenctl.service ryzenctl-resume.service
@@ -112,10 +115,13 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %dir %{_sysconfdir}/ryzenctl
 %dir %{_sysconfdir}/ryzenctl/profiles
 %dir %{_sharedstatedir}/ryzenctl
-%{_usrsrc}/ryzen_smu-%{version}/
+%{_usrsrc}/ryzen_smu-%{drv_version}/
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.1-3
+- Versione del modulo DKMS separata da quella dell'app: le release non ricompilano più il modulo
+
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.1-2
 - Modalità su due colonne (Preset / Calibrate), valori corti dei profili affiancati
 

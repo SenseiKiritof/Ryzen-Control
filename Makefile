@@ -1,6 +1,9 @@
 # Ryzen Control — unica fonte del layout installato. I pacchetti (RPM, deb, Arch) chiamano
 # `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` sono i pezzi.
 VERSION := 0.4.1
+# Versione del modulo DKMS: cambia SOLO quando cambia ryzen_smu/ (una nuova directory /usr/src =
+# ricompilazione + dracut, circa un minuto all'aggiornamento). Stesso valore di %drv_version nella spec.
+DRV_VERSION := 0.4.1
 APPID := org.ryzencontrol.RyzenControl
 PREFIX ?= /usr
 DESTDIR ?=
@@ -16,7 +19,7 @@ METADIR := $(DESTDIR)$(PREFIX)/share/metainfo
 AUTOSTARTDIR := $(DESTDIR)/etc/xdg/autostart
 ETCDIR := $(DESTDIR)/etc/ryzenctl
 STATEDIR := $(DESTDIR)/var/lib/ryzenctl
-DKMS_SRC := $(DESTDIR)$(PREFIX)/src/ryzen_smu-$(VERSION)
+DKMS_SRC := $(DESTDIR)$(PREFIX)/src/ryzen_smu-$(DRV_VERSION)
 TMPROOT := $(or $(TMPDIR),/tmp)/ryzen-control-check
 
 .PHONY: all install install-cli install-gui install-dkms-src dkms uninstall check driver-check dist rpm
@@ -45,15 +48,15 @@ install-gui:
 install-dkms-src:
 	install -dm755 $(DKMS_SRC)
 	install -m644 -t $(DKMS_SRC) ryzen_smu/drv.c ryzen_smu/smu.c ryzen_smu/smu.h ryzen_smu/Makefile
-	sed -e 's/@VERSION@/$(VERSION)/' -e 's/@CFLGS@//' ryzen_smu/dkms.conf > $(DKMS_SRC)/dkms.conf
+	sed -e 's/@VERSION@/$(DRV_VERSION)/' -e 's/@CFLGS@//' ryzen_smu/dkms.conf > $(DKMS_SRC)/dkms.conf
 
 # Ultima spiaggia senza pacchetto: `sudo make install && sudo make dkms`.
 dkms:
-	dkms add ryzen_smu/$(VERSION) || true
-	dkms build ryzen_smu/$(VERSION) && dkms install ryzen_smu/$(VERSION)
+	dkms add ryzen_smu/$(DRV_VERSION) || true
+	dkms build ryzen_smu/$(DRV_VERSION) && dkms install ryzen_smu/$(DRV_VERSION)
 
 uninstall:
-	-dkms remove ryzen_smu/$(VERSION) --all
+	-dkms remove ryzen_smu/$(DRV_VERSION) --all
 	rm -rf $(DKMS_SRC)
 	rm -f $(BIN)/ryzenctl $(BIN)/ryzen-control
 	rm -f $(UNITDIR)/ryzenctl.service $(UNITDIR)/ryzenctl-resume.service $(PRESETDIR)/80-ryzen-control.preset
