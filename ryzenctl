@@ -1467,9 +1467,18 @@ def at_known_bad(st):
     return any(all(v <= f for v, f in zip(vals, ff["values"])) for ff in st.get("final_failures", []))
 
 
+CRASH_MARGIN = 3   # la ricerca è finita con un blocco del sistema: il livello "stabile" sotto era a un passo dal crash
+
+
+def at_margin(st):
+    """Margine sul limite misurato: quello della modalità, +3 per ogni passata finale fallita, +3 se
+    la ricerca si è chiusa con un crash (il livello stabile è stato provato solo per `step` secondi)."""
+    crashed = any(u.get("why") == "crash" for u in st.get("unstable", {}).values())
+    return st["params"]["margin"] + 3 * st.get("final_tries", 0) + (CRASH_MARGIN if crashed else 0)
+
+
 def at_final_values(st):
-    """Limite misurato + margine della modalità + 3 per ogni passata finale fallita."""
-    m = st["params"]["margin"] + 3 * st.get("final_tries", 0)
+    m = at_margin(st)
     return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
 
 
@@ -1497,6 +1506,7 @@ def cmd_autotune(ctx, args):
     if isinstance(st, dict) and st.get("phase"):
         st["eta"] = at_estimate(st)
         st["mv_per_step"] = at_mv_per_step(st)
+        st["final_margin"] = at_margin(st)
     return st
 
 
@@ -2794,6 +2804,7 @@ def selftest():
     st = run(["autotune", "step"])
     assert st["resumed_after_crash"] and st["phase"] == "final" and st["unstable"]["0"] == {"value": -10, "why": "crash"}
     assert st["results"]["0"] == -5 and json.loads(read_text(CO_LIMITS_PATH))["results"]["0"] == -5
+    assert st["final_margin"] == 5 + 3 and at_final_values(st) == [0] * CORES   # crash: margine eco 5 + 3 (−5 + 8, tetto 0)
     run(["autotune", "abort"])
     write_atomic(P(CO_LIMITS_PATH), limits_eco)        # i casi seguenti riusano la misura eco completa
     run(["profile", "delete", "eco"])

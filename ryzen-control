@@ -908,8 +908,8 @@ class AutotuneDialog(Adw.Window):
 
     @staticmethod
     def final_values(st):
-        """CO della passata finale: limite misurato + margine della modalità + 3 per ogni passata fallita (come at_final_values)."""
-        m = st.get("params", {}).get("margin", 0) + 3 * st.get("final_tries", 0)
+        """CO della passata finale: limite misurato + margine (calcolato da ryzenctl: modalità, passate fallite, crash)."""
+        m = st.get("final_margin", st.get("params", {}).get("margin", 0) + 3 * st.get("final_tries", 0))
         return [min(0, st.get("results", {}).get(str(c), 0) + m) for c in range(8)]
 
     @staticmethod
@@ -939,9 +939,14 @@ class AutotuneDialog(Adw.Window):
         if st.get("error"):
             self.result.append(label(st["error"], ["warning"], wrap=True))
         tries = st.get("final_tries", 0)
-        if tries and st.get("final"):
-            self.result.append(label("Il margine finale è +%d perché la passata combinata è fallita %d volt%s" % (
-                st.get("params", {}).get("margin", 0) + 3 * tries, tries, "a" if tries == 1 else "e"), ["warning"], wrap=True))
+        crashed = any(u.get("why") == "crash" for u in (st.get("unstable") or {}).values())
+        if (tries or crashed) and st.get("final"):
+            why = []
+            if tries:
+                why.append("la passata combinata è fallita %d volt%s" % (tries, "a" if tries == 1 else "e"))
+            if crashed:
+                why.append("la ricerca si è chiusa con un blocco del sistema (+3)")
+            self.result.append(label("Il margine finale è +%d perché %s" % (st.get("final_margin", 0), " e ".join(why)), ["warning"], wrap=True))
         if st.get("final"):   # per core: CO fabbrica → definitivo e ΔV misurata (campione al livello definitivo o al più vicino)
             base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
             ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8

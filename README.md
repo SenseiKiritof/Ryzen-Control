@@ -155,7 +155,9 @@ carico, non vengono riusate. La **passata finale** (tutti i core al CO proposto)
 di più su questa CPU, a pieno carico per 60 s con verifica, poi 100 s pieno / 50 % / 10 %. Se
 fallisce, oppure se in una fase successiva (FMax, ginocchio, benchmark) un carico muore, compare
 un errore MCE o il sistema si blocca e viene riavviato, la combinazione è instabile: +3 su tutti
-i core e passata finale ripetuta (al massimo 3 tentativi). Le combinazioni fallite restano in
+i core e passata finale ripetuta (al massimo 3 tentativi). Se la ricerca stessa si chiude con un
+blocco del sistema, il margine ha +3 in più: il livello "stabile" sotto quello del crash è stato
+provato solo per `step` secondi. Le combinazioni fallite restano in
 `co_limits.json` e le calibrazioni successive non le riprovano. Dopo un riavvio forzato il passo
 interrotto viene marcato instabile già all'avvio di `ryzenctl.service`, prima di qualunque scelta
 nella GUI (Riprendi o Annulla). Esito sul 9800X3D di sviluppo:
