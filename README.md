@@ -63,7 +63,7 @@ To remove: `sudo make uninstall`.
 
 Open **Ryzen Control** from the application menu (or run `ryzen-control`). The first action that
 needs root asks for the administrator password once per session; "Stop asking for the password"
-in Modes removes even that one. The screenshots below come from the fake backend
+in Preferences removes even that one. The screenshots below come from the fake backend
 (`make screenshots`), so the values are illustrative.
 
 **Monitor** — Tctl and per-core temperature, PPT and TDC against their limits, MHz, voltage and
@@ -74,7 +74,6 @@ Curve Optimizer per core, the last 60 s of Tctl and PPT, fan speeds and power mo
 **Modes** — one click switches between stock values (Default), the fixed presets (Quiet,
 Performance), the modes calibrated on this CPU (Eco, Auto, Boost) and your own values (Custom).
 Every profile lists what it changes: green is more conservative than stock, red more aggressive.
-"Apply at startup" re-applies the selected profile at every boot and resume, never after a crash.
 
 **Calibration** — "Calibrate…" on Eco, Auto or Boost measures this CPU: the Curve Optimizer limit
 of every core under load, then FMax for silence (Eco), the performance/watt knee (Auto) or the
@@ -98,6 +97,14 @@ channels are protected; the pump can only be left to the BIOS (recommended), cap
 fixed speed (never below 50 %).
 
 ![Fans page](docs/screenshots/fans.png)
+
+**Preferences** — "Apply at startup" re-applies the selected profile at every boot and resume,
+never after a crash; "Start Ryzen Control at login" opens the window at every login; "Stop asking
+for the password" writes the polkit rule described in "Safety"; "Allow beyond the stock values"
+raises the PPT/TDC/EDC and FMax ceilings (unlock); "Hardware check" writes and reads back one
+value per command, then restores the baseline.
+
+![Preferences page](docs/screenshots/preferences.png)
 
 ## Usage (CLI)
 
@@ -237,11 +244,11 @@ the BIOS.
   exist at the next boot, the system crashed: the CPU profile is **not reapplied**,
   `/var/lib/ryzenctl/crashed` is written, a notification arrives at login (one click opens
   Ryzen Control) and you decide (`ryzenctl crashed clear` + `autostart on` to reactivate, or stay on the BIOS values).
-  The "Start Ryzen Control at login" switch (Modes) only adds a user XDG autostart entry
+  The "Start Ryzen Control at login" switch (Preferences) only adds a user XDG autostart entry
   (`~/.config/autostart/`): the window opens at login with the pkexec prompt and, after a
   crash, shows the warning with Reactivate / Stay on Default. Reapplying at boot remains the
   exclusive job of `ryzenctl.service` (`autostart` ∧ no crash): the GUI applies nothing.
-  "Don't ask for the password again" (`ryzenctl trust on`) writes
+  "Stop asking for the password" (Preferences, `ryzenctl trust on`) writes
   `/etc/polkit-1/rules.d/50-ryzen-control.rules`: your user, in the active local session,
   starts `pkexec ryzenctl serve` without authenticating. It applies only to this action, it is
   not a generic sudo; in exchange every program run as your user can change limits, CO and fans
