@@ -2,8 +2,8 @@ Name:           ryzen-control
 # Versione del modulo DKMS: cambia solo con il sorgente in ryzen_smu/ (= DRV_VERSION nel Makefile);
 # così una release dell'app non ricompila il modulo.
 %global drv_version 0.4.1
-Version:        0.4.1
-Release:        3%{?dist}
+Version:        0.4.2
+Release:        1%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; driver ryzen_smu incluso (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -119,6 +119,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.2-1
+- Modalità su due colonne, valori dei profili affiancati, versione DKMS separata (aggiornamenti
+  rapidi), GitHub Actions per le release
+
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.1-3
 - Versione del modulo DKMS separata da quella dell'app: le release non ricompilano più il modulo
 

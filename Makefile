@@ -1,6 +1,6 @@
 # Ryzen Control — unica fonte del layout installato. I pacchetti (RPM, deb, Arch) chiamano
 # `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` sono i pezzi.
-VERSION := 0.4.1
+VERSION := 0.4.2
 # Versione del modulo DKMS: cambia SOLO quando cambia ryzen_smu/ (una nuova directory /usr/src =
 # ricompilazione + dracut, circa un minuto all'aggiornamento). Stesso valore di %drv_version nella spec.
 DRV_VERSION := 0.4.1
