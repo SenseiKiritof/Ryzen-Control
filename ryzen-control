@@ -275,10 +275,12 @@ def pump_text(v):
     return "tetto %d %%" % v[1] if isinstance(v, tuple) else "fissa %d %%" % v
 
 
-def curve_text(tokens):
-    """Curva leggibile: '60 °C → 20 % · 75 °C → 100 %'."""
+def curve_text(tokens, rpm_max=None):
+    """Curva leggibile: '60 °C → 20 % (≈ 400 giri) · 75 °C → 100 % (≈ 2000 giri)'; senza rpm_max solo °C → %."""
     pts = curve_points(tokens)
-    return " · ".join("%d °C → %d %%" % (t, pwm_pct(pwm)) for t, pwm in pts) if pts else None
+    # ponytail: stima lineare giri = rpm_max × % (come CurveEditor); rpm_max lo misura "Identifica"
+    giri = lambda pct: " (≈ %d giri)" % (rpm_max * pct / 100.0) if rpm_max else ""
+    return " · ".join("%d °C → %d %%%s" % (t, pwm_pct(pwm), giri(pwm_pct(pwm))) for t, pwm in pts) if pts else None
 
 
 def diff_label(base, new, unit="", lower_is_better=True):
@@ -289,7 +291,7 @@ def diff_label(base, new, unit="", lower_is_better=True):
         return v if isinstance(v, (int, float)) else None
     u = (" " + unit) if unit else ""
     if base is None or base == new:
-        return label(fmt(new, u), ["numeric", "dim-label"])
+        return label(fmt(new, u), ["numeric", "dim-label"], wrap=isinstance(new, str))   # curve lunghe vanno a capo
     b, n = num(base), num(new)
     text, css = "%s → %s" % (fmt(base), fmt(new, u)), "accent"
     if b is not None and n is not None:
@@ -299,7 +301,7 @@ def diff_label(base, new, unit="", lower_is_better=True):
         elif isinstance(base, (int, float)):
             text += "  %+g" % d
         css = "success" if (d < 0) == lower_is_better else "error"
-    lab = label("", ["numeric", css])
+    lab = label("", ["numeric", css], wrap=isinstance(new, str))
     lab.set_markup("<b>%s</b>" % GLib.markup_escape_text(text))
     return lab
 
@@ -354,11 +356,13 @@ def profile_table(lines, st):
         cur = fans.get(n, {})
         if "step" in f:
             tol = (st.get("caps") or {}).get("fan_step_tol_ms", 0)   # il chip arrotonda (es. 5000 → 5200)
+            sec = lambda ms: None if ms is None else round(ms / 1000.0, 1)   # il chip lavora in ms, l'utente legge secondi
             for name, cur_v, new_v in (("salita", cur.get("step_up_ms"), f["step"][0]), ("discesa", cur.get("step_down_ms"), f["step"][1])):
                 same = cur_v is not None and abs(cur_v - new_v) <= tol
-                rows.append(("Ventola %d %s" % (n, name), diff_label(new_v if same else cur_v, new_v, "ms", lower_is_better=False)))
+                rows.append(("Ventola %d %s" % (n, name), diff_label(sec(new_v if same else cur_v), sec(new_v), "s", lower_is_better=False)))
         if "curve" in f:
-            rows.append(("Ventola %d curva" % n, diff_label(curve_text(cur["curva"]) if cur.get("curva") else None, curve_text(f["curve"]))))
+            rm = cur.get("rpm_max")
+            rows.append(("Ventola %d curva" % n, diff_label(curve_text(cur["curva"], rm) if cur.get("curva") else None, curve_text(f["curve"], rm))))
         if "pump" in f:   # stato attuale e nuovo come testo: "auto" | "tetto 70 %" | "fissa 65 %"
             rows.append(("Pompa %d" % n, diff_label(pump_text(cur) if cur else None, pump_text(f["pump"]))))
     grid = Gtk.Grid(column_spacing=18, row_spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
