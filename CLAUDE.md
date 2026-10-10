@@ -32,7 +32,8 @@ stime di durata, tensione misurata per core e mV per passo; interruzione immedia
 in ryzenctl è una macchina a passi (`start/step/status/abort/estimate`, stato in
 `/var/lib/ryzenctl/autotune.json`, ripresa dopo crash, parallelo di default). Eco verificata su
 hardware (CO −20 su 8 core, ≈ 3,4 mV/passo, FMax invariata); Auto (ginocchio PPT/FMax con RAPL)
-in verifica. Poi: fase 5 icona nel vassoio (StatusNotifierItem + dbusmenu via Gio,
+in verifica; Boost calibrata, pompa con tetto o velocità fissa, scelta a fine calibrazione (Annulla / Salva /
+Salva e applica), `trust`, avvio al login, notifica cliccabile. Tag `v0.4.0` (VERSION 0.4.0). Poi: fase 5 icona nel vassoio (StatusNotifierItem + dbusmenu via Gio,
 `ryzen-control --tray`, comandi rapidi), fase 6 deb/PKGBUILD.
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
