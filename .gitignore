@@ -4,6 +4,7 @@
 *~
 *.swp
 .claude/settings.local.json
+.claude/worktrees/
 .mcp.json
 
 # Python
@@ -21,7 +22,7 @@ Module.symvers
 modules.order
 .tmp_versions/
 
-# Pacchetti
+# Packages
 build/
 dist/
 *.tar.gz

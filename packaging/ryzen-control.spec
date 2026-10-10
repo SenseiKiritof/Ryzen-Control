@@ -1,11 +1,11 @@
 Name:           ryzen-control
-# Versione del modulo DKMS: cambia solo con il sorgente in ryzen_smu/ (= DRV_VERSION nel Makefile);
-# così una release dell'app non ricompila il modulo.
+# DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
+# this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.4.2
+Version:        0.4.3
 Release:        1%{?dist}
-Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
-# App GPL-3.0-or-later; driver ryzen_smu incluso (ryzen_smu/) GPL-2.0-only.
+Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
+# App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
@@ -26,40 +26,43 @@ Requires(post): dkms
 Requires(preun): dkms
 Recommends:     stress-ng
 Recommends:     libnotify
-# Fino alla 0.1.0-4 il driver era un sottopacchetto separato.
+# Up to 0.1.0-4 the driver was a separate subpackage.
 Obsoletes:      ryzen-smu-dkms < 0.1.0-5
 Provides:       ryzen-smu-dkms = %{version}-%{release}
 %{?systemd_requires}
 
 %description
-Controllo stile Ryzen Master per AMD Ryzen 9000 (Granite Ridge) su Linux:
-Curve Optimizer e Curve Shaper per core, limiti PPT/TDC/EDC, frequenza di
-boost e temperatura massima, profilo energetico e ventole della scheda madre.
-Profili applicati all'avvio con protezione dopo un crash: il profilo non
-viene riapplicato finché non lo decide l'utente.
+Ryzen Master-style control for AMD Ryzen 9000 (Granite Ridge) on Linux:
+per-core Curve Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost
+frequency and maximum temperature, power profile and motherboard fans.
+Profiles applied at boot with protection after a crash: the profile is
+not reapplied until the user decides.
 
-Un solo pacchetto: la GUI ryzen-control, l'helper privilegiato ryzenctl (CLI), i servizi systemd e
-il sorgente del modulo kernel ryzen_smu (amkillam/ryzen_smu, con dimensioni
-PM table aggiuntive per Granite Ridge), compilato da DKMS per ogni kernel
-installato. Con Secure Boot attivo il modulo viene firmato con la chiave
-akmods se e' gia' registrata in MOK, altrimenti con la chiave DKMS, da
-registrare una volta: mokutil --import /var/lib/dkms/mok.pub
+A single package: the ryzen-control GUI, the privileged helper ryzenctl (CLI), the systemd
+services and the source of the ryzen_smu kernel module (amkillam/ryzen_smu, with
+additional PM table sizes for Granite Ridge), built by DKMS for every installed
+kernel. With Secure Boot enabled the module is signed with the akmods key
+if it is already enrolled in MOK, otherwise with the DKMS key, to be
+enrolled once: mokutil --import /var/lib/dkms/mok.pub
 
 %prep
 %autosetup
 
 %build
-# Nessuna compilazione: script Python; il driver lo compila DKMS sul sistema.
+# Nothing to build: Python scripts; the driver is built by DKMS on the system.
 
 %install
 make install DESTDIR=%{buildroot} PREFIX=%{_prefix}
-# Creato dal %%post solo quando la chiave akmods e' registrata; qui solo per tracciarlo (%%ghost).
+# Translation catalogs (po/<domain>/<lang>.po, compiled by po/msgfmt.py during make install).
+%find_lang ryzenctl
+%find_lang ryzen-control
+# Created by the %%post only when the akmods key is enrolled; here only to track it (%%ghost).
 install -dm755 %{buildroot}%{_sysconfdir}/dkms/framework.conf.d
 touch %{buildroot}%{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %post
-# 1. Driver. Secure Boot senza passi manuali: se la chiave akmods (NVIDIA ecc.) esiste ed e'
-#    gia' registrata in MOK, DKMS firma con quella. Il drop-in vale per ogni modulo DKMS.
+# 1. Driver. Secure Boot without manual steps: if the akmods key (NVIDIA etc.) exists and is
+#    already enrolled in MOK, DKMS signs with it. The drop-in applies to every DKMS module.
 AKMODS_KEY=/etc/pki/akmods/private/private_key.priv
 AKMODS_CERT=/etc/pki/akmods/certs/public_key.der
 DROPIN=%{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
@@ -67,25 +70,25 @@ FORCE=""
 if [ ! -s "$DROPIN" ] && [ -f "$AKMODS_KEY" ] && [ -f "$AKMODS_CERT" ] \
    && mokutil --test-key "$AKMODS_CERT" 2>/dev/null | grep -q 'already enrolled'; then
     printf 'mok_signing_key=%%s\nmok_certificate=%%s\n' "$AKMODS_KEY" "$AKMODS_CERT" > "$DROPIN"
-    FORCE="--force"   # nuova chiave: il modulo va rifirmato
+    FORCE="--force"   # new key: the module must be re-signed
 fi
-# `dkms add --rpm_safe_upgrade` SEMPRE: crea il lock che annulla il `dkms remove` del %%preun
-# del pacchetto vecchio nella stessa transazione (senza, l'aggiornamento cancella il modulo).
+# `dkms add --rpm_safe_upgrade` ALWAYS: it creates the lock that cancels the `dkms remove` of the
+# old package's %%preun in the same transaction (without it, the upgrade deletes the module).
 dkms add -m ryzen_smu -v %{drv_version} -q --rpm_safe_upgrade || :
-# Ricompila solo se serve: un rebuild + dracut di tutte le initramfs costa circa un minuto.
-# Quando cambia il sorgente del driver va bumpata %%drv_version (nuova directory /usr/src).
+# Rebuild only if needed: a rebuild + dracut of all the initramfs costs about a minute.
+# When the driver source changes, %%drv_version must be bumped (new /usr/src directory).
 if [ -n "$FORCE" ] || ! dkms status -m ryzen_smu -v %{drv_version} -k "$(uname -r)" 2>/dev/null | grep -q ': installed'; then
     dkms build -m ryzen_smu -v %{drv_version} -q $FORCE || :
     dkms install -m ryzen_smu -v %{drv_version} -q $FORCE || :
 fi
 if [ ! -s "$DROPIN" ] && grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/security/lockdown 2>/dev/null \
    && ! mokutil --test-key /var/lib/dkms/mok.pub 2>/dev/null | grep -q 'already enrolled'; then
-    echo "ryzen-control: Secure Boot attivo e chiave DKMS non registrata. Una volta sola:"
-    echo "  sudo mokutil --import /var/lib/dkms/mok.pub   (poi riavvio, MOK Manager -> Enroll MOK)"
-    echo "Fino ad allora il modulo ryzen_smu non puo' essere caricato."
+    echo "ryzen-control: Secure Boot enabled and DKMS key not enrolled. Once only:"
+    echo "  sudo mokutil --import /var/lib/dkms/mok.pub   (then reboot, MOK Manager -> Enroll MOK)"
+    echo "Until then the ryzen_smu module cannot be loaded."
 fi
-# 2. Servizi: preset li abilita; avvio subito (carica il modulo, cattura la baseline, nessun
-#    profilo applicato).
+# 2. Services: the preset enables them; start now (loads the module, captures the baseline, no
+#    profile applied).
 %systemd_post ryzenctl.service ryzenctl-resume.service
 if [ -d /run/systemd/system ]; then
     systemctl start ryzenctl.service >/dev/null 2>&1 || :
@@ -98,7 +101,7 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %postun
 %systemd_postun ryzenctl.service ryzenctl-resume.service
 
-%files
+%files -f ryzenctl.lang -f ryzen-control.lang
 %license LICENSE ryzen_smu/LICENSE
 %doc README.md ryzen_smu/UPSTREAM.md
 %{_bindir}/ryzenctl
@@ -119,133 +122,147 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-1
+- Source, documentation and UI in English; UI and ryzenctl messages follow the system language
+  (gettext, Italian catalog); CLI `unlock` crash fixed
+
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.2-4
+- Calibration: fan level (BIOS / moderate / quiet) chosen in automatic mode too; Auto touches
+  the fans with 5 s/3 s steps and a curve from the target
+
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.2-3
+- Modes: "Startup and limits" below the presets, fan curves on two rows
+
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.2-2
+- Preset and Calibrated columns always side by side
+
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.2-1
-- Modalità su due colonne, valori dei profili affiancati, versione DKMS separata (aggiornamenti
-  rapidi), GitHub Actions per le release
+- Modes on two columns, profile values side by side, separate DKMS version (fast
+  updates), GitHub Actions for the releases
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.1-3
-- Versione del modulo DKMS separata da quella dell'app: le release non ricompilano più il modulo
+- DKMS module version separated from the app's: releases no longer rebuild the module
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.1-2
-- Modalità su due colonne (Preset / Calibrate), valori corti dei profili affiancati
+- Modes on two columns (Preset / Calibrated), short profile values side by side
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.1-1
-- Correzioni dopo i blocchi in calibrazione: attribuzione al boot, metodo pesante nella ricerca,
-  margine +3 dopo un crash e spiegazione nella GUI; default riparato; profili in secondi e giri
+- Fixes after the freezes during calibration: attribution at boot, heavy method in the search,
+  +3 margin after a crash and explanation in the GUI; default repaired; profiles in seconds and rpm
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.0-3
-- Dopo un blocco la GUI indica il CO del crash e il valore da cui riparte
+- After a freeze the GUI shows the CO of the crash and the value it restarts from
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.0-2
-- Margine +3 quando la ricerca CO si chiude con un blocco del sistema
+- +3 margin when the CO search ends with a system freeze
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.0-1
-- Fasi 3 (GUI) e 4 (calibrazioni) verificate su hardware: versione allineata al tag v0.4.0
-  (la nuova directory sorgente DKMS ricompila il modulo una volta)
+- Phases 3 (GUI) and 4 (calibrations) verified on hardware: version aligned with tag v0.4.0
+  (the new DKMS source directory rebuilds the module once)
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-31
-- Tabelle dei profili: step ventola in secondi, punti curva con giri stimati
+- Profile tables: fan steps in seconds, curve points with estimated rpm
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-30
-- Crash durante la calibrazione attribuito già al boot; metodo pesante nella ricerca CO (misure
-  precedenti non riusate); Default non fallisce più sugli step ventola a 0 del BIOS
+- Crash during calibration attributed already at boot; heavy method in the CO search (earlier
+  measurements not reused); Default no longer fails on the BIOS's 0 fan steps
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-29
-- Finestra di calibrazione: errore a ogni stato (tabella vuota, passi fermi) corretto
+- Calibration window: error on every state (empty table, steps stuck) fixed
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-28
-- Autorizzazione ricordata: ryzenctl trust e interruttore «Non chiedere più la password»
-  (regola polkit per l'utente, solo per questa applicazione)
+- Remembered authorisation: ryzenctl trust and the "Don't ask for the password again" switch
+  (polkit rule for the user, only for this application)
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-27
-- Calibrazione: blocco o benchmark morto con il CO finale applicato = combinazione instabile
-  (+3, finale ripetuta); passata finale con il metodo più pesante; combinazioni fallite ricordate;
-  notifica di crash che apre l'applicazione
+- Calibration: freeze or dead benchmark with the final CO applied = unstable combination
+  (+3, final pass repeated); final pass with the heaviest method; failed combinations remembered;
+  crash notification that opens the application
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-26
-- Fine calibrazione: Annulla / Salva / Salva e applica (autotune save [apply]); interruttore
-  per avviare la GUI al login
+- End of calibration: Cancel / Save / Save and apply (autotune save [apply]); switch to start
+  the GUI at login
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-25
-- Pompa: automatica (BIOS, consigliata), tetto massimo sulla curva del BIOS o velocità fissa,
-  da CLI e dalla pagina Ventole
+- Pump: automatic (BIOS, recommended), maximum cap on the BIOS curve or fixed speed, from the
+  CLI and from the Fans page
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-24
-- Renderer cairo (niente frammenti con NVIDIA), passate finali fallite spiegate, carico
-  più pesante per il ginocchio, test su entrambi i thread SMT, curva ventole in °C → %%
+- cairo renderer (no fragments with NVIDIA), failed final passes explained, heavier load for
+  the knee, test on both SMT threads, fan curve in °C → %%
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-23
-- Finestra di calibrazione ad altezze costanti e ridisegno completo: niente frammenti
+- Calibration window with constant heights and full redraw: no fragments
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-22
-- Interrompi immediato: il passo in corso termina i carichi e torna senza registrare nulla
+- Immediate Stop: the step in progress terminates the loads and returns without recording anything
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-21
-- Finestra di calibrazione: contenuto centrato e griglia che usa la larghezza disponibile
+- Calibration window: centred content and grid that uses the available width
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-20
-- Curve ventola rilette senza i punti di riempimento
+- Fan curves read back without the filler points
 
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-19
-- Finestra di calibrazione ridimensionabile, colonne a larghezza fissa (niente artefatti)
+- Resizable calibration window, fixed-width columns (no artifacts)
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-18
-- Calibrazione: CO di fabbrica, tensione misurata per core e per livello, mV per passo; tensione
-  live nel Monitor e nelle Curve
+- Calibration: factory CO, voltage measured per core and per level, mV per step; live voltage
+  in the Monitor and in the Curves
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-17
-- Calibrazione in parallelo (default) con stime di durata; raffiche miste per il p95 di Tctl con i
-  limiti eco già applicati; CO spiegato; righe Modalità compatte
+- Parallel calibration (default) with duration estimates; mixed bursts for the Tctl p95 with the
+  eco limits already applied; CO explained; compact Modes rows
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-16
-- GUI: valori dei profili colorati rispetto alla fabbrica, calibrazione automatica o con parametri
+- GUI: profile values coloured against the factory ones, automatic calibration or with parameters
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-15
-- Modalità Eco e Quiet separate; autotune Eco/Auto (CO per core, FMax dal target, ginocchio
-  PPT/FMax) pilotato dalla GUI con avanzamento e ripresa dopo crash
+- Separate Eco and Quiet modes; Eco/Auto autotune (per-core CO, FMax from the target, PPT/FMax
+  knee) driven by the GUI with progress and resume after crash
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-14
-- GUI: preset Quiet/Auto/Boost creabili al clic, slider+spin stile Ryzen Master, monitor denso
+- GUI: Quiet/Auto/Boost presets created on click, Ryzen Master-style slider+spin, dense monitor
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-13
-- Modalità mostrata dal profilo selezionato; `default` azzera il profilo
+- Mode shown from the selected profile; `default` clears the profile
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-12
-- GUI: dialogo con Riprova se l'autenticazione pkexec fallisce o viene annullata
+- GUI: dialog with Retry if the pkexec authentication fails or is cancelled
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-11
-- GUI GTK4/libadwaita ryzen-control (monitor, modalità, CPU, curve, ventole), voce nel menu
+- GTK4/libadwaita GUI ryzen-control (monitor, modes, CPU, curves, fans), menu entry
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-10
-- dkms add --rpm_safe_upgrade sempre nel %%post: altrimenti il %%preun del pacchetto
-  precedente rimuove il modulo durante l'aggiornamento
+- dkms add --rpm_safe_upgrade always in the %%post: otherwise the %%preun of the previous
+  package removes the module during the upgrade
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-9
-- Il %%post ricompila il modulo solo se manca per il kernel in uso o cambia la chiave di firma
+- The %%post rebuilds the module only if it is missing for the running kernel or the signing key changes
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-8
-- Curve ventole: pwm minimo 51 (20 %%) come le curve BIOS
+- Fan curves: minimum pwm 51 (20 %%) like the BIOS curves
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-7
-- Autodetect ventole con pwm di prova relativo al valore attuale; curve con ultimo punto fino a 125 °C
+- Fan autodetect with a test pwm relative to the current value; curves with the last point up to 125 °C
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-6
-- Ventole: fan status/enable/autodetect/step/curve/identify/role/name, righe fan nei profili
+- Fans: fan status/enable/autodetect/step/curve/identify/role/name, fan lines in profiles
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-5
-- Un solo pacchetto: il driver DKMS entra in ryzen-control (obsoleta ryzen-smu-dkms)
+- A single package: the DKMS driver goes into ryzen-control (obsoletes ryzen-smu-dkms)
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-4
-- La baseline di una versione precedente con righe shaper viene applicata ignorandole;
-  sonda shaper con 0x84 per tier
+- A baseline from a previous version with shaper lines is applied ignoring them;
+  shaper probe with 0x84 per tier
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-3
-- Readback dei limiti con attesa (la PM table si aggiorna col passo dell'SMU), Curve Shaper
-  sperimentale fuori da profili e hwtest, nessuna eccezione non gestita (ABRT)
+- Readback of the limits with a wait (the PM table updates at the SMU's pace), experimental
+  Curve Shaper out of profiles and hwtest, no unhandled exception (ABRT)
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-2
-- Firma automatica con la chiave akmods se registrata, rebuild forzato, avvio del servizio
-  all'installazione, comando hwtest
+- Automatic signing with the akmods key if enrolled, forced rebuild, service started at
+  installation, hwtest command
 
 * Fri Oct 09 2026 senseikiritof <tonifede98@gmail.com> - 0.1.0-1
-- Prima versione: ryzenctl, servizi systemd, driver ryzen_smu via DKMS
+- First version: ryzenctl, systemd services, ryzen_smu driver via DKMS

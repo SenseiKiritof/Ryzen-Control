@@ -1,581 +1,581 @@
-# Piano: "Ryzen Control" — controllo stile Ryzen Master su Linux (9800X3D)
+# Plan: "Ryzen Control" — Ryzen Master-style control on Linux (9800X3D)
 
-Copia nel progetto: `~/Documenti/Progetti/Personali/Ryzen Control/docs/plans/2026-10-09-ryzen-control.md`
-Revisione 2 (2026-10-09): installazione via pacchetti (RPM + base cross-distro), niente `install.sh`.
-Revisione 3 (2026-10-09): modalità Auto; repo git personale, sviluppo a passi con verifica e commit.
-Revisione 4 (2026-10-09): revisione di sicurezza (crash-guard riscritto, cosa non si tocca mai,
-protezione pompa); ventole prima della GUI.
-Revisione 5 (2026-10-09): zero passi manuali dove possibile — il `%post` del pacchetto -dkms
-riusa la chiave akmods se già registrata in MOK (drop-in dkms creato solo in quel caso,
-`%ghost`), rebuild forzato, `ryzen-control` avvia il servizio all'installazione; `ryzenctl
-hwtest` automatizza la verifica reversibile su hardware. Resta manuale solo ciò che Secure Boot
-impone (registrazione MOK al riavvio, se nessuna chiave è già registrata) e il test di crash.
-In fase 2 `ryzenctl fan enable` imposterà da sé il parametro kernel (grubby / /etc/default/grub)
-con conferma esplicita, reversibile con `fan disable`.
-Revisione 9 (2026-10-10): **Boost** diventa calibrata (CO spinto, limiti e FMax ai tetti, guadagno
-misurato), la statica di fabbrica + energia al massimo si chiama **Performance**; la ricerca del
-limite CO è unica e condivisa (−40, salvata in `co_limits.json`, riusata), ogni modalità applica il
-suo margine (Eco +5, Auto/Boost +3); interruzione immediata (`serve` con lettore separato, flag +
-stress-ng terminati); tensione per core campionata a ogni livello (mV per passo misurati).
-Revisione 10 (2026-10-10): fasi 5 e 6 invertite — l'icona nel vassoio (fase 5, tag v0.5.0) precede i pacchetti deb/Arch (fase 6, tag v0.6.0).
-Revisione 11 (2026-10-10): nuova fase 5 — supporto a tutti i processori Ryzen (tabella FAMILIES, gate per famiglia, core dinamici); vassoio → fase 6 (v0.6.0), deb/Arch → fase 7 (v0.7.0).
-Revisione 8 (2026-10-09): nuova modalità **Eco** (Quiet resta come preset) con undervolt discreto calibrato; calibrazioni come
-macchina a passi in ryzenctl (`autotune`), GUI pilota con avanzamento e ripresa dopo crash.
-Revisione 7 (2026-10-09): curva ventole per modalità (Eco dal target, Auto step moderato).
-Revisione 6 (2026-10-09): fase 1 verificata su hardware e taggata `v0.1.0`; un solo pacchetto
-di installazione (driver DKMS dentro `ryzen-control`); nuova fase 6: icona nel vassoio di
-sistema con comandi rapidi.
+Copy in the project: `~/Documenti/Progetti/Personali/Ryzen Control/docs/plans/2026-10-09-ryzen-control.md`
+Revision 2 (2026-10-09): installation via packages (RPM + cross-distro base), no `install.sh`.
+Revision 3 (2026-10-09): Auto mode; personal git repo, step-by-step development with verification and commit.
+Revision 4 (2026-10-09): safety review (crash-guard rewritten, what is never touched, pump
+protection); fans before the GUI.
+Revision 5 (2026-10-09): zero manual steps where possible — the `%post` of the -dkms package
+reuses the akmods key if already enrolled in MOK (dkms drop-in created only in that case,
+`%ghost`), forced rebuild, `ryzen-control` starts the service at installation; `ryzenctl
+hwtest` automates the reversible verification on hardware. Only what Secure Boot imposes stays
+manual (MOK enrollment at reboot, if no key is already enrolled) plus the crash test.
+In phase 2 `ryzenctl fan enable` will set the kernel parameter by itself (grubby / /etc/default/grub)
+with explicit confirmation, reversible with `fan disable`.
+Revision 9 (2026-10-10): **Boost** becomes calibrated (pushed CO, limits and FMax at the ceilings, measured
+gain), the static factory + power at maximum one is called **Performance**; the CO limit search
+is single and shared (−40, saved in `co_limits.json`, reused), each mode applies its own margin
+(Eco +5, Auto/Boost +3); immediate interruption (`serve` with a separate reader, flag +
+stress-ng terminated); per-core voltage sampled at every level (mV per step measured).
+Revision 10 (2026-10-10): phases 5 and 6 swapped — the tray icon (phase 5, tag v0.5.0) precedes the deb/Arch packages (phase 6, tag v0.6.0).
+Revision 11 (2026-10-10): new phase 5 — support for all Ryzen processors (FAMILIES table, per-family gate, dynamic cores); tray → phase 6 (v0.6.0), deb/Arch → phase 7 (v0.7.0).
+Revision 12 (2026-10-10): project documentation, source comments and UI strings switched to English; UI localized with gettext (Italian catalog).
+Revision 8 (2026-10-09): new **Eco** mode (Quiet stays as a preset) with a calibrated conservative undervolt; calibrations as a
+step machine in ryzenctl (`autotune`), the GUI drives it with progress and resume after crash.
+Revision 7 (2026-10-09): fan curve per mode (Eco from the target, Auto moderate step).
+Revision 6 (2026-10-09): phase 1 verified on hardware and tagged `v0.1.0`; a single installation
+package (DKMS driver inside `ryzen-control`); new phase 6: system tray icon with quick commands.
 
 ## Context
 
-Obiettivo utente: gestire da Linux Curve Optimizer, Curve Shaper, limiti PBO, FMax/Tjmax e
-ventole con una GUI completa, modalità Default/Eco/Auto/Boost, calibrazione automatica e
-auto-tuning CO. Bisogno principale: AIO più silenzioso (oggi Tctl sale di colpo e le ventole
-vanno al massimo). Requisiti espliciti:
-- dopo un crash il profilo NON si riapplica da solo: decide l'utente;
-- Default = ritorno ai valori di base letti dalla CPU (baseline);
-- limiti ≤ stock; oltre stock solo con sblocco esplicito e avvertenza;
-- GTK4/libadwaita, compatibile con altre distro;
-- modalità Auto = efficienza/prestazioni ottimizzate automaticamente; Boost = sola potenza
-  bruta; Eco = silenzio; Default = valori di fabbrica;
-- installazione con pacchetto classico (RPM) e strada praticabile per ogni distro;
-- niente che possa danneggiare l'hardware; ventole prima della GUI.
+User goal: manage from Linux Curve Optimizer, Curve Shaper, PBO limits, FMax/Tjmax and fans
+with a complete GUI, Default/Eco/Auto/Boost modes, automatic calibration and CO auto-tuning.
+Main need: a quieter AIO (today Tctl jumps up suddenly and the fans go to maximum). Explicit
+requirements:
+- after a crash the profile does NOT reapply by itself: the user decides;
+- Default = return to the base values read from the CPU (baseline);
+- limits ≤ stock; beyond stock only with explicit unlock and warning;
+- GTK4/libadwaita, compatible with other distros;
+- Auto mode = efficiency/performance optimised automatically; Boost = raw power only;
+  Eco = silence; Default = factory values;
+- installation with a classic package (RPM) and a viable path for every distro;
+- nothing that can damage the hardware; fans before the GUI.
 
-Sistema rilevato:
-- Ryzen 7 9800X3D (Granite Ridge, fam 0x1A mod 0x44), 1 CCD, 8 core; `cpuN`/`cpuN+8` = core
-  fisico N; core migliori (prefcore 196) 1 e 2, peggiore 7.
+Detected system:
+- Ryzen 7 9800X3D (Granite Ridge, fam 0x1A mod 0x44), 1 CCD, 8 cores; `cpuN`/`cpuN+8` = physical
+  core N; best cores (prefcore 196) 1 and 2, worst 7.
 - ASUS ROG STRIX X870E-H GAMING WIFI7 **HATSUNE MIKU EDITION**, BIOS 0405, root complex `1022:14d8`.
-- Fedora 44, kernel 7.2.8, **Secure Boot attivo**; chiave MOK akmods già registrata (NVIDIA).
-  `dkms` 3.4.3 installato, `dkms.service` abilitato; `rpm-build` + `rpmdevtools` presenti.
-- Root filesystem btrfs (commit ogni 30 s: i marker del crash-guard vanno `fsync`-ati).
-- Sleep `deep` (S3). Profilo energetico attivo `performance`.
-- Ventole: nessun hwmon fan/pwm. `nct6775` non elenca la scheda e il nome DMI con suffisso
-  "HATSUNE MIKU EDITION" fa fallire anche `asus-ec-sensors`. Nessun AIO USB → pompa/ventole
-  sugli header della scheda (Super I/O Nuvoton, curve SmartFan IV programmate dal BIOS).
-- RAPL disponibile: `/sys/class/powercap/intel-rapl:0` (`package-0`, `core`), lettura solo root.
-- Installati: Python 3.14, PyGObject 3.56, GTK 4.22, libadwaita 1.9. Non installati: stress-ng.
+- Fedora 44, kernel 7.2.8, **Secure Boot enabled**; akmods MOK key already enrolled (NVIDIA).
+  `dkms` 3.4.3 installed, `dkms.service` enabled; `rpm-build` + `rpmdevtools` present.
+- Root filesystem btrfs (commit every 30 s: the crash-guard markers must be `fsync`-ed).
+- Sleep `deep` (S3). Active power profile `performance`.
+- Fans: no hwmon fan/pwm. `nct6775` does not list the board and the DMI name with the
+  "HATSUNE MIKU EDITION" suffix makes `asus-ec-sensors` fail too. No USB AIO → pump/fans on the
+  board headers (Nuvoton Super I/O, SmartFan IV curves programmed by the BIOS).
+- RAPL available: `/sys/class/powercap/intel-rapl:0` (`package-0`, `core`), root-only read.
+- Installed: Python 3.14, PyGObject 3.56, GTK 4.22, libadwaita 1.9. Not installed: stress-ng.
 
-Ricerca fatta (sorgenti in scratchpad): driver `ryzen_smu` (amkillam, supporta Granite Ridge,
-fix kernel 7.2+ in d298366); ZenStates-Core `Zen4Settings.cs`/`Zen5Settings.cs` (ID comandi SMU
-di riferimento); gnr-smu (mappa PM table 0x620105 misurata su 9800X3D, ID MP1 pericolosi);
-RyzenSMUDebug-LINUX (FMax 0x6E/0x70 testato su Granite Ridge). Nessun tool esistente copre
-persistenza + crash-guard + limiti + Curve Shaper + ventole: si scrive un'app piccola, si
-riusano solo i dati misurati.
+Research done (sources in the scratchpad): `ryzen_smu` driver (amkillam, supports Granite Ridge,
+kernel 7.2+ fix in d298366); ZenStates-Core `Zen4Settings.cs`/`Zen5Settings.cs` (reference SMU
+command IDs); gnr-smu (PM table 0x620105 map measured on a 9800X3D, dangerous MP1 IDs);
+RyzenSMUDebug-LINUX (FMax 0x6E/0x70 tested on Granite Ridge). No existing tool covers
+persistence + crash-guard + limits + Curve Shaper + fans: a small app is written, only the
+measured data is reused.
 
-## Verifica di sicurezza (rev. 4)
+## Safety review (rev. 4)
 
-Domanda: può danneggiare l'hardware? No, per costruzione:
-- I danni reali su AM5 vengono da tensioni fisse (SoC/VDDIO/VDDG, VID manuale in OC mode).
-  Questo programma **non invia nessun comando di tensione** e non entra mai in OC mode: RSMU
-  0x5D `EnableOcMode`, 0x61 `SetOverclockCpuVid`, 0x5B `SetPBOScalar`, le CLDO/SoC e il file
-  `smn` restano fuori dall'allowlist. Non tocca FCLK/UCLK/memoria.
-- Tutto ciò che scrive è un *limite* che il firmware continua a far rispettare: PPT/TDC/EDC e
-  Tjmax solo ≤ baseline (sopra stock solo con sblocco esplicito, tetti 230 W/160 A/230 A e
-  Tjmax comunque ≤ baseline → la protezione termica resta sempre attiva), FMax ≤ baseline
-  (+200 MHz con sblocco, come "Boost Override" del BIOS), CO/Shaper −50..+30 (CO negativo =
-  undervolt: può solo causare instabilità; positivo resta entro i limiti di tensione del
-  firmware).
-- Errori possibili: crash/riavvio per CO troppo negativo (gestito dal crash-guard), SMU che
-  rifiuta (0xFD/0xFE, nessun effetto), congelamento SMU per ID sbagliato (escluso
-  dall'allowlist; richiederebbe solo un riavvio).
+Question: can it damage the hardware? No, by construction:
+- Real damage on AM5 comes from fixed voltages (SoC/VDDIO/VDDG, manual VID in OC mode).
+  This program **sends no voltage command** and never enters OC mode: RSMU 0x5D `EnableOcMode`,
+  0x61 `SetOverclockCpuVid`, 0x5B `SetPBOScalar`, the CLDO/SoC ones and the `smn` file stay out
+  of the allowlist. It does not touch FCLK/UCLK/memory.
+- Everything it writes is a *limit* that the firmware keeps enforcing: PPT/TDC/EDC and Tjmax
+  only ≤ baseline (above stock only with explicit unlock, ceilings 230 W/160 A/230 A and Tjmax
+  ≤ baseline anyway → the thermal protection always stays active), FMax ≤ baseline (+200 MHz
+  with unlock, like the BIOS "Boost Override"), CO/Shaper −50..+30 (negative CO = undervolt:
+  can only cause instability; positive stays within the firmware's voltage limits).
+- Possible errors: crash/reboot for a CO that is too negative (handled by the crash-guard), SMU
+  refusing (0xFD/0xFE, no effect), SMU freeze for a wrong ID (excluded by the allowlist; it
+  would only require a reboot).
 
-Problemi trovati nella rev. 3 e corretti qui:
-1. **Boot loop possibile**: `dirty` veniva creato *dopo* l'apply; un crash durante l'apply al
-   boot non lasciava traccia → riapplicato a ogni boot. Ora i marker precedono ogni scrittura
-   e sono `fsync`-ati (btrfs).
-2. **Via di fuga incompleta**: il driver si autocarica via PCI ID anche con `ryzenctl.off`.
-   Ora il pacchetto blacklista l'autoload e il modulo lo carica solo il servizio.
-3. **Baseline corrotta** da `systemctl restart` a profilo attivo. Ora cattura una sola volta
-   per boot e mai se `active` esiste.
-4. **Pompa dell'AIO**: un canale pompa rallentato è l'unico vero rischio lato ventole. Linux
-   vede solo `pwm1..N` senza nome e gli RPM da soli non distinguono (pompe 2000–3500, ventole
-   500–3000). Ora il ruolo lo assegna un test fisico automatico (`fan autodetect`, vedi
-   "Ventole"), l'utente può solo declassare un canale, mai promuoverlo a "ventola"; tutto ciò
-   che non è "ventola" è in sola lettura.
-5. **Readback fallito**: ora un tentativo di ripetizione, poi ripristino del valore baseline
-   di quel parametro, poi errore (protegge da gare con altri tool SMU).
-6. **PM table assente** (AGESA nuovo): baseline dei limiti impossibile → PPT/TDC/EDC/Tjmax
-   rifiutati (fail closed), CO/FMax/Shaper ok (readback via RSMU).
-7. Scritture di file di stato atomiche (`tmp` + `os.replace` + fsync): un crash non lascia
-   JSON/profili corrotti; un profilo illeggibile non viene applicato.
-8. Auto-tuning: aggiunta fase a carico basso (le instabilità CO si vedono soprattutto in
-   idle), passata finale combinata, stress-ng eseguito come utente, avviso "salva tutto".
+Problems found in rev. 3 and fixed here:
+1. **Possible boot loop**: `dirty` was created *after* the apply; a crash during the apply at
+   boot left no trace → reapplied at every boot. Now the markers precede every write and are
+   `fsync`-ed (btrfs).
+2. **Incomplete escape hatch**: the driver autoloads via PCI ID even with `ryzenctl.off`.
+   Now the package blacklists the autoload and only the service loads the module.
+3. **Corrupted baseline** by `systemctl restart` with an active profile. Now captured only once
+   per boot and never if `active` exists.
+4. **AIO pump**: a slowed-down pump channel is the only real risk on the fan side. Linux only
+   sees `pwm1..N` without names and RPM alone does not tell them apart (pumps 2000–3500, fans
+   500–3000). Now the role is assigned by an automatic physical test (`fan autodetect`, see
+   "Fans"), the user can only demote a channel, never promote it to "ventola" (fan); everything
+   that is not "ventola" is read-only.
+5. **Failed readback**: now one retry, then restore of the baseline value of that parameter,
+   then error (protects against races with other SMU tools).
+6. **PM table absent** (new AGESA): baseline of the limits impossible → PPT/TDC/EDC/Tjmax
+   refused (fail closed), CO/FMax/Shaper ok (readback via RSMU).
+7. Atomic state-file writes (`tmp` + `os.replace` + fsync): a crash leaves no corrupted
+   JSON/profiles; an unreadable profile is not applied.
+8. Auto-tuning: added a low-load phase (CO instabilities show up mostly at idle), combined
+   final pass, stress-ng run as the user, "save everything" warning.
 
-## Architettura (3 file di codice + driver vendorizzato + pacchetti)
+## Architecture (3 code files + vendored driver + packages)
 
 ```
-ryzen-control (GUI GTK4/Adw, utente) ──pkexec──▶ ryzenctl serve (root, valida TUTTO)
-                                                   ├─ /sys/kernel/ryzen_smu_drv/*  (SMU)
-CLI: sudo ryzenctl …  ─────────────────────────────┤─ /sys/class/hwmon/nct67xx/*   (ventole)
-systemd: ryzenctl.service (boot/stop), -resume ────┘─ /etc/ryzenctl, /var/lib/ryzenctl
+ryzen-control (GTK4/Adw GUI, user) ──pkexec──▶ ryzenctl serve (root, validates EVERYTHING)
+                                                 ├─ /sys/kernel/ryzen_smu_drv/*  (SMU)
+CLI: sudo ryzenctl …  ───────────────────────────┤─ /sys/class/hwmon/nct67xx/*   (fans)
+systemd: ryzenctl.service (boot/stop), -resume ──┘─ /etc/ryzenctl, /var/lib/ryzenctl
 ```
 
-- `ryzenctl` (Python stdlib, ~400 righe): unico punto privilegiato = confine di fiducia.
-  Stessa grammatica comandi per CLI, file profilo e protocollo `serve` (una riga JSON-array per
-  richiesta → una riga JSON di risposta, su pipe: solo il processo padre può parlargli).
-- `ryzen-control` (Python + PyGObject GTK4/libadwaita ≥1.5, ~700 righe): gira come utente,
-  avvia una sola volta `pkexec ryzenctl serve` (un prompt password per sessione). Legge
-  direttamente (sola lettura) `crashed`, `settings.json`, profili, baseline; usa `serve` per
-  scritture e letture SMU/RAPL. stress-ng lo lancia la GUI come utente; `serve` lo esegue
-  solo dentro `fan autodetect`, con argomenti fissi.
-- `ryzen_smu/`: driver upstream vendorizzato (`git subtree`, commit d298366) + una modifica
-  locale in `smu.c`: dimensioni PM table 0x621101/0x621102 (0x724) e 0x621201/0x621202 (0x994)
-  da ZenStates-Core `PowerTable.cs`, per AGESA più recenti.
-- Nessun test framework: `ryzenctl selftest` con backend SMU finto (monkeypatch di 2 funzioni,
-  path radice da env `RYZENCTL_ROOT`) copre codifiche, validazione, profili, baseline,
-  crash-guard. `--mock` nella GUI usa lo stesso backend.
+- `ryzenctl` (Python stdlib, ~400 lines): the only privileged point = trust boundary.
+  Same command grammar for CLI, profile files and the `serve` protocol (one JSON-array line per
+  request → one JSON line as reply, over a pipe: only the parent process can talk to it).
+- `ryzen-control` (Python + PyGObject GTK4/libadwaita ≥1.5, ~700 lines): runs as the user,
+  starts `pkexec ryzenctl serve` only once (one password prompt per session). Reads directly
+  (read-only) `crashed`, `settings.json`, profiles, baseline; uses `serve` for writes and
+  SMU/RAPL reads. stress-ng is launched by the GUI as the user; `serve` runs it only inside
+  `fan autodetect`, with fixed arguments.
+- `ryzen_smu/`: vendored upstream driver (`git subtree`, commit d298366) + one local change in
+  `smu.c`: PM table sizes 0x621101/0x621102 (0x724) and 0x621201/0x621202 (0x994) from
+  ZenStates-Core `PowerTable.cs`, for more recent AGESA.
+- No test framework: `ryzenctl selftest` with a fake SMU backend (monkeypatch of 2 functions,
+  root path from the env `RYZENCTL_ROOT`) covers encodings, validation, profiles, baseline,
+  crash-guard. `--mock` in the GUI uses the same backend.
 
-### Pacchettizzazione
+### Packaging
 
-`Makefile` = unica fonte del layout (`install`/`uninstall`/`dkms`, rispetta `DESTDIR`/`PREFIX`;
-variabile `APPID=org.ryzencontrol.RyzenControl`). Ogni formato di pacchetto è un involucro
-sottile che chiama `make install DESTDIR=…`.
+`Makefile` = the only source of the layout (`install`/`uninstall`/`dkms`, honours `DESTDIR`/`PREFIX`;
+variable `APPID=org.ryzencontrol.RyzenControl`). Every package format is a thin wrapper that
+calls `make install DESTDIR=…`.
 
-Layout installato:
+Installed layout:
 ```
 /usr/bin/ryzenctl, /usr/bin/ryzen-control
 /usr/lib/systemd/system/ryzenctl.service, ryzenctl-resume.service
-/usr/lib/modprobe.d/ryzen-control.conf              (blacklist ryzen_smu: niente autoload, lo carica il servizio)
+/usr/lib/modprobe.d/ryzen-control.conf              (blacklist ryzen_smu: no autoload, the service loads it)
 /usr/share/polkit-1/actions/<APPID>.policy          (auth_admin_keep, exec.path=/usr/bin/ryzenctl)
 /usr/share/applications/<APPID>.desktop
 /usr/share/icons/hicolor/scalable/apps/<APPID>.svg
-/usr/share/metainfo/<APPID>.metainfo.xml            (AppStream: visibile in Discover/GNOME Software)
-/etc/xdg/autostart/ryzenctl-notify.desktop          (notifica crash al login)
+/usr/share/metainfo/<APPID>.metainfo.xml            (AppStream: visible in Discover/GNOME Software)
+/etc/xdg/autostart/ryzenctl-notify.desktop          (crash notification at login)
 /etc/ryzenctl/                                      (config, %config(noreplace))
-/var/lib/ryzenctl/                                  (stato: baseline, dirty, active, crashed)
-/usr/src/ryzen_smu-<ver>/                           (sorgente driver + dkms.conf, pacchetto -dkms)
+/var/lib/ryzenctl/                                  (state: baseline, dirty, active, crashed)
+/usr/src/ryzen_smu-<ver>/                           (driver source + dkms.conf, -dkms package)
 ```
 
 1. **RPM — `packaging/ryzen-control.spec`** (Fedora/RHEL/openSUSE), `BuildArch: noarch`,
-   un tarball dal repo, **un solo pacchetto** `ryzen-control` (rev. 6, richiesta utente;
-   `License: GPL-3.0-or-later AND GPL-2.0-only` per il driver incluso; `Obsoletes/Provides:
-   ryzen-smu-dkms` per chi ha installato la 0.1.0-1…4):
+   one tarball from the repo, **a single package** `ryzen-control` (rev. 6, user request;
+   `License: GPL-3.0-or-later AND GPL-2.0-only` for the included driver; `Obsoletes/Provides:
+   ryzen-smu-dkms` for those who installed 0.1.0-1…4):
    - app: `Requires: python3 ≥ 3.9, python3-gobject, gtk4, libadwaita ≥ 1.5, polkit, systemd`;
-     `Recommends: stress-ng, libnotify`. Preset systemd abilita i servizi (non applicano nulla
-     senza autostart); `%post` avvia il servizio.
-   - driver: copia `ryzen_smu/*.c *.h Makefile dkms.conf` in `%{_usrsrc}/ryzen_smu-%{version}`
-     sostituendo `@VERSION@`/`@CFLGS@`; `Requires: dkms, kernel-devel, gcc, make`; `%post`:
-     drop-in chiave akmods se registrata, `dkms add/build/install --force --rpm_safe_upgrade`
-     (non fatale), avviso Secure Boot solo se nessuna chiave registrata; `%preun`: `dkms
+     `Recommends: stress-ng, libnotify`. The systemd preset enables the services (they apply
+     nothing without autostart); `%post` starts the service.
+   - driver: copies `ryzen_smu/*.c *.h Makefile dkms.conf` into `%{_usrsrc}/ryzen_smu-%{version}`
+     replacing `@VERSION@`/`@CFLGS@`; `Requires: dkms, kernel-devel, gcc, make`; `%post`:
+     akmods key drop-in if enrolled, `dkms add/build/install --force --rpm_safe_upgrade`
+     (non-fatal), Secure Boot warning only if no key is enrolled; `%preun`: `dkms
      remove --all`.
-   - Build: `make rpm` locale oppure COPR (spec COPR-ready: noarch, nessuna rete al build
-     grazie al driver vendorizzato).
-2. **Debian/Ubuntu — `packaging/debian/`**: `control` (1 binario), `rules` (`dh $@ --with
+   - Build: `make rpm` locally or COPR (COPR-ready spec: noarch, no network at build time
+     thanks to the vendored driver).
+2. **Debian/Ubuntu — `packaging/debian/`**: `control` (1 binary), `rules` (`dh $@ --with
    dkms`), `ryzen-control.dkms`, `install`, `changelog`, `copyright`.
-3. **Arch — `packaging/PKGBUILD`**: un solo `package()`, dkms via hook di pacman.
-4. **Qualsiasi altra distro**: `sudo make install && sudo make dkms` (ultima spiaggia
-   documentata nel README).
+3. **Arch — `packaging/PKGBUILD`**: a single `package()`, dkms via pacman hook.
+4. **Any other distro**: `sudo make install && sudo make dkms` (last resort documented in the
+   README).
 
-deb e PKGBUILD non sono testabili su questa macchina: involucri minimi marcati "non testati".
+deb and PKGBUILD cannot be tested on this machine: minimal wrappers marked "untested".
 
-Secure Boot con DKMS 3.4.3: firma di default con `/var/lib/dkms/mok.key`/`mok.pub` (creati se
-mancanti). Una sola registrazione: `mokutil --import /var/lib/dkms/mok.pub` + riavvio.
-Alternativa su questa macchina (zero nuove MOK): drop-in `/etc/dkms/framework.conf.d/akmods.conf`
-che punta alla chiave akmods — documentata, non imposta dal pacchetto.
+Secure Boot with DKMS 3.4.3: signs by default with `/var/lib/dkms/mok.key`/`mok.pub` (created if
+missing). A single enrollment: `mokutil --import /var/lib/dkms/mok.pub` + reboot.
+Alternative on this machine (zero new MOKs): drop-in `/etc/dkms/framework.conf.d/akmods.conf`
+pointing to the akmods key — documented, not set by the package.
 
-### Comandi SMU (allowlist rigida, nient'altro può essere inviato)
+### SMU commands (strict allowlist, nothing else can be sent)
 
-| Funzione | Mailbox | ID | Argomento | Verifica (readback) |
+| Function | Mailbox | ID | Argument | Verification (readback) |
 |---|---|---|---|---|
-| CO per core | MP1 | 0x35 | `core<<20 \| (m & 0xFFFF)` | RSMU 0xD5 arg0=`core<<20`, low16 signed |
+| Per-core CO | MP1 | 0x35 | `core<<20 \| (m & 0xFFFF)` | RSMU 0xD5 arg0=`core<<20`, low16 signed |
 | PPT / TDC / EDC | MP1 | 0x3E / 0x3C / 0x3D | W·1000 / A·1000 | PM d[2] / d[8] / d[63] |
 | FMax | RSMU | 0x70 set, 0x6E get | MHz | 0x6E |
 | Tjmax | RSMU | 0x59 | °C | PM d[10] |
-| Curve Shaper | RSMU | 0xA6 set, 0x84 get | `hi<<24\|med<<16\|lo<<8\|0x80\|tier` | 0x84 (5 arg = 5 tier) |
-| PM table | (driver) | — | file `pm_table` | — |
+| Curve Shaper | RSMU | 0xA6 set, 0x84 get | `hi<<24\|med<<16\|lo<<8\|0x80\|tier` | 0x84 (5 args = 5 tiers) |
+| PM table | (driver) | — | `pm_table` file | — |
 
-Fonti: CO 0x35 validato con readback su 9950X3D (stessa famiglia); PPT/TDC/EDC validati con
-readback proprio su 9800X3D; FMax/Tjmax/Shaper da ZenStates-Core (Shaper mai provato su Linux:
-solo il readback 0x84 lo conferma). MP1 0x58–0x6F congela l'SMU sul 9800X3D e MP1 0x10 spegne
-il display: non sono mai inviati. RSMU 0x59/0x6E sono comandi di produzione ZenStates su
-Zen 4/5 (il range "proibito" riguarda solo MP1).
+Sources: CO 0x35 validated with readback on a 9950X3D (same family); PPT/TDC/EDC validated with
+readback on the 9800X3D itself; FMax/Tjmax/Shaper from ZenStates-Core (Shaper never tried on
+Linux: only the 0x84 readback confirms it). MP1 0x58–0x6F freezes the SMU on the 9800X3D and MP1
+0x10 turns off the display: they are never sent. RSMU 0x59/0x6E are ZenStates production
+commands on Zen 4/5 (the "forbidden" range concerns MP1 only).
 
-Regole di transazione:
-- Gate: `codename` = Granite Ridge, altrimenti rifiuto totale (fase 5: codename in `FAMILIES`,
-  ogni famiglia con la sua allowlist; fuori tabella rifiuto totale). Mai scritture su `smn`.
-- Ogni transazione sotto `flock(/run/ryzenctl.lock)`: `smu_args` del driver è globale.
-  Documentato: non usare altri tool SMU (gnr-smu, ryzen_monitor) in contemporanea.
-- Ogni scrittura → readback. Discrepanza → una ripetizione → se ancora diversa, riscrive il
-  valore baseline di quel parametro → errore. Risposta 0xFD (prerequisito) → suggerisce
-  PBO = Advanced nel BIOS.
-- Valori PM letti solo se `pm_table_version>>16 == 0x62` (`# ponytail:` euristica famiglia,
-  mappa completa solo 0x620105). PM table assente → PPT/TDC/EDC/Tjmax rifiutati (nessuna
-  baseline per loro), CO/FMax/Shaper ok.
-- Se CO via MP1 0x35 non torna al readback → si valuta RSMU 0x6 (ZenStates), niente fallback
-  automatico.
-- Apply di un profilo: si ferma al primo errore (le righe già applicate sono singolarmente
-  entro i limiti), riporta la riga fallita.
+Transaction rules:
+- Gate: `codename` = Granite Ridge, otherwise total refusal (phase 5: codename in `FAMILIES`,
+  each family with its own allowlist; outside the table total refusal). Never writes to `smn`.
+- Every transaction under `flock(/run/ryzenctl.lock)`: the driver's `smu_args` is global.
+  Documented: do not use other SMU tools (gnr-smu, ryzen_monitor) at the same time.
+- Every write → readback. Mismatch → one retry → if still different, rewrites the baseline
+  value of that parameter → error. Reply 0xFD (prerequisite) → suggests PBO = Advanced in the
+  BIOS.
+- PM values read only if `pm_table_version>>16 == 0x62` (`# ponytail:` family heuristic,
+  full map only for 0x620105). PM table absent → PPT/TDC/EDC/Tjmax refused (no baseline for
+  them), CO/FMax/Shaper ok.
+- If CO via MP1 0x35 does not come back at readback → RSMU 0x6 (ZenStates) is considered, no
+  automatic fallback.
+- Applying a profile: stops at the first error (the lines already applied are individually
+  within the limits), reports the failed line.
 
-### Validazione (costanti in testa = manopole di calibrazione)
+### Validation (constants at the top = calibration knobs)
 
-- CO e Shaper −50..+30. FMax 3000..baseline (+200 se sbloccato). Tjmax 60..baseline (max 95).
-- PPT ≥45 W, TDC ≥30 A, EDC ≥45 A (mai 0: PPT 0 blocca a 606 MHz). Tetto = baseline (stock);
-  con sblocco 230 W / 160 A / 230 A. Scrivere esattamente il valore di baseline è sempre ammesso.
-- Senza baseline fresca di questo boot: nessuna scrittura CPU (fail closed).
-- Sblocco: `ryzenctl unlock on` stampa avvertenza; in GUI switch + `Adw.AlertDialog`.
-- Ventole: canale modificabile solo se `fan autodetect` lo ha classificato "ventola" in
-  `settings.json` ("pompa", "non controllabile", "sconosciuto" → rifiuto; a mano si può solo
-  declassare); step up/down 0..60000 ms; curva con temp crescenti, pwm non decrescenti, pwm
-  minimo ≥ 77 (30 %), ultimo punto pwm 255 a ≤90 °C; `pwmN_enable` mai cambiato, tranne nei
-  due test (`autodetect`, `identify`) che lo ripristinano in `finally`.
-- Nomi profilo solo `[a-z0-9_-]`. File di stato scritti in modo atomico.
+- CO and Shaper −50..+30. FMax 3000..baseline (+200 if unlocked). Tjmax 60..baseline (max 95).
+- PPT ≥45 W, TDC ≥30 A, EDC ≥45 A (never 0: PPT 0 locks at 606 MHz). Ceiling = baseline (stock);
+  with unlock 230 W / 160 A / 230 A. Writing exactly the baseline value is always allowed.
+- Without a fresh baseline of this boot: no CPU write (fail closed).
+- Unlock: `ryzenctl unlock on` prints a warning; in the GUI switch + `Adw.AlertDialog`.
+- Fans: a channel can be modified only if `fan autodetect` classified it "ventola" (fan) in
+  `settings.json` ("pompa", "non controllabile", "sconosciuto" → refusal; by hand one can only
+  demote); step up/down 0..60000 ms; curve with increasing temperatures, non-decreasing pwm,
+  minimum pwm ≥ 77 (30 %), last point pwm 255 at ≤90 °C; `pwmN_enable` never changed, except
+  in the two tests (`autodetect`, `identify`) which restore it in `finally`.
+- Profile names only `[a-z0-9_-]`. State files written atomically.
 
-### Profili, baseline, modalità
+### Profiles, baseline, modes
 
-- Profilo = file di righe-comando: `/etc/ryzenctl/profiles/<nome>.conf` (`co -15 -10 …`,
+- Profile = file of command lines: `/etc/ryzenctl/profiles/<name>.conf` (`co -15 -10 …`,
   `fmax 4800`, `ppt 88`, `power balanced`, `fan 2 step 10000 5000`, `fan 2 curve 40:60 …`).
-  `apply` = esegui ogni riga. Salvataggio dalla GUI: ogni riga validata (dry-run) prima.
-- `/etc/ryzenctl/settings.json`: profilo attivo, autostart, unlock, ruolo/nome canali ventola.
-- Baseline `/var/lib/ryzenctl/baseline.conf` nello stesso formato: catturata **una volta per
-  boot, prima di applicare** (SMU = valori BIOS), mai se `active` esiste; guardia
-  `/run/ryzenctl/baseline-done`. Contiene CO, FMax, PPT/TDC/EDC/THM, Shaper, profilo
-  energetico, impostazioni ventole. Segue eventuali modifiche al BIOS.
-- Modalità (tutte statiche: il comportamento dinamico lo fa già PBO nell'SMU, nessun demone):
-  - **Default**: `apply baseline`, rimuove `active`, disattiva autostart.
-  - **Eco** (ex Eco): CO discreto, FMax, limiti e ventole dalla calibrazione Eco (vedi
-    sotto); finché non calibrata, preset ×0.55/0.63/0.83, FMax −400, Tjmax 80, ventole 10 s /
-    5 s. Obiettivo: silenzio e temperature con undervolt prudente.
-  - **Auto**: PPT/TDC/EDC e FMax dalla calibrazione Auto (punto di ginocchio prestazioni/W di
-    *questa* CPU), CO da auto-tuning, Tjmax baseline, `power balanced`. Finché non calibrata:
-    preset eco AMD 105 W (142/110/170), FMax baseline. Obiettivo: prestazioni per watt.
-  - **Performance** (preset fisso, rev. 9): limiti, FMax e Tjmax di fabbrica, `power performance`,
-    ventole BIOS.
-  - **Boost** (calibrata, rev. 9): CO = limite misurato + 3, limiti e FMax ai tetti consentiti
-    (fabbrica o sblocco), `power performance`, ventole BIOS; a fine calibrazione misura il
-    guadagno MT/ST rispetto alla fabbrica. Obiettivo: potenza bruta.
-  - **Custom**: valori impostati a mano nelle pagine.
-- `power`: profilo energetico via D-Bus `net.hadess.PowerProfiles` (`busctl`, funziona con
-  power-profiles-daemon e tuned-ppd); se assente, scrittura EPP in sysfs.
+  `apply` = run every line. Saving from the GUI: every line validated (dry-run) first.
+- `/etc/ryzenctl/settings.json`: active profile, autostart, unlock, fan channel role/name.
+- Baseline `/var/lib/ryzenctl/baseline.conf` in the same format: captured **once per boot,
+  before applying** (SMU = BIOS values), never if `active` exists; guard
+  `/run/ryzenctl/baseline-done`. Contains CO, FMax, PPT/TDC/EDC/THM, Shaper, power profile,
+  fan settings. Follows any BIOS changes.
+- Modes (all static: the dynamic behaviour is already done by PBO in the SMU, no daemon):
+  - **Default**: `apply baseline`, removes `active`, disables autostart.
+  - **Eco** (formerly Eco): conservative CO, FMax, limits and fans from the Eco calibration (see
+    below); until calibrated, preset ×0.55/0.63/0.83, FMax −400, Tjmax 80, fans 10 s /
+    5 s. Goal: silence and temperatures with a prudent undervolt.
+  - **Auto**: PPT/TDC/EDC and FMax from the Auto calibration (performance/W knee point of
+    *this* CPU), CO from auto-tuning, Tjmax baseline, `power balanced`. Until calibrated:
+    AMD 105 W eco preset (142/110/170), FMax baseline. Goal: performance per watt.
+  - **Performance** (fixed preset, rev. 9): factory limits, FMax and Tjmax, `power performance`,
+    BIOS fans.
+  - **Boost** (calibrated, rev. 9): CO = measured limit + 3, limits and FMax at the allowed
+    ceilings (factory or unlock), `power performance`, BIOS fans; at the end of the calibration
+    measures the MT/ST gain against the factory. Goal: raw power.
+  - **Custom**: values set by hand in the pages.
+- `power`: power profile via D-Bus `net.hadess.PowerProfiles` (`busctl`, works with
+  power-profiles-daemon and tuned-ppd); if absent, EPP write in sysfs.
 
-### Crash-guard (requisito esplicito) — macchina a stati
+### Crash-guard (explicit requirement) — state machine
 
-Marker in `/var/lib/ryzenctl/`, ognuno scritto con `fsync` di file e directory:
-- `dirty`: "questo boot non è ancora terminato in modo pulito".
-- `active`: "in questo boot è stato scritto uno stato CPU diverso dalla baseline".
-- `crashed`: `{ora, profilo}` — il boot precedente è finito male con un profilo attivo.
+Markers in `/var/lib/ryzenctl/`, each written with `fsync` of file and directory:
+- `dirty`: "this boot has not yet ended cleanly".
+- `active`: "in this boot a CPU state different from the baseline was written".
+- `crashed`: `{time, profile}` — the previous boot ended badly with an active profile.
 
 ```
 ryzenctl boot   (ryzenctl.service, oneshot RemainAfterExit, After=dkms.service,
                  ExecStartPre=-/sbin/modprobe ryzen_smu, ConditionKernelCommandLine=!ryzenctl.off)
-  1. se dirty ∧ active            → scrive crashed {ora, profilo}
+  1. if dirty ∧ active            → writes crashed {time, profile}
   2. rm active
-  3. scrive dirty                 (PRIMA di qualunque scrittura SMU)
-  4. baseline: solo se manca /run/ryzenctl/baseline-done; fallita → niente scritture CPU
-  5. ventole: applica la parte fan del profilo se autostart (non possono causare crash)
-  6. CPU: solo se autostart ∧ ¬crashed; ogni riga non-baseline scrive active (fsync) e POI l'SMU
+  3. writes dirty                 (BEFORE any SMU write)
+  4. baseline: only if /run/ryzenctl/baseline-done is missing; failed → no CPU writes
+  5. fans: applies the fan part of the profile if autostart (they cannot cause crashes)
+  6. CPU: only if autostart ∧ ¬crashed; every non-baseline line writes active (fsync) and THEN the SMU
 
-ryzenctl shutdown (ExecStop, spegnimento/riavvio puliti)      → rm dirty
-scrittura runtime (CLI o serve) di un valore non-baseline      → active prima dell'SMU
-ryzenctl-resume.service (After=/WantedBy= dei target di sleep) → riapplica se autostart ∧ ¬crashed
+ryzenctl shutdown (ExecStop, clean shutdown/reboot)            → rm dirty
+runtime write (CLI or serve) of a non-baseline value           → active before the SMU
+ryzenctl-resume.service (After=/WantedBy= of the sleep targets) → reapplies if autostart ∧ ¬crashed
 Default                                                        → apply baseline, rm active, autostart off
-GUI "Riattiva"                                                 → rm crashed, autostart on, apply
-GUI "Resta su Default"                                         → rm crashed, autostart off
+GUI "Reactivate"                                               → rm crashed, autostart on, apply
+GUI "Stay on Default"                                          → rm crashed, autostart off
 ```
 
-Scenari verificati sulla macchina a stati:
-- Crash a regime con profilo attivo → dirty ∧ active → `crashed`, niente apply, notifica al
-  login (`ryzenctl notify` da autostart XDG), banner `Adw.Banner` nella GUI con
-  **Riattiva** / **Resta su Default**.
-- Crash *durante* l'apply al boot (CO instabile all'avvio) → dirty già scritto → al boot
-  successivo `crashed`. Nessun loop: ogni nuovo tentativo richiede un clic su "Riattiva".
-- Crash in un boot in cui nulla era applicato (profilo disattivato, o `crashed` già presente)
-  → `active` assente → non segnalato come colpa nostra; `crashed` precedente resta finché
-  l'utente non decide.
-- Crash prima che il servizio parta (altra causa) → dirty del boot precedente → falso
-  positivo nella direzione sicura (profilo non applicato, un clic per riattivare).
-- Spegnimento con tasto power / reset → trattato come crash → direzione sicura.
-- Suspend: con S3 le impostazioni SMU tornano a quelle BIOS → `-resume` riapplica; resume
-  fallito → reset → dirty ∧ active → `crashed`.
-- `systemctl restart ryzenctl` a profilo attivo → baseline non ricatturata (guardia /run +
-  `active`), nessuna corruzione del tetto.
-- Via di fuga totale: in GRUB `e` + `ryzenctl.off` → il servizio non parte e, grazie alla
-  blacklist, il modulo non viene caricato affatto. Il `dirty` rimasto fa scattare `crashed`
-  al boot normale successivo.
-- Crash durante l'auto-tuning: il valore in prova è scritto (fsync) nello stato GUI prima
-  dell'SMU; `active` è impostato → `crashed`; la GUI incrocia `crashed.ora` con il proprio
-  stato e marca il passo come instabile.
-- Driver che non compila per un kernel nuovo → `boot` salta la parte CPU con messaggio, le
-  ventole si applicano comunque; non fallisce.
-- Avvertenza unica nelle finestre di auto-tuning e sblocco: possibili riavvii improvvisi,
-  salvare il lavoro (perdita dati, non danni).
+Scenarios verified on the state machine:
+- Crash at steady state with an active profile → dirty ∧ active → `crashed`, no apply,
+  notification at login (`ryzenctl notify` from XDG autostart), `Adw.Banner` in the GUI with
+  **Reactivate** / **Stay on Default**.
+- Crash *during* the apply at boot (CO unstable at startup) → dirty already written → at the
+  next boot `crashed`. No loop: every new attempt requires a click on "Reactivate".
+- Crash in a boot where nothing was applied (profile disabled, or `crashed` already present)
+  → `active` absent → not reported as our fault; the previous `crashed` stays until the user
+  decides.
+- Crash before the service starts (other cause) → dirty from the previous boot → false
+  positive in the safe direction (profile not applied, one click to reactivate).
+- Shutdown with the power / reset button → treated as a crash → safe direction.
+- Suspend: with S3 the SMU settings return to the BIOS ones → `-resume` reapplies; failed
+  resume → reset → dirty ∧ active → `crashed`.
+- `systemctl restart ryzenctl` with an active profile → baseline not recaptured (/run guard +
+  `active`), no corruption of the ceiling.
+- Total escape hatch: in GRUB `e` + `ryzenctl.off` → the service does not start and, thanks to
+  the blacklist, the module is not loaded at all. The leftover `dirty` triggers `crashed` at the
+  next normal boot.
+- Crash during auto-tuning: the value under test is written (fsync) in the GUI state before
+  the SMU; `active` is set → `crashed`; the GUI cross-checks `crashed.time` with its own
+  state and marks the step as unstable.
+- Driver that does not build for a new kernel → `boot` skips the CPU part with a message, the
+  fans are applied anyway; it does not fail.
+- Single warning in the auto-tuning and unlock windows: possible sudden reboots, save your
+  work (data loss, not damage).
 
-### GUI `ryzen-control` (Adw.ViewStack, 5 pagine)
+### GUI `ryzen-control` (Adw.ViewStack, 5 pages)
 
-1. **Monitor** (polling 1 s, comando `telemetry`): Tctl/Tccd1 (k10temp) + grafico 60 s
-   (cairo), PPT/TDC valore vs limite (LevelBar), MHz e CO per core, temp per core (solo
-   0x620105), RPM ventole.
-2. **Modalità**: Default/Eco/Auto/Boost/Custom, switch "Applica all'avvio", switch sblocco,
-   banner crash, pulsanti **Calibra Eco**, **Calibra Auto** (slider perdita max %) e
-   **Auto-tuning CO** con progresso, log e tabella risultati.
-3. **CPU**: PPT/TDC/EDC, FMax, Tjmax, profilo energetico (Adw.SpinRow limitati ai tetti).
-4. **Curve**: CO per core (8 SpinRow + "tutti"), Curve Shaper 5 tier × 3 temperature.
-5. **Ventole**: pulsante **Rileva ruoli** (autodetect, con progresso e motivazione per
-   canale: ΔT, RPM), canali con RPM, ruolo e nome, step up/down, punti curva (spin +
-   anteprima) solo sui canali "ventola", Identifica; se nct6775 assente → istruzioni con
-   comandi pronti (parametro kernel + `ryzenctl fan enable`).
-Ogni pagina: **Applica ora** (runtime) e **Salva nel profilo** (menu profili).
+1. **Monitor** (1 s polling, `telemetry` command): Tctl/Tccd1 (k10temp) + 60 s graph
+   (cairo), PPT/TDC value vs limit (LevelBar), MHz and CO per core, temperature per core (only
+   0x620105), fan RPM.
+2. **Modes**: Default/Eco/Auto/Boost/Custom, "Apply at boot" switch, unlock switch,
+   crash banner, buttons **Calibrate Eco**, **Calibrate Auto** (max loss % slider) and
+   **CO auto-tuning** with progress, log and results table.
+3. **CPU**: PPT/TDC/EDC, FMax, Tjmax, power profile (Adw.SpinRow limited to the ceilings).
+4. **Curves**: per-core CO (8 SpinRow + "all"), Curve Shaper 5 tiers × 3 temperatures.
+5. **Fans**: **Detect roles** button (autodetect, with progress and reason per channel: ΔT,
+   RPM), channels with RPM, role and name, step up/down, curve points (spin + preview) only on
+   "ventola" channels, Identify; if nct6775 is absent → instructions with ready-made commands
+   (kernel parameter + `ryzenctl fan enable`).
+Every page: **Apply now** (runtime) and **Save to profile** (profiles menu).
 
-### Ventole da Linux (scelta utente; fase 2, prima della GUI)
+### Fans from Linux (user choice; phase 2, before the GUI)
 
-- Fattibilità prima di toccare il boot: `sudo modprobe nct6775; sudo dmesg | grep -i nct`
-  (atteso: chip trovato + conflitto risorse ACPI).
-- Se il chip c'è: parametro kernel `acpi_enforce_resources=lax` (passo manuale: Fedora
-  `grubby --update-kernel=ALL --args=…`, altre distro `GRUB_CMDLINE_LINUX_DEFAULT`) +
-  `ryzenctl fan enable` (scrive `/etc/modules-load.d/nct6775.conf`, carica il modulo).
-  Rischio: accessi concorrenti al Super I/O con ACPI; scritture minime, solo all'apply.
-- Prima cosa dopo il rilevamento: `ryzenctl fan autodetect` assegna i ruoli con un test
-  fisico, senza intervento umano. Sotto carico moderato e stabile (`stress-ng --cpu 4`,
-  argomenti fissi), per ogni canale con RPM > 0: mediana di Tctl e RPM su 5 s → canale al
-  40 % per 20 s → nuova mediana → ripristino. Classificazione:
-  - RPM varia < 5 % → **non controllabile** (ventola 3 pin o pompa a 12 V fissi) → protetto;
-  - Tctl sale ≥ 2 °C **oppure** RPM al 40 % ancora ≥ 1500 → **pompa** → protetto;
-  - Tctl sale < 1 °C e RPM cala → **ventola** → scrivibile;
-  - altrimenti **sconosciuto** → protetto.
-  Base fisica: meno flusso nel blocco alza Tctl di gradi in pochi secondi; meno aria sul
-  radiatore scalda ~400 g di liquido lentamente (~0,5 °C in 20 s): separazione ≥ 5×. Guardie:
-  abort e ripristino immediato se Tctl > 80 °C o ΔT > 8 °C, massimo 20 s per canale,
-  ripristino in `finally`, Tjmax sempre attivo. Soglie = costanti in testa al file
-  (`# ponytail:` tarate su un AIO 360; ritoccare se un radiatore piccolo le sfiora).
-  Senza stress-ng o senza test eseguito: nessun canale scrivibile (fail closed).
-  `ryzenctl fan role N pompa|sconosciuto` serve solo a declassare; "ventola" a mano non esiste.
-  `ryzenctl fan identify N` (100 % per 5 s) resta come aiuto per riconoscere fisicamente
-  quale ventola del case è quale, non assegna ruoli.
-- Controllo = curva hardware SmartFan IV già programmata dal BIOS: si cambiano solo
-  `pwmN_step_up_time`/`step_down_time` (ignora i picchi brevi: causa vera del rumore) e, se
-  richiesto, `pwmN_auto_point*`. Niente demone: se l'app muore, il chip continua da solo.
-  La CPU resta protetta da Tjmax qualunque cosa facciano le ventole.
+- Feasibility before touching the boot: `sudo modprobe nct6775; sudo dmesg | grep -i nct`
+  (expected: chip found + ACPI resource conflict).
+- If the chip is there: kernel parameter `acpi_enforce_resources=lax` (manual step: Fedora
+  `grubby --update-kernel=ALL --args=…`, other distros `GRUB_CMDLINE_LINUX_DEFAULT`) +
+  `ryzenctl fan enable` (writes `/etc/modules-load.d/nct6775.conf`, loads the module).
+  Risk: concurrent accesses to the Super I/O with ACPI; minimal writes, only at apply.
+- First thing after detection: `ryzenctl fan autodetect` assigns the roles with a physical
+  test, without human intervention. Under moderate and stable load (`stress-ng --cpu 4`, fixed
+  arguments), for every channel with RPM > 0: median of Tctl and RPM over 5 s → channel at
+  40 % for 20 s → new median → restore. Classification:
+  - RPM varies < 5 % → **non controllabile** (not controllable: 3-pin fan or pump at fixed 12 V) → protected;
+  - Tctl rises ≥ 2 °C **or** RPM at 40 % still ≥ 1500 → **pompa** (pump) → protected;
+  - Tctl rises < 1 °C and RPM drops → **ventola** (fan) → writable;
+  - otherwise **sconosciuto** (unknown) → protected.
+  Physical basis: less flow in the block raises Tctl by degrees in a few seconds; less air on
+  the radiator warms ~400 g of liquid slowly (~0.5 °C in 20 s): separation ≥ 5×. Guards:
+  abort and immediate restore if Tctl > 80 °C or ΔT > 8 °C, 20 s per channel at most, restore
+  in `finally`, Tjmax always active. Thresholds = constants at the top of the file
+  (`# ponytail:` tuned on a 360 AIO; adjust if a small radiator gets close to them).
+  Without stress-ng or without the test run: no writable channel (fail closed).
+  `ryzenctl fan role N pompa|sconosciuto` only serves to demote; "ventola" by hand does not exist.
+  `ryzenctl fan identify N` (100 % for 5 s) remains as a help to physically recognise which
+  case fan is which, it does not assign roles.
+- Control = SmartFan IV hardware curve already programmed by the BIOS: only
+  `pwmN_step_up_time`/`step_down_time` are changed (ignores short spikes: the real cause of the
+  noise) and, if requested, `pwmN_auto_point*`. No daemon: if the app dies, the chip carries on
+  by itself. The CPU stays protected by Tjmax whatever the fans do.
 
-### Calibrazioni (fase 4) — macchina a passi in `ryzenctl`, GUI come pilota
+### Calibrations (phase 4) — step machine in `ryzenctl`, GUI as the driver
 
-Richiesta utente (rev. 8): **Eco** = non solo ventole lente, anche un **undervolt discreto
-basato sulle capacità reali dell'hardware**. Le calibrazioni girano in `ryzenctl` come
-macchina a passi, così sopravvivono a un crash e `serve` resta reattivo:
+User request (rev. 8): **Eco** = not only slow fans, also a **conservative undervolt based on
+the real capabilities of the hardware**. The calibrations run in `ryzenctl` as a step
+machine, so they survive a crash and `serve` stays responsive:
 `autotune start eco|auto [target=70] [colimit=-25] [margin=5] [step=90]`,
-`autotune step` (esegue UN test e torna: la GUI lo chiama in loop mostrando l'avanzamento),
-`autotune status`, `autotune abort`. Stato in `/var/lib/ryzenctl/autotune.json` (atomico,
-fsync prima di ogni scrittura SMU). Il carico (`stress-ng`, argomenti fissi) lo lancia
-`ryzenctl` per il solo passo in corso. Ogni passo scrive `active` → un crash produce
-`crashed`; al riavvio `autotune status` mostra il passo interrotto e la GUI propone di
-riprendere marcandolo instabile. Avviso prima di partire: possibili riavvii, salvare tutto.
+`autotune step` (runs ONE test and returns: the GUI calls it in a loop showing the progress),
+`autotune status`, `autotune abort`. State in `/var/lib/ryzenctl/autotune.json` (atomic,
+fsync before every SMU write). The load (`stress-ng`, fixed arguments) is launched by
+`ryzenctl` for the current step only. Every step writes `active` → a crash produces
+`crashed`; at reboot `autotune status` shows the interrupted step and the GUI offers to
+resume marking it unstable. Warning before starting: possible reboots, save everything.
 
-**Eco** (`autotune start eco`), nell'ordine:
-1. *Undervolt discreto*: per ogni core 0..7, gli altri a baseline, CO da 0 a passi di −5 fino a
-   `colimit` (default −25); ogni passo `step` secondi (default 90) in tre fasi: pieno carico
-   `stress-ng --cpu 1 --taskset c --cpu-method all --verify`, carico 50 % (`--cpu-load 50`),
-   carico 10 % (le instabilità CO emergono soprattutto a basso carico). Fallimento = exit ≠ 0
-   o nuovi errori MCE nel log kernel. Risultato core = ultimo stabile + `margin` (default +5:
-   discreto, non il limite). Passata finale 5 min con tutti i core ai valori trovati, tre
-   fasi; se fallisce, +3 a tutti e ripetizione.
-2. *FMax per il silenzio*: con il CO trovato, da FMax baseline a passi di −100 MHz (minimo
-   4000): 12 raffiche `stress-ng --cpu 2 -t 2s` + 3 s pausa, Tctl campionata a 20 Hz (mai
-   letture PM durante la misura: scaldano il die), p95 dei picchi; primo FMax con p95 ≤
-   `target` (default 70 °C). `# ponytail:` euristica, la temperatura del liquido deriva.
-3. *Limiti e ventole*: PPT/TDC/EDC ×0.55/0.63/0.83 della baseline (≈ eco 65 W AMD), Tjmax
-   min(baseline, 80), `power balanced`; sui canali "ventola": step 10 s / 5 s e curva dal
-   target (pwm minimo della curva BIOS fino a `target − 10 °C`, 100 % a `Tjmax − 5 °C`).
-Risultato: profilo `eco` riscritto (sostituisce il preset), con la tabella delle misure
-(CO per core, FMax scelto, p95) mostrata nella GUI. Durata ~25–40 min.
+**Eco** (`autotune start eco`), in order:
+1. *Conservative undervolt*: for every core 0..7, the others at baseline, CO from 0 in steps of
+   −5 down to `colimit` (default −25); every step `step` seconds (default 90) in three phases:
+   full load `stress-ng --cpu 1 --taskset c --cpu-method all --verify`, 50 % load
+   (`--cpu-load 50`), 10 % load (CO instabilities emerge mostly at low load). Failure = exit ≠ 0
+   or new MCE errors in the kernel log. Core result = last stable + `margin` (default +5:
+   conservative, not the limit). Final pass of 5 min with all cores at the values found, three
+   phases; if it fails, +3 to all and repeat.
+2. *FMax for silence*: with the CO found, from the baseline FMax in steps of −100 MHz (minimum
+   4000): 12 bursts `stress-ng --cpu 2 -t 2s` + 3 s pause, Tctl sampled at 20 Hz (never PM
+   reads during the measurement: they heat the die), p95 of the peaks; first FMax with p95 ≤
+   `target` (default 70 °C). `# ponytail:` heuristic, the liquid temperature drifts.
+3. *Limits and fans*: PPT/TDC/EDC ×0.55/0.63/0.83 of the baseline (≈ AMD eco 65 W), Tjmax
+   min(baseline, 80), `power balanced`; on the "ventola" channels: step 10 s / 5 s and curve
+   from the target (minimum pwm of the BIOS curve up to `target − 10 °C`, 100 % at
+   `Tjmax − 5 °C`).
+Result: `eco` profile rewritten (replaces the preset), with the measurements table
+(per-core CO, chosen FMax, p95) shown in the GUI. Duration ~25–40 min.
 
-**Auto** (`autotune start auto`): stessa ricerca CO ma spinta (`colimit` −40, `margin` +3,
-riusa i risultati Eco come punto di partenza se esistono); poi il ginocchio prestazioni/W:
-sweep PPT (multi-thread, −10 % per passo fino al 50 %, TDC/EDC scalati) e FMax
-(single-thread, −100 MHz fino a −800) con bogo-ops/s di `stress-ng --metrics -Y` e potenza
-RAPL (`intel-rapl:0/energy_uj`, fallback PM d[3]); scelta = valore più basso con prestazioni
-≥ (100 − perdita) % del massimo, `perdita` slider (default 10 %). Ventole: curva BIOS, step
-3 s / 2 s; `power balanced`. **Boost** = baseline + CO di Auto + `power performance` +
-ventole BIOS. Default e preset restano come oggi.
+**Auto** (`autotune start auto`): same CO search but pushed (`colimit` −40, `margin` +3,
+reuses the Eco results as a starting point if they exist); then the performance/W knee:
+PPT sweep (multi-thread, −10 % per step down to 50 %, TDC/EDC scaled) and FMax
+(single-thread, −100 MHz down to −800) with bogo-ops/s from `stress-ng --metrics -Y` and RAPL
+power (`intel-rapl:0/energy_uj`, fallback PM d[3]); choice = lowest value with performance
+≥ (100 − loss) % of the maximum, `loss` slider (default 10 %). Fans: BIOS curve, step
+3 s / 2 s; `power balanced`. **Boost** = baseline + Auto's CO + `power performance` +
+BIOS fans. Default and presets stay as today.
 
-Pompa mai toccata; ogni valore prodotto passa comunque dalla validazione normale (≤ baseline
-salvo sblocco). Il backend finto simula stabilità per core (soglia CO per core, es. core 7
-instabile sotto −15) e la risposta termica a FMax, così il selftest copre la macchina a passi,
-la ripresa dopo crash e il profilo generato.
+Pump never touched; every produced value still goes through the normal validation (≤ baseline
+unless unlocked). The fake backend simulates per-core stability (per-core CO threshold, e.g.
+core 7 unstable below −15) and the thermal response to FMax, so the selftest covers the step
+machine, the resume after crash and the generated profile.
 
-## File (in `~/Documenti/Progetti/Personali/Ryzen Control/`)
+## Files (in `~/Documenti/Progetti/Personali/Ryzen Control/`)
 
-- `ryzenctl` — helper/CLI root + selftest
-- `ryzen-control` — GUI GTK4/libadwaita
+- `ryzenctl` — root helper/CLI + selftest
+- `ryzen-control` — GTK4/libadwaita GUI
 - `Makefile` — install/uninstall/dkms (DESTDIR/PREFIX/APPID)
-- `data/` — unit systemd, modprobe.d, policy polkit, .desktop, icona SVG, metainfo, autostart
-- `ryzen_smu/` — driver vendorizzato (subtree d298366 + patch PM table 0x6211xx)
+- `data/` — systemd units, modprobe.d, polkit policy, .desktop, SVG icon, metainfo, autostart
+- `ryzen_smu/` — vendored driver (subtree d298366 + PM table 0x6211xx patch)
 - `packaging/ryzen-control.spec`, `packaging/debian/`, `packaging/PKGBUILD`
-- `README.md` — installazione per distro, Secure Boot (MOK dkms o drop-in akmods), ventole,
-  avvertenze
-- `CLAUDE.md` — da allineare a questa revisione all'inizio dell'implementazione (ordine fasi,
-  blacklist modulo, ordine marker, FMax +200 con sblocco, ruoli ventola)
+- `README.md` — installation per distro, Secure Boot (dkms MOK or akmods drop-in), fans,
+  warnings
+- `CLAUDE.md` — to be aligned with this revision at the start of the implementation (phase
+  order, module blacklist, marker order, FMax +200 with unlock, fan roles)
 
-## Git e flusso di lavoro
+## Git and workflow
 
-- Repo git personale in `~/Documenti/Progetti/Personali/Ryzen Control` (`git init`, branch
-  `main`, nessun remote finché non lo indichi tu). Driver upstream con `git subtree add
+- Personal git repo in `~/Documenti/Progetti/Personali/Ryzen Control` (`git init`, branch
+  `main`, no remote until you name one). Upstream driver with `git subtree add
   --prefix ryzen_smu https://github.com/amkillam/ryzen_smu d298366 --squash`.
-- Un commit per passo **solo dopo la sua verifica**: le verifiche eseguibili senza root
-  (selftest, compilazione driver, `make install DESTDIR`, `rpmbuild`, `systemd-analyze
-  verify`, `desktop-file-validate`, GUI in `--mock`) le faccio io prima del commit; quelle su
-  hardware/root le esegui tu (`! comando` nel prompt) e committo dopo il tuo esito. Verifica
-  fallita → si corregge, niente commit.
-- Messaggi in prosa italiana, prefisso convenzionale (`feat/fix/build/docs/chore/test`), con
-  riga `Co-Authored-By` richiesta dall'ambiente. Tag `v0.1.0`, `v0.2.0`… a fine di ogni fase
-  verificata su hardware; la versione del tag è quella della spec RPM.
+- One commit per step **only after its verification**: the checks that can run without root
+  (selftest, driver build, `make install DESTDIR`, `rpmbuild`, `systemd-analyze
+  verify`, `desktop-file-validate`, GUI in `--mock`) I run before the commit; those on
+  hardware/root you run (`! command` in the prompt) and I commit after your result. Failed
+  verification → fix it, no commit.
+- Messages in English prose (rev. 12; Italian before), conventional prefix
+  (`feat/fix/build/docs/chore/test`), with the `Co-Authored-By` line required by the
+  environment. Tags `v0.1.0`, `v0.2.0`… at the end of every phase verified on hardware; the tag
+  version is the one of the RPM spec.
 
-## Fasi e commit (ogni fase verificata su hardware prima della successiva)
+## Phases and commits (every phase verified on hardware before the next one)
 
-### Fase 1 — fondamenta e pacchetto RPM → tag `v0.1.0`
-| # | Commit | Verifica prima del commit |
+### Phase 1 — foundations and RPM package → tag `v0.1.0`
+| # | Commit | Verification before the commit |
 |---|---|---|
 | 1 | `chore: init repo, plan, README stub` | — |
-| 2 | `build: vendor ryzen_smu d298366 (subtree)` + `fix(driver): PM table 0x6211xx sizes` | `make -C ryzen_smu` compila con gli header del kernel 7.2.8 |
-| 3 | `feat(ryzenctl): SMU transport, lock, status` | `ryzenctl selftest` (backend finto) |
-| 4 | `feat(ryzenctl): co/ppt/tdc/edc/fmax/tjmax/shaper + validazione, readback, sblocco` | selftest: codifiche, range, tetti, ripristino su readback fallito |
-| 5 | `feat(ryzenctl): profili, baseline, boot/shutdown, crash-guard, serve` | selftest: tutti gli scenari della macchina a stati |
-| 6 | `build: Makefile, unit systemd, modprobe.d, policy polkit, desktop, metainfo, icona` | `make install DESTDIR=/tmp/x` = layout atteso; `systemd-analyze verify`; `desktop-file-validate`; `appstreamcli validate` se presente |
-| 7 | `build(rpm): spec ryzen-control + ryzen-smu-dkms` | `rpmbuild -ba` pulito |
-| 8 | `docs: installazione Fedora, Secure Boot, verifica hardware` | **tu**: `dnf install`, `mokutil --import`, riavvio, `dkms status`, `lsmod` senza servizio = modulo non caricato, `ryzenctl status`, scritture reversibili, test crash (Verifica 2-5) |
+| 2 | `build: vendor ryzen_smu d298366 (subtree)` + `fix(driver): PM table 0x6211xx sizes` | `make -C ryzen_smu` builds with the kernel 7.2.8 headers |
+| 3 | `feat(ryzenctl): SMU transport, lock, status` | `ryzenctl selftest` (fake backend) |
+| 4 | `feat(ryzenctl): co/ppt/tdc/edc/fmax/tjmax/shaper + validation, readback, unlock` | selftest: encodings, ranges, ceilings, restore on failed readback |
+| 5 | `feat(ryzenctl): profiles, baseline, boot/shutdown, crash-guard, serve` | selftest: all the scenarios of the state machine |
+| 6 | `build: Makefile, systemd units, modprobe.d, polkit policy, desktop, metainfo, icon` | `make install DESTDIR=/tmp/x` = expected layout; `systemd-analyze verify`; `desktop-file-validate`; `appstreamcli validate` if present |
+| 7 | `build(rpm): ryzen-control + ryzen-smu-dkms spec` | clean `rpmbuild -ba` |
+| 8 | `docs: Fedora installation, Secure Boot, hardware verification` | **you**: `dnf install`, `mokutil --import`, reboot, `dkms status`, `lsmod` without the service = module not loaded, `ryzenctl status`, reversible writes, crash test (Verification 2-5) |
 
-### Fase 2 — ventole (CLI) → `v0.2.0`
-| # | Commit | Verifica |
+### Phase 2 — fans (CLI) → `v0.2.0`
+| # | Commit | Verification |
 |---|---|---|
-| 9 | `feat(ryzenctl): fan status/autodetect/identify/role/step/curve/enable` | selftest su hwmon finto (classificatore con serie Tctl/RPM sintetiche, abort); **tu**: `modprobe nct6775` + `dmesg`, parametro kernel, `sensors`, `fan autodetect` individua la pompa |
-| 10 | `feat(ryzenctl): parte fan nel profilo e nel boot` | **tu**: Verifica 7 (step up 10 s: un picco di 2 s non alza gli RPM; pompa invariata) |
+| 9 | `feat(ryzenctl): fan status/autodetect/identify/role/step/curve/enable` | selftest on a fake hwmon (classifier with synthetic Tctl/RPM series, abort); **you**: `modprobe nct6775` + `dmesg`, kernel parameter, `sensors`, `fan autodetect` finds the pump |
+| 10 | `feat(ryzenctl): fan part in the profile and at boot` | **you**: Verification 7 (step up 10 s: a 2 s spike does not raise the RPM; pump unchanged) |
 
-### Fase 3 — GUI → `v0.3.0`
-| # | Commit | Verifica |
+### Phase 3 — GUI → `v0.3.0`
+| # | Commit | Verification |
 |---|---|---|
-| 11 | `feat(gui): scheletro Adw, client pkexec/serve, --mock` | avvio in `--mock`, un solo prompt pkexec su hardware |
-| 12 | `feat(gui): pagina Monitor` | valori coerenti con `sensors`/`ryzenctl status` |
-| 13 | `feat(gui): pagine CPU, Curve, Ventole` | Applica/Salva → `ryzenctl status` e file profilo cambiano |
-| 14 | `feat(gui): pagina Modalità (Default/Auto/Boost/Custom, sblocco, banner crash)` | **tu**: banner dopo test crash, Riattiva/Resta |
+| 11 | `feat(gui): Adw skeleton, pkexec/serve client, --mock` | start in `--mock`, a single pkexec prompt on hardware |
+| 12 | `feat(gui): Monitor page` | values consistent with `sensors`/`ryzenctl status` |
+| 13 | `feat(gui): CPU, Curves, Fans pages` | Apply/Save → `ryzenctl status` and the profile file change |
+| 14 | `feat(gui): Modes page (Default/Auto/Boost/Custom, unlock, crash banner)` | **you**: banner after the crash test, Reactivate/Stay |
 
-### Fase 4 — calibrazioni → `v0.4.0`
-| # | Commit | Verifica |
+### Phase 4 — calibrations → `v0.4.0`
+| # | Commit | Verification |
 |---|---|---|
-| 15 | `feat(ryzenctl): autotune — macchina a passi, CO per core, ripresa dopo crash` | selftest con stabilità simulata; **tu**: prova su 1 core con `step=30` |
-| 16 | `feat(ryzenctl): autotune eco — FMax dal target Tctl, limiti, ventole; profilo eco` | **tu**: p95 sotto target, profilo eco generato |
-| 17 | `feat(ryzenctl): autotune auto — ginocchio PPT/FMax con RAPL; GUI con avanzamento` | **tu**: tabella monotona, scelta ≤ slider |
+| 15 | `feat(ryzenctl): autotune — step machine, per-core CO, resume after crash` | selftest with simulated stability; **you**: test on 1 core with `step=30` |
+| 16 | `feat(ryzenctl): autotune eco — FMax from the Tctl target, limits, fans; eco profile` | **you**: p95 below the target, eco profile generated |
+| 17 | `feat(ryzenctl): autotune auto — PPT/FMax knee with RAPL; GUI with progress` | **you**: monotonic table, choice ≤ slider |
 
-### Fase 5 — tutti i processori Ryzen (desktop AM4/AM5, poi mobile) → `v0.5.0`
-Oggi tutto è cucito sul 9800X3D: gate `codename == 23`, `CORES = 8`, un solo set di ID SMU,
-offset PM table di 0x620105, `core<<20` nel CO. Obiettivo: la stessa `ryzenctl` su ogni Ryzen
-desktop, con le stesse garanzie (allowlist rigida, readback, fail closed), senza riscrivere
-nulla di quello che funziona.
+### Phase 5 — all Ryzen processors (desktop AM4/AM5, then mobile) → `v0.5.0`
+Today everything is tailored to the 9800X3D: gate `codename == 23`, `CORES = 8`, a single set of
+SMU IDs, PM table offsets of 0x620105, `core<<20` in the CO. Goal: the same `ryzenctl` on every
+desktop Ryzen, with the same guarantees (strict allowlist, readback, fail closed), without
+rewriting anything that works.
 
-**Perimetro.** Prima ondata (desktop, PM table e mailbox note a ryzen_smu): Granite Ridge
-(9000, codename 23, già verificato), Raphael (7000, 20), Vermeer (5000, 12), Matisse (3000, 4).
-Seconda ondata (APU/mobile, limiti STAPM/fast/slow e spesso senza RSMU): Cezanne (14),
-Rembrandt (11), Phoenix (21), Hawk Point (24), Strix (22). Esclusi Threadripper/Epyc (HSMP,
-socket diversi, nessun hardware per provarli). Fonti dei dati: ZenStates-Core
-(`Zen5Settings.cs`, `Zen4Settings.cs`, `Zen3Settings.cs`, `Zen2Settings.cs` per gli ID MP1/RSMU
-e l'encoding del CO; `PowerTable.cs` per gli offset della PM table), ryzen_smu `smu.c`
-(indice codename, mailbox, versioni e dimensioni PM table), RyzenAdj per le APU.
+**Scope.** First wave (desktop, PM table and mailboxes known to ryzen_smu): Granite Ridge
+(9000, codename 23, already verified), Raphael (7000, 20), Vermeer (5000, 12), Matisse (3000, 4).
+Second wave (APU/mobile, STAPM/fast/slow limits and often without RSMU): Cezanne (14),
+Rembrandt (11), Phoenix (21), Hawk Point (24), Strix (22). Excluded: Threadripper/Epyc (HSMP,
+different sockets, no hardware to test them). Data sources: ZenStates-Core
+(`Zen5Settings.cs`, `Zen4Settings.cs`, `Zen3Settings.cs`, `Zen2Settings.cs` for the MP1/RSMU IDs
+and the CO encoding; `PowerTable.cs` for the PM table offsets), ryzen_smu `smu.c`
+(codename index, mailboxes, PM table versions and sizes), RyzenAdj for the APUs.
 
-**Cosa cambia nel codice (minimo).**
-- Una tabella `FAMILIES` in testa a `ryzenctl`, indicizzata per codename del driver, che
-  assorbe le costanti oggi sparse (`GRANITE_RIDGE`, `CORES`, `PM_FAMILY`, `PM`, `PM_CORE_*`,
-  `CMD`): per famiglia nome, ID SMU (`co_set`, `co_get`, `ppt/tdc/edc_set`, `fmax_set/get`,
-  `tjmax_set`, `shaper_set/get`) con la mailbox di ciascuno, offset PM table (`ppt_limit`,
-  `ppt`, `tdc_limit`, `tdc`, `edc_limit`, `edc`, `thm_limit`, `tctl`, tensione/MHz/temperatura
-  per core), versioni PM table ammesse (prefisso `>>16`: 0x62 Granite Ridge, 0x54 Raphael,
-  0x38 Vermeer, 0x24 Matisse), Tjmax massimo (95 Granite Ridge/Raphael/Matisse, 90 Vermeer e
-  Zen 3 X3D; da confermare per famiglia), tetti di sblocco. Una voce può omettere una chiave:
-  funzione disabilitata per quella famiglia (Curve Shaper solo Zen 5; Tjmax e CO readback dove
-  ZenStates non ha l'ID). Il resto del codice continua a chiamare `smu("co_set", …)` e
-  `PM["ppt_limit"]`: cambia solo chi riempie `CMD` e `PM` (dalla voce scelta da `check_cpu`).
-- Gate: `check_cpu` cerca il codename in `FAMILIES`; assente → rifiuto totale come oggi (fail
-  closed). Un ID fuori dalla voce della famiglia non viene mai inviato: l'allowlist resta
-  rigida, solo che ce n'è una per famiglia.
-- `CORES` dinamico: numero di core fisici e CCD letti da sysfs (`topology/core_id`,
-  `thread_siblings_list`, `topology/die_id`), non più la costante 8. Mappa core logico →
-  fisico per il CO: oggi `core << 20` (giusto solo con 1 CCD/1 CCX); ZenStates costruisce la
-  maschera come `((ccd << 8) | (ccx << 4) | core) << 20`, quindi su 2 CCD il core 8 è
-  `(1 << 8) << 20`, non `8 << 20` — **da verificare con il readback 0xD5** (è l'unica prova
-  che vale: il set risponde OK anche con la maschera sbagliata). Core fusi (7600X3D: 6 di 8)
-  → la mappa salta gli indici assenti in sysfs. `core_cpus`/`best_core`/`co_test` usano la
-  mappa, non `c % CORES`.
-- Backend finto parametrizzato: `Fake.DEFAULT` prende la famiglia da `RYZENCTL_FAKE_FAMILY`
-  (default Granite Ridge); il selftest gira la stessa suite su 2-3 famiglie finte, compreso un
-  APU senza PM table (PPT/TDC/EDC/Tjmax rifiutati, CO/FMax ok) e una CPU a 16 core (CO su
-  16 righe, profili e baseline con 16 valori, maschera CCD nel finto che rifiuta `8 << 20`).
-- GUI: righe della pagina Curve e colonne del Monitor da `status.cores`; famiglia e codename
-  mostrati nello stato; funzioni disabilitate per famiglia con il motivo ("Curve Shaper: solo
-  Ryzen 9000"), non nascoste né in errore.
-- `hwtest` resta la verifica reversibile su hardware vero: scrive e rilegge ogni funzione
-  della famiglia, ripristina la baseline. **Nessuna famiglia è "supportata" finché qualcuno
-  non ha un `hwtest` ok** su quella CPU: nel README una tabella «Processori: verificato /
-  atteso / non supportato» con CPU, codename, SMU, PM table e chi lo ha verificato. Le
-  famiglie da ZenStates senza `hwtest` restano "atteso" e la GUI lo dice.
+**What changes in the code (minimum).**
+- A `FAMILIES` table at the top of `ryzenctl`, indexed by the driver's codename, which
+  absorbs the constants scattered today (`GRANITE_RIDGE`, `CORES`, `PM_FAMILY`, `PM`, `PM_CORE_*`,
+  `CMD`): per family name, SMU IDs (`co_set`, `co_get`, `ppt/tdc/edc_set`, `fmax_set/get`,
+  `tjmax_set`, `shaper_set/get`) with the mailbox of each, PM table offsets (`ppt_limit`,
+  `ppt`, `tdc_limit`, `tdc`, `edc_limit`, `edc`, `thm_limit`, `tctl`, voltage/MHz/temperature
+  per core), allowed PM table versions (prefix `>>16`: 0x62 Granite Ridge, 0x54 Raphael,
+  0x38 Vermeer, 0x24 Matisse), maximum Tjmax (95 Granite Ridge/Raphael/Matisse, 90 Vermeer and
+  Zen 3 X3D; to be confirmed per family), unlock ceilings. An entry can omit a key:
+  function disabled for that family (Curve Shaper only on Zen 5; Tjmax and CO readback where
+  ZenStates has no ID). The rest of the code keeps calling `smu("co_set", …)` and
+  `PM["ppt_limit"]`: only what fills `CMD` and `PM` changes (from the entry chosen by `check_cpu`).
+- Gate: `check_cpu` looks up the codename in `FAMILIES`; absent → total refusal as today (fail
+  closed). An ID outside the family's entry is never sent: the allowlist stays strict, there is
+  just one per family.
+- Dynamic `CORES`: number of physical cores and CCDs read from sysfs (`topology/core_id`,
+  `thread_siblings_list`, `topology/die_id`), no longer the constant 8. Logical → physical
+  core map for the CO: today `core << 20` (right only with 1 CCD/1 CCX); ZenStates builds the
+  mask as `((ccd << 8) | (ccx << 4) | core) << 20`, so on 2 CCDs core 8 is
+  `(1 << 8) << 20`, not `8 << 20` — **to be verified with the 0xD5 readback** (the only proof
+  that counts: the set answers OK even with the wrong mask). Fused-off cores (7600X3D: 6 of 8)
+  → the map skips the indices absent from sysfs. `core_cpus`/`best_core`/`co_test` use the
+  map, not `c % CORES`.
+- Parametrised fake backend: `Fake.DEFAULT` takes the family from `RYZENCTL_FAKE_FAMILY`
+  (default Granite Ridge); the selftest runs the same suite on 2-3 fake families, including an
+  APU without PM table (PPT/TDC/EDC/Tjmax refused, CO/FMax ok) and a 16-core CPU (CO on
+  16 lines, profiles and baseline with 16 values, CCD mask in the fake that refuses `8 << 20`).
+- GUI: rows of the Curves page and columns of the Monitor from `status.cores`; family and
+  codename shown in the status; functions disabled per family with the reason ("Curve Shaper:
+  only Ryzen 9000"), neither hidden nor in error.
+- `hwtest` remains the reversible verification on real hardware: writes and reads back every
+  function of the family, restores the baseline. **No family is "supported" until someone
+  has an ok `hwtest`** on that CPU: in the README a table "Processors: verified /
+  expected / not supported" with CPU, codename, SMU, PM table and who verified it. The
+  families from ZenStates without `hwtest` stay "expected" and the GUI says so.
 
-**Rischi e invarianti.**
-- Gli ID pericolosi cambiano per famiglia: MP1 0x58–0x6F congela il 9800X3D e MP1 0x10 spegne
-  il display, ma su Vermeer/Raphael la numerazione MP1 è diversa; l'elenco di cosa non si manda
-  va rifatto per famiglia dalle fonti, mai supposto per analogia. Restano proibiti ovunque:
-  tensione/VID, OC mode, PBO scalar, `smn`, FCLK/memoria.
-- PM table assente o versione fuori dall'elenco della famiglia → PPT/TDC/EDC/Tjmax rifiutati
-  (fail closed), come oggi. Offset della PM table diversi per versione dentro la stessa
-  famiglia (0x540xxx vs 0x5401xx): la voce elenca solo le versioni con la mappa verificata.
-- Baseline e profili con numero di core diverso dal boot (cambio CPU, aggiornamento): righe
-  `co` con lunghezza ≠ `CORES` ignorate come oggi le righe non più ammesse
+**Risks and invariants.**
+- The dangerous IDs change per family: MP1 0x58–0x6F freezes the 9800X3D and MP1 0x10 turns
+  off the display, but on Vermeer/Raphael the MP1 numbering is different; the list of what is
+  not sent must be redone per family from the sources, never assumed by analogy. Forbidden
+  everywhere: voltage/VID, OC mode, PBO scalar, `smn`, FCLK/memory.
+- PM table absent or version outside the family's list → PPT/TDC/EDC/Tjmax refused
+  (fail closed), as today. Different PM table offsets per version within the same
+  family (0x540xxx vs 0x5401xx): the entry lists only the versions with a verified map.
+- Baseline and profiles with a core count different from the boot's (CPU change, update):
+  `co` lines with length ≠ `CORES` ignored like the lines no longer allowed are today
   (`profile_lines("baseline")`).
-- Mobile: limiti STAPM/fast/slow PPT (RyzenAdj), niente RSMU su molte APU, Tjmax 100: fuori dal
-  perimetro della prima ondata, la tabella li ammette solo quando un `hwtest` li conferma.
-- La fase non è verificabile per intero su questo hardware (solo Granite Ridge): il tag
-  `v0.5.0` certifica il refactor (selftest multi-famiglia + `hwtest` ok sul 9800X3D, nessuna
-  regressione), non il supporto delle altre famiglie, che arriva con `hwtest` di terzi.
+- Mobile: STAPM/fast/slow PPT limits (RyzenAdj), no RSMU on many APUs, Tjmax 100: outside the
+  scope of the first wave, the table admits them only when a `hwtest` confirms them.
+- The phase cannot be verified in full on this hardware (Granite Ridge only): the tag
+  `v0.5.0` certifies the refactor (multi-family selftest + `hwtest` ok on the 9800X3D, no
+  regression), not the support of the other families, which comes with third-party `hwtest`.
 
-| # | Commit | Verifica |
+| # | Commit | Verification |
 |---|---|---|
-| 18 | `refactor(ryzenctl): tabella FAMILIES, CORES dinamico, gate per famiglia` | selftest su Granite Ridge finto identico a prima + suite ripetuta su 16 core finti e su APU finto senza PM table; **tu**: `hwtest` sul 9800X3D invariato, `status` mostra famiglia e core |
-| 19 | `feat(ryzenctl): Raphael/Vermeer/Matisse da ZenStates-Core` | selftest con le tre voci finte (ID, encoding CO con CCD, offset PM); `hwtest` su hardware vero di terzi, una famiglia alla volta → passa da "atteso" a "verificato" |
-| 20 | `feat(gui): core dinamici, famiglia mostrata, funzioni disabilitate spiegate` | `--mock` con `RYZENCTL_FAKE_FAMILY` = Granite Ridge / 16 core / APU: tabella Curve a 8/16 righe, Shaper disabilitato con motivo, nessun errore |
-| 21 | `docs: tabella processori nel README` | `make check`; README con la tabella verificato/atteso/non supportato e la procedura `hwtest` per chi vuole aggiungere la sua CPU |
+| 18 | `refactor(ryzenctl): FAMILIES table, dynamic CORES, per-family gate` | selftest on the fake Granite Ridge identical to before + suite repeated on a fake 16-core CPU and on a fake APU without PM table; **you**: `hwtest` on the 9800X3D unchanged, `status` shows family and cores |
+| 19 | `feat(ryzenctl): Raphael/Vermeer/Matisse from ZenStates-Core` | selftest with the three fake entries (IDs, CO encoding with CCD, PM offsets); `hwtest` on third-party real hardware, one family at a time → goes from "expected" to "verified" |
+| 20 | `feat(gui): dynamic cores, family shown, disabled functions explained` | `--mock` with `RYZENCTL_FAKE_FAMILY` = Granite Ridge / 16 cores / APU: Curves table with 8/16 rows, Shaper disabled with reason, no error |
+| 21 | `docs: processors table in the README` | `make check`; README with the verified/expected/not supported table and the `hwtest` procedure for whoever wants to add their CPU |
 
-### Fase 6 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.6.0`
-Richiesta utente (rev. 6). Icona `StatusNotifierItem` (protocollo nativo di KDE Plasma, su
-GNOME serve l'estensione AppIndicator) con menu `com.canonical.dbusmenu`, implementati
-direttamente su D-Bus con `Gio` di PyGObject: nessuna dipendenza nuova, funziona su Wayland
-(GTK4 non ha più la StatusIcon). È lo stesso processo `ryzen-control` avviato con `--tray`
-dall'autostart al login (finestra nascosta, un solo processo: l'autostart `ryzenctl-notify`
-viene assorbito, il banner crash diventa voce del menu).
-- Menu rapido: modalità **Default / Quiet / Performance / Eco / Auto / Boost** (spunta su quella attiva),
-  **Applica all'avvio** on/off, **Apri Ryzen Control**, **Esci**; dopo un crash in testa la voce
-  "Profilo disattivato dopo un crash: Riattiva / Resta su Default".
-- Tooltip e icona di stato: Tctl e PPT attuali aggiornati ogni 2 s (icona normale /
-  attenzione se Tctl > target Eco); nessun polling SMU senza `serve` attivo: finché non
-  si fa un'azione privilegiata si legge solo k10temp.
-- Prima azione privilegiata della sessione → un solo prompt pkexec (come la GUI).
-| # | Commit | Verifica |
+### Phase 6 — system tray icon (bottom right, Telegram style) → `v0.6.0`
+User request (rev. 6). `StatusNotifierItem` icon (KDE Plasma's native protocol, on GNOME the
+AppIndicator extension is needed) with a `com.canonical.dbusmenu` menu, implemented directly on
+D-Bus with PyGObject's `Gio`: no new dependency, works on Wayland (GTK4 no longer has the
+StatusIcon). It is the same `ryzen-control` process started with `--tray` by the autostart at
+login (hidden window, a single process: the `ryzenctl-notify` autostart is absorbed, the crash
+banner becomes a menu entry).
+- Quick menu: modes **Default / Quiet / Performance / Eco / Auto / Boost** (check mark on the active one),
+  **Apply at boot** on/off, **Open Ryzen Control**, **Quit**; after a crash, at the top, the entry
+  "Profile disabled after a crash: Reactivate / Stay on Default".
+- Tooltip and status icon: current Tctl and PPT updated every 2 s (normal icon / warning if
+  Tctl > Eco target); no SMU polling without an active `serve`: until a privileged action is
+  done only k10temp is read.
+- First privileged action of the session → a single pkexec prompt (like the GUI).
+| # | Commit | Verification |
 |---|---|---|
-| 22 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
+| 22 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icon in Plasma, menu, mode check mark; **you**: mode change from the menu → `ryzenctl status` changes; pkexec prompt only once |
 
-### Fase 7 — altre distro → `v0.7.0`
-| # | Commit | Verifica |
+### Phase 7 — other distros → `v0.7.0`
+| # | Commit | Verification |
 |---|---|---|
-| 23 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
-| 24 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
+| 23 | `build(deb): packaging/debian` | `dpkg-buildpackage` if available, otherwise marked untested |
+| 24 | `build(arch): PKGBUILD` | `namcap` if available, otherwise marked untested |
 
-## Verifica
+## Verification
 
-1. `python3 ryzenctl selftest` (senza hardware): codifiche CO/Shaper, validazione e tetti,
-   parse profili, baseline/Default, readback fallito → ripristino, macchina a stati del
-   crash-guard (tutti gli scenari elencati), ordine marker (dirty e active prima della
-   scrittura SMU finta).
-2. Pacchetti: `rpmbuild -ba packaging/ryzen-control.spec` pulito; `sudo dnf install` dei due
-   RPM → `dkms status` = `ryzen_smu/<ver>, <kernel>: installed`; `modinfo -F signer` = chiave
-   dkms (o akmods con drop-in); dopo `mokutil --import` + riavvio: `lsmod | grep ryzen_smu`
-   vuoto finché il servizio non parte (blacklist), `systemctl start ryzenctl` → modulo
-   caricato, `/sys/kernel/ryzen_smu_drv/codename` = 23; `dnf remove` rimuove tutto.
-3. `sudo ryzenctl status` = valori BIOS (CO, FMax ~5200, PPT/TDC/EDC 162/120/180 o PBO scheda).
-4. Scritture minime reversibili con readback: `co 7 -3`→`co 7 0`; `ppt 150`→baseline;
-   `fmax 5000` (sotto carico ≤5000 MHz)→baseline; `tjmax 85`→baseline; `shaper 4 -2 -2 -2`→0.
-5. Crash-guard: profilo innocuo (es. `ppt 150`) con autostart; `sync; echo b >
-   /proc/sysrq-trigger` → al boot `crashed` presente, `ryzenctl status` = baseline, notifica
-   al login; `systemctl restart ryzenctl` → baseline invariata; riavvio pulito → apply
-   normale; suspend/resume → status = profilo; boot con `ryzenctl.off` → modulo non caricato,
-   nulla applicato; kernel update → `dkms.service` ricompila, servizio parte dopo.
-6. GUI: avvio da menu (voce in Discover grazie al metainfo), un solo prompt pkexec, monitor
-   aggiornato, Applica/Salva funzionano, banner crash con Riattiva/Resta.
-7. Ventole: `sensors` mostra nct67xx; `fan autodetect` classifica la pompa come "pompa"
-   (ΔT riportato) e le ventole del radiatore come "ventola"; `fan role N ventola` non esiste;
-   canale pompa rifiutato in scrittura; step up 10 s → un picco di carico di 2 s non alza gli
-   RPM; pompa a RPM invariati per tutta la prova.
-8. Calibrazione: Eco riduce p95 picchi Tctl sotto target; Auto produce una tabella
-   monotona (W ↓ ⇒ ops/s ↓) e sceglie PPT/FMax con perdita ≤ slider, ops/W del punto scelto
-   > ops/W di Boost; auto-tuning su 1 core con passi da 1 min per prova rapida.
+1. `python3 ryzenctl selftest` (without hardware): CO/Shaper encodings, validation and ceilings,
+   profile parsing, baseline/Default, failed readback → restore, crash-guard state machine
+   (all the scenarios listed), marker order (dirty and active before the fake SMU write).
+2. Packages: clean `rpmbuild -ba packaging/ryzen-control.spec`; `sudo dnf install` of the two
+   RPMs → `dkms status` = `ryzen_smu/<ver>, <kernel>: installed`; `modinfo -F signer` = dkms
+   key (or akmods with drop-in); after `mokutil --import` + reboot: `lsmod | grep ryzen_smu`
+   empty until the service starts (blacklist), `systemctl start ryzenctl` → module
+   loaded, `/sys/kernel/ryzen_smu_drv/codename` = 23; `dnf remove` removes everything.
+3. `sudo ryzenctl status` = BIOS values (CO, FMax ~5200, PPT/TDC/EDC 162/120/180 or board PBO).
+4. Minimal reversible writes with readback: `co 7 -3`→`co 7 0`; `ppt 150`→baseline;
+   `fmax 5000` (under load ≤5000 MHz)→baseline; `tjmax 85`→baseline; `shaper 4 -2 -2 -2`→0.
+5. Crash-guard: harmless profile (e.g. `ppt 150`) with autostart; `sync; echo b >
+   /proc/sysrq-trigger` → at boot `crashed` present, `ryzenctl status` = baseline, notification
+   at login; `systemctl restart ryzenctl` → baseline unchanged; clean reboot → normal apply;
+   suspend/resume → status = profile; boot with `ryzenctl.off` → module not loaded,
+   nothing applied; kernel update → `dkms.service` rebuilds, the service starts afterwards.
+6. GUI: start from the menu (entry in Discover thanks to the metainfo), a single pkexec prompt,
+   monitor updated, Apply/Save work, crash banner with Reactivate/Stay.
+7. Fans: `sensors` shows nct67xx; `fan autodetect` classifies the pump as "pompa"
+   (ΔT reported) and the radiator fans as "ventola"; `fan role N ventola` does not exist;
+   pump channel refused on write; step up 10 s → a 2 s load spike does not raise the
+   RPM; pump at unchanged RPM for the whole test.
+8. Calibration: Eco lowers the p95 of the Tctl peaks below the target; Auto produces a
+   monotonic table (W ↓ ⇒ ops/s ↓) and chooses PPT/FMax with loss ≤ slider, ops/W of the chosen
+   point > ops/W of Boost; auto-tuning on 1 core with 1 min steps for a quick test.

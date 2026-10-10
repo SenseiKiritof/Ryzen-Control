@@ -4,8 +4,10 @@
 <policyconfig>
   <vendor>Ryzen Control</vendor>
   <action id="org.ryzencontrol.RyzenControl.serve">
-    <description>Controllare limiti, curve e ventole del processore</description>
-    <message>Per modificare le impostazioni del processore è richiesta l'autenticazione</message>
+    <description>Control the processor's limits, curves and fans</description>
+    <description xml:lang="it">Controllare limiti, curve e ventole del processore</description>
+    <message>Authentication is required to change the processor settings</message>
+    <message xml:lang="it">Per modificare le impostazioni del processore è richiesta l'autenticazione</message>
     <icon_name>org.ryzencontrol.RyzenControl</icon_name>
     <defaults>
       <allow_any>auth_admin</allow_any>
