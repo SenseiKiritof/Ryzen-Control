@@ -3,7 +3,7 @@ Name:           ryzen-control
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
 Version:        0.4.3
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -122,6 +122,11 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-3
+- Monitor graph with legend, coloured axes, PPT limit line and time hint; Preferences tab for
+  startup and limits; fan rows of the profile tables aligned and Eco fan texts matching the curve;
+  Fans page flag to show unknown channels (remembered)
+
 * Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-2
 - Moderate fan level (Auto and Boost default): BIOS curve +10 % with full speed at 100 °C instead
   of 125 °C, rise 3 s / fall 2 s
