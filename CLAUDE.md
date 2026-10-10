@@ -33,7 +33,7 @@ in ryzenctl è una macchina a passi (`start/step/status/abort/estimate`, stato i
 `/var/lib/ryzenctl/autotune.json`, ripresa dopo crash, parallelo di default). Eco verificata su
 hardware (CO −20 su 8 core, ≈ 3,4 mV/passo, FMax invariata); Auto (ginocchio PPT/FMax con RAPL)
 in verifica; Boost calibrata, pompa con tetto o velocità fissa, scelta a fine calibrazione (Annulla / Salva /
-Salva e applica), `trust`, avvio al login, notifica cliccabile. Tag `v0.4.0` (VERSION 0.4.0). Poi: fase 5 supporto a tutti i Ryzen (tabella `FAMILIES` per
+Salva e applica), `trust`, avvio al login, notifica cliccabile. Tag `v0.4.1` (VERSION 0.4.1). Poi: fase 5 supporto a tutti i Ryzen (tabella `FAMILIES` per
 codename, `CORES` dinamico, gate fail closed), fase 6 icona nel vassoio (StatusNotifierItem +
 dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi), fase 7 deb/PKGBUILD.
 
