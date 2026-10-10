@@ -1061,13 +1061,13 @@ class ModesPage(Gtk.ScrolledWindow):
         self.loading = False
         content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_top=12, margin_bottom=24, margin_start=12, margin_end=12)
         self.set_child(Adw.Clamp(child=content, maximum_size=1400, tightening_threshold=1000))   # due colonne: più larga di una PreferencesPage
-        # due colonne (una sola se la finestra è stretta): a sinistra preset e scelte manuali, a destra le calibrate
-        cols = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=18, row_spacing=18, homogeneous=True,
-                           min_children_per_line=1, max_children_per_line=2)
+        # due colonne sempre affiancate (un FlowBox le metteva una sotto l'altra: le righe espanse
+        # chiedono più larghezza naturale di metà finestra), a sinistra preset e scelte manuali, a destra le calibrate
+        cols = Gtk.Box(spacing=18, homogeneous=True)
         lists = {}
         for name, title, desc in (("preset", "Preset", "Valori fissi ricavati da quelli di fabbrica, nessun test; più Default e Custom"),
                                   ("calibrate", "Calibrate", "Misurate su questa CPU con test di carico (Calibra…)")):
-            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.START)
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.START, hexpand=True)
             col.append(label(title, ["heading"]))
             col.append(label(desc, ["dim-label", "caption"], wrap=True))
             lists[name] = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
@@ -1091,7 +1091,7 @@ class ModesPage(Gtk.ScrolledWindow):
             if key in PRESETS:
                 # suffissi compatti: con troppi pulsanti larghi il titolo veniva schiacciato a una colonna
                 row.set_title_lines(1)
-                row.set_subtitle_lines(2)
+                row.set_subtitle_lines(3)          # colonna a metà finestra: il sottotitolo ha bisogno di una riga in più
                 tag = Gtk.Label(label="calibrata" if key in CALIBRATED else "preset", valign=Gtk.Align.CENTER,
                                 tooltip_text="Si adatta all'hardware con test di carico" if key in CALIBRATED
                                 else "Valori fissi ricavati da quelli di fabbrica, nessun test")
