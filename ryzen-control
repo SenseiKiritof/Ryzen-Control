@@ -41,9 +41,12 @@ except locale.Error:
 APP_ID = "org.ryzencontrol.RyzenControl"
 DEV_RYZENCTL = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ryzenctl")
 RYZENCTL = DEV_RYZENCTL if os.path.exists(DEV_RYZENCTL) else "/usr/bin/ryzenctl"
+# --mock keeps everything in the fake root: RYZENCTL_ROOT from outside (a fresh one in make screenshots), otherwise one per session.
+MOCK_DIR = os.environ.get("RYZENCTL_ROOT") or os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
 # The user's XDG autostart entry for "Start Ryzen Control at login"; in --mock it stays in the mock directory.
-LOGIN_DESKTOP = os.path.join(os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
-                             if "--mock" in sys.argv else os.path.join(GLib.get_user_config_dir(), "autostart"), APP_ID + ".desktop")
+LOGIN_DESKTOP = os.path.join(MOCK_DIR if "--mock" in sys.argv else os.path.join(GLib.get_user_config_dir(), "autostart"), APP_ID + ".desktop")
+# Per-user GUI preferences (ui_load/ui_save), not ryzenctl's root settings; in --mock in the mock directory.
+UI_FILE = os.path.join(MOCK_DIR if "--mock" in sys.argv else os.path.join(GLib.get_user_config_dir(), "ryzen-control"), "ui.json")
 POWER = ("power-saver", "balanced", "performance")
 PRESETS = ("quiet", "performance", "eco", "auto", "boost")
 CALIBRATED = ("eco", "auto", "boost")   # adapt to the hardware with load tests; the others are fixed presets
@@ -122,10 +125,8 @@ class Helper:
     def __init__(self, mock):
         env = dict(os.environ)
         if mock:
-            # RYZENCTL_ROOT from outside: a fresh fake backend (make screenshots); otherwise one per session
-            root = os.environ.get("RYZENCTL_ROOT") or os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
-            os.makedirs(root, exist_ok=True)
-            env["RYZENCTL_ROOT"] = root
+            os.makedirs(MOCK_DIR, exist_ok=True)
+            env["RYZENCTL_ROOT"] = MOCK_DIR
             subprocess.run([RYZENCTL, "boot"], env=env, check=False, stdout=subprocess.DEVNULL)   # the baseline of the fake "boot"
             cmd = [RYZENCTL, "serve"]
         else:
@@ -186,6 +187,24 @@ def bg(work, done, fail):
             return
         GLib.idle_add(done, out)
     threading.Thread(target=run, daemon=True).start()
+
+
+def ui_load():
+    """Per-user GUI preferences (UI_FILE); a missing or corrupt file gives the defaults (empty dict)."""
+    try:
+        with open(UI_FILE) as f:
+            prefs = json.load(f)
+    except (OSError, ValueError):
+        prefs = None
+    return prefs if isinstance(prefs, dict) else {}
+
+
+def ui_save(prefs):
+    """Temporary file + rename: an interrupted write never leaves half a file."""
+    os.makedirs(os.path.dirname(UI_FILE), exist_ok=True)
+    with open(UI_FILE + ".tmp", "w") as f:
+        json.dump(prefs, f)
+    os.replace(UI_FILE + ".tmp", UI_FILE)
 
 
 def fmt(v, unit=""):
@@ -744,6 +763,7 @@ class MonitorPage(Gtk.Box):
             if pwm is None:   # telemetry does not carry the pwm: last `fan status` (updated at every reload)
                 pwm = next((c["pwm"] for c in (self.win.status.get("fans") or {}).get("canali", []) if c["canale"] == f["canale"]), None)
             role = f.get("role", "sconosciuto")
+            lab.set_visible(role != "sconosciuto" or bool(self.win.ui.get("show_unknown_fans")))   # same choice as the Fans page
             lab.set_text(_("%s (%s) · %d rpm%s") % (f.get("name") or _("Channel %d") % f["canale"], ROLE_NAMES.get(role, role), f["rpm"],
                                                    " · pwm %d (%d %%)" % (pwm, pwm_pct(pwm)) if pwm is not None else ""))
         if not self.fan_labels:
@@ -1512,6 +1532,12 @@ class FansPage(Page):
         self.chans = {}     # n -> (up, down, editor, info) of the "fan" channels
         self.pumps = {}     # n -> (fixed-speed switch, Param %, info) of the "pump" channels
         self.cards = []
+        self.unknown_cards = []   # cards of the "unknown" channels: shown only on request
+        self.unknown = Adw.SwitchRow(title=_("Show unknown channels"), active=bool(win.ui.get("show_unknown_fans")))
+        self.unknown.connect("notify::active", self.on_unknown)
+        self.unknown_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"], visible=False)
+        self.unknown_list.append(self.unknown)
+        self.body.append(self.unknown_list)
         self.missing = card()
         self.missing.append(label(_("Fans not available"), ["heading"]))
         self.missing_text = label("", ["dim-label"], wrap=True)
@@ -1532,6 +1558,7 @@ class FansPage(Page):
     def show_missing(self, msg):
         self.missing_text.set_text(msg + "\n\n" + FAN_MISSING_HELP)
         self.missing.set_visible(True)
+        self.unknown_list.set_visible(False)
         self.bar.set_sensitive(False)
         self.clear()
 
@@ -1543,10 +1570,26 @@ class FansPage(Page):
     def clear(self):
         for c in self.cards:
             self.body.remove(c)
-        self.cards, self.chans, self.pumps = [], {}, {}
+        self.cards, self.chans, self.pumps, self.unknown_cards = [], {}, {}, []
+
+    def on_unknown(self, row, _p):
+        self.win.ui["show_unknown_fans"] = row.get_active()
+        try:
+            ui_save(self.win.ui)
+        except OSError as e:
+            self.win.toast(str(e))
+        self.filter_unknown()
+
+    def filter_unknown(self):
+        """Hidden, not rebuilt: values being edited in the other cards are kept."""
+        on = self.unknown.get_active()
+        for box in self.unknown_cards:
+            box.set_visible(on)
+        self.unknown.set_subtitle(_("Hidden: %d") % len(self.unknown_cards) if self.unknown_cards and not on else "")
 
     def show(self, fs):
         self.missing.set_visible(False)
+        self.unknown_list.set_visible(True)
         self.bar.set_sensitive(True)
         self.clear()
         for c in fs["canali"]:
@@ -1598,8 +1641,11 @@ class FansPage(Page):
                     show_rpm()
                 box.append(speed)
                 self.pumps[n] = (mode, speed, c)
+            elif role == "sconosciuto":
+                self.unknown_cards.append(box)
             self.body.append(box)
             self.cards.append(box)
+        self.filter_unknown()
 
     def identify(self, n):
         self.win.toast(_("Channel %d at 100 %% for 5 seconds…") % n)
@@ -1656,6 +1702,7 @@ class Window(Adw.ApplicationWindow):
         super().__init__(application=app, title="Ryzen Control", default_width=840, default_height=700)
         self.h = helper
         self.status = {}
+        self.ui = ui_load()   # per-user preferences shared by the pages, saved with ui_save
         self.polling = False
         self.stack = Adw.ViewStack()
         self.toasts = Adw.ToastOverlay(child=self.stack)
@@ -1915,8 +1962,9 @@ class App(Adw.Application):
 
     def run_smoke(self):
         """--mock --smoke (make check): the calibration window shows every real state of the fake
-        backend for eco, auto and boost (all phases, end, resume dialog), then the app exits; a
-        rendering error becomes exit code 1 instead of a traceback on the desktop."""
+        backend for eco, auto and boost (all phases, end, resume dialog), the Fans page flag for unknown
+        channels hides/shows them and is saved, then the app exits; a rendering error becomes exit code 1
+        instead of a traceback on the desktop."""
         win = self.props.active_window
         try:
             win.h.call("autotune", "abort")
@@ -1937,6 +1985,11 @@ class App(Adw.Application):
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
                             "results": {str(c): -35 for c in range(8)}, "unstable": {"0": {"value": -40, "why": "crash"}}})
+            fans = win.pages[-1]
+            fans.show({"canali": [{"canale": 9, "rpm": 0, "pwm": 0, "modo": 5}]})   # no role = unknown
+            for on in (not fans.unknown.get_active(), fans.unknown.get_active()):   # flip and back: the user's choice stays
+                fans.unknown.set_active(on)
+                assert fans.unknown_cards[0].get_visible() == on and ui_load().get("show_unknown_fans") == on
         except Exception:
             import traceback
             traceback.print_exc()

@@ -94,7 +94,8 @@ back), "Save to profile…" keeps them.
 **Fans** — the BIOS SmartFan stays in charge: you only change how fast each fan follows its
 curve (rise/fall) and the curve points, with the estimated rpm. Pumps and non-controllable
 channels are protected; the pump can only be left to the BIOS (recommended), capped, or set to a
-fixed speed (never below 50 %).
+fixed speed (never below 50 %). Channels with an unknown role stay hidden, also in Monitor, until
+you turn on "Show unknown channels"; the choice is remembered.
 
 ![Fans page](docs/screenshots/fans.png)
 
