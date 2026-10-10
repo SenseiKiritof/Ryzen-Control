@@ -1,5 +1,5 @@
 [Unit]
-Description=Ryzen Control: riapplica il profilo dopo il resume (S3 riporta l'SMU ai valori BIOS)
+Description=Ryzen Control: reapplies the profile after resume (S3 returns the SMU to the BIOS values)
 After=suspend.target hibernate.target hybrid-sleep.target suspend-then-hibernate.target
 ConditionKernelCommandLine=!ryzenctl.off
 
