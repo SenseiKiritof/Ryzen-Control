@@ -21,7 +21,7 @@ Module.symvers
 modules.order
 .tmp_versions/
 
-# Pacchetti
+# Packages
 build/
 dist/
 *.tar.gz
