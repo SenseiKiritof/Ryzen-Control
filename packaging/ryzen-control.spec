@@ -122,7 +122,7 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
-* Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-1
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-1
 - Source, documentation and UI in English; UI and ryzenctl messages follow the system language
   (gettext, Italian catalog); CLI `unlock` crash fixed
 
