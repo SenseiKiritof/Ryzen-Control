@@ -119,6 +119,9 @@ CLI: sudo ryzenctl …  ──────────────────�
 systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib/ryzenctl, /run/ryzenctl
 ```
 
+- **A profile = baseline + its own lines** (`with_stock` in `profile_lines`): the stock values of
+  what it does not set (CPU keys, fan `step`/`curve` of "ventola" channels; never the pump) come first,
+  so `profile show`, `apply` and the boot always see and write a complete state.
 - **A single command grammar** (`co 7 -3`, `ppt 88`, `fmax 4800`, `shaper 4 -5 -5 0`,
   `power balanced`, …) used identically by the CLI, profile file lines and the `serve` protocol
   (one JSON-array line per request, one `{"ok":…}` line as reply; `boot/shutdown/resume/serve`

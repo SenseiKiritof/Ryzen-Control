@@ -1981,6 +1981,11 @@ class App(Adw.Application):
         h = win.h
         h.call("fan", "autodetect")
         h.call("fan", "identify", "1")
+        # a new fake boot: as on a real machine the fan roles exist at boot, so the baseline has the BIOS fan lines
+        run_dir = os.path.join(MOCK_DIR, "run", "ryzenctl")
+        for f in os.listdir(run_dir):
+            os.remove(os.path.join(run_dir, f))
+        subprocess.run([RYZENCTL, "boot"], env=dict(os.environ, RYZENCTL_ROOT=MOCK_DIR), check=True, stdout=subprocess.DEVNULL)
         for name in ("quiet", "performance"):
             h.call("preset", name)
         dlg = AutotuneDialog(win, "eco")   # the real flow: steps in the background, choice at the end

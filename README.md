@@ -109,7 +109,10 @@ value per command, then restores the baseline.
 
 ## Usage (CLI)
 
-All commands share the same grammar on the CLI, in profile files and in the GUI.
+All commands share the same grammar on the CLI, in profile files and in the GUI. A profile is
+the stock state (the baseline captured at boot) with its own lines on top: whatever it does not set
+— a fan curve, a limit — is applied and shown at its stock value, so switching mode never leaves
+the previous mode's fans or limits behind. The pump is never part of a mode.
 
 ```sh
 sudo ryzenctl status                 # current state and baseline

@@ -829,8 +829,28 @@ def profile_lines(name):
     except OSError:
         raise Err(_("profile '%s' does not exist") % name)
     if name == "baseline":  # written by us: an older version may contain lines excluded today (shaper)
-        lines = [t for t in lines if t[0] in PROFILE_CMDS]
-    return lines
+        return [t for t in lines if t[0] in PROFILE_CMDS]
+    return with_stock(lines)
+
+
+def with_stock(lines):
+    """A profile is the baseline overridden by its own lines: whatever it does not set (an older or
+    hand-made profile without a fan curve or without CPU limits) is the stock value, written first.
+    So every mode shows and applies a complete state, and switching mode never leaves the previous
+    mode's fans or limits behind. The pump is left out: it is never part of a mode."""
+    try:
+        base = profile_lines("baseline")
+    except Err:
+        return lines
+    have = {tuple(t[:3]) if t[0] == "fan" else (t[0],) for t in lines}
+    full_co = any(t[0] == "co" and (len(t) == CORES + 1 or t[1:2] == ["all"]) for t in lines)   # "co 7 -3" alone: the other cores at stock
+    fans = fans_dir()
+    stock = [t for t in base
+             if (t[0] == "fan" and fans and len(t) > 2 and t[2] in ("step", "curve") and tuple(t[:3]) not in have
+                 and fan_role(int(t[1])) == "ventola")
+             or (t[0] == "co" and not full_co)
+             or (t[0] not in ("fan", "co") and (t[0],) not in have)]
+    return stock + lines
 
 
 def apply_lines(lines, ctx, part=None):
@@ -950,8 +970,8 @@ def cmd_preset(ctx, args):
     if not args or args[0] not in PRESETS or len(args) > 2 or (len(args) == 2 and args[1] != "show"):
         raise Err(_("usage: preset quiet|performance|eco|auto|boost [show]"))
     lines = preset_lines(args[0], load_baseline())
-    if len(args) == 2:
-        return {"profile": args[0], "lines": lines}
+    if len(args) == 2:   # what the profile will show and apply once created (stock values included)
+        return {"profile": args[0], "lines": [" ".join(t) for t in with_stock([l.split() for l in lines])]}
     return cmd_profile(ctx, ["save", args[0]] + lines)
 
 
@@ -1818,8 +1838,8 @@ def at_fan_lines(st, base):
     for n in fan_channels(d):
         if fan_role(n) != "ventola":
             continue
-        if not level:   # BIOS: baseline steps (the BIOS curves are left alone)
-            lines += [" ".join(t) for t in profile_lines("baseline") if t[:3] == ["fan", str(n), "step"]]
+        if not level:   # BIOS: the baseline steps and curve, written out so the proposal shows them
+            lines += [" ".join(t) for t in profile_lines("baseline") if t[:3] in (["fan", str(n), "step"], ["fan", str(n), "curve"])]
             continue
         bios = bios_curve(d, n)
         if level == 1:   # the BIOS shape, 10 % higher, full speed at 100 °C instead of its last point (125 °C)
@@ -2591,7 +2611,10 @@ def selftest():
     expect_err(["profile", "save", "q", "shaper 4 -2 -2 -2"], "not allowed")
     assert run(["profile", "save", "quiet", "ppt 150", "co all -10", "# comment", "fmax 5000", "power balanced"])["lines"] == 4
     assert run(["profile", "list"]) == {"profiles": ["quiet"], "active": None}
-    assert run(["profile", "show", "quiet"])["lines"][0] == "ppt 150"
+    shown = run(["profile", "show", "quiet"])["lines"]
+    # a profile shows and applies the stock values of what it does not set, first, then its own lines
+    assert shown[-4:] == ["ppt 150", "co all -10", "fmax 5000", "power balanced"] and "tdc 120" in shown and "edc 180" in shown, shown
+    assert not any(l.startswith("co ") for l in shown[:-4]), shown   # "co all" sets every core: no stock co line
     expect_err(["apply", "nope"], "does not exist")
     expect_err(["autostart", "on"], "no profile")
     assert run(["use", "quiet"]) == {"profile": "quiet"}
@@ -2648,7 +2671,7 @@ def selftest():
     # 4. "Re-enable": applied at once and at every clean boot
     run(["autostart", "on"])
     out = run(["apply", "quiet"])
-    assert out["applied"][0] == "ppt 150"
+    assert out["applied"][-4:] == ["ppt 150", "co all -10", "fmax 5000", "power balanced"] and "tdc 120" in out["applied"], out
     run(["shutdown"])
     reboot()
     out = run(["boot"])
@@ -2737,7 +2760,8 @@ def selftest():
     assert r["pwm"] == 153 and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 1 and r["rpm"] == 1500 + int(1300 * 153 / 255)
     assert "fan 2 pump 60" in fan_capture_lines()
     assert run(["fan", "2", "pump", "auto"])["modo"] == 5 and "fan 2 pump auto" in fan_capture_lines()
-    assert run(["profile", "save", "pp", "fan 2 pump 70"])["lines"] == 1 and run(["apply", "pp"])["applied"] == ["fan 2 pump 70"]
+    assert run(["profile", "save", "pp", "fan 2 pump 70"])["lines"] == 1
+    assert run(["apply", "pp", "fan"])["applied"][-1] == "fan 2 pump 70"   # its own line last, after the stock ones
     run(["fan", "2", "pump", "auto"])
     run(["profile", "delete", "pp"])
     # maximum cap: BIOS curve with the points above the cap reduced; auto restores it
@@ -2765,8 +2789,14 @@ def selftest():
     hw_write(Fake.FAN_DIR + "/pwm1_step_up_time", 400)
     out = run(["boot"])
     base = run(["baseline", "show"])
-    assert "fan" in " ".join(" ".join(t) for t in profile_lines("baseline"))
-    assert out["applied"]["fan"] == ["fan 1 step 12000 6000"] and hw_read(Fake.FAN_DIR + "/pwm1_step_up_time") == 12000
+    assert "fan 1 curve 40:77 50:110 60:150 70:200 80:255" in [" ".join(t) for t in profile_lines("baseline")]
+    # the profile sets only the step: the curve is the stock one, written too (no curve left over from another mode)
+    assert out["applied"]["fan"] == ["fan 1 curve 40:77 50:110 60:150 70:200 80:255", "fan 1 step 12000 6000"], out
+    assert hw_read(Fake.FAN_DIR + "/pwm1_step_up_time") == 12000
+    run(["fan", "1", "curve", "60:77", "75:255"])                 # a curve left by another mode (e.g. Eco)…
+    run(["apply", "f", "fan"])
+    assert run(["fan", "status"])["canali"][0]["curva"] == ["40:77", "50:110", "60:150", "70:200", "80:255"]   # …back to stock
+    assert not any(l.startswith("fan 2") for l in run(["profile", "show", "f"])["lines"])   # the pump is never part of a mode
     reboot()                                           # crash: not the CPU part, the fans yes
     out = run(["boot"])
     assert out["crashed"] and out["applied"]["fan"] and "crash" in out["errors"]["cpu"]
