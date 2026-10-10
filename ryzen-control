@@ -74,6 +74,8 @@ AT_PARAMS = (("target", "Tctl obiettivo", "°C", (50, 90)),
              ("colimit", "Limite CO (Curve Optimizer)", "", (-50, 0)),
              ("margin", "Margine di sicurezza", "", (0, 20)),
              ("step", "Durata di ogni test", "s", (30, 600)))
+FAN_LEVELS = ("BIOS: ventole invariate", "Moderate: salita 5 s, discesa 3 s, minimo fino a Tctl obiettivo −5 °C",
+              "Silenziose: salita 10 s, discesa 5 s, minimo fino a Tctl obiettivo −10 °C")
 AT_WARNING = ("Ogni core viene portato a CO (Curve Optimizer) sempre più negativo sotto carico (stress-ng) finché resta "
               "stabile, poi una passata finale su tutti i core; infine, per Eco la ricerca della FMax che tiene Tctl sotto "
               "l'obiettivo, per Auto il ginocchio prestazioni/watt, per Boost la misura del guadagno (MT e ST) rispetto alla "
@@ -1199,17 +1201,21 @@ class ModesPage(Gtk.ScrolledWindow):
             else:
                 auto = "tutti i core insieme, %s — %sCO (Curve Optimizer) fino a %d con margine %d, %d s per test." % (
                     mins(est["parallel_total_s"]), target, p["colimit"], p["margin"], p["step"])
+            fans = Adw.ComboRow(title="Ventole", model=Gtk.StringList.new(list(FAN_LEVELS)), selected=p.get("fans", 0),
+                                subtitle="Anche in automatico: quanto la modalità tocca le ventole (solo i canali riconosciuti come ventola)")
+            lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+            lb.append(fans)
             d = Adw.AlertDialog(heading="Calibrare la modalità %s?" % mode.capitalize(),
-                                body="Automatica (consigliata): %s\n\n%s\n\n%s" % (auto, AT_WARNING, CO_TIP))
+                                body="Automatica (consigliata): %s\n\n%s\n\n%s" % (auto, AT_WARNING, CO_TIP), extra_child=lb)
             d.add_response("cancel", "Annulla")
             d.add_response("custom", "Scegli i valori…")
             d.add_response("auto", "Automatica (consigliata)")
             d.set_response_appearance("auto", Adw.ResponseAppearance.SUGGESTED)
             def resp(_d, r):
                 if r == "auto":
-                    AutotuneDialog(self.win, mode).start(dict(p, parallel=1))
+                    AutotuneDialog(self.win, mode).start(dict(p, parallel=1, fans=fans.get_selected()))
                 elif r == "custom":
-                    self.calibrate_params(mode, est)
+                    self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected())))
             d.connect("response", resp)
             d.present(self.win)
         bg(lambda: self.win.h.call("autotune", "estimate", mode), ask, self.win.toast)
@@ -1228,10 +1234,13 @@ class ModesPage(Gtk.ScrolledWindow):
             group.add(r)
         parallel = Adw.SwitchRow(title="Test di tutti i core insieme (veloce, consigliato)", active=bool(est["params"].get("parallel", 1)))
         group.add(parallel)
+        fans = Adw.ComboRow(title="Ventole", model=Gtk.StringList.new(list(FAN_LEVELS)), selected=est["params"].get("fans", 0))
+        group.add(fans)
         repeat = Adw.SwitchRow(title="Ripeti la ricerca del limite CO", active=False, sensitive=bool(est.get("co_reuse")))
         group.add(repeat)
         estimate = label("", ["heading"], margin_top=6)
-        params = lambda: dict(((k, int(r.get_value())) for k, r in spins.items()), parallel=int(parallel.get_active()), reuse=int(not repeat.get_active()))
+        params = lambda: dict(((k, int(r.get_value())) for k, r in spins.items()), parallel=int(parallel.get_active()),
+                              reuse=int(not repeat.get_active()), fans=fans.get_selected())
         def show_est(e):
             estimate.set_text("Durata stimata: %s" % mins(e["total_s"]))
             parallel.set_subtitle(AT_PARALLEL_SUB % mins(e["sequential_total_s"]))

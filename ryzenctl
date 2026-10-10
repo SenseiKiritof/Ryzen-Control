@@ -948,9 +948,12 @@ AT_PATH = STATE + "/autotune.json"
 # (Eco fino a −50 = fondo scala, Auto/Boost −40; una misura più profonda vale per tutte) e
 # salvata in CO_LIMITS_PATH; ogni modalità applica il
 # proprio margine (Eco +5 = discreto, Auto/Boost +3). reuse=1 riusa la misura precedente.
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -50, "margin": 5, "step": 90, "parallel": 1, "reuse": 1},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1},
-               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1}}
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -50, "margin": 5, "step": 90, "parallel": 1, "reuse": 1, "fans": 2},
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1},
+               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 0}}   # senza target: le ventole usano quello di eco
+# fans: 0 = BIOS (step della baseline), 1 = moderate (5 s/3 s, minimo del BIOS fino a target−5 °C),
+# 2 = silenziose (10 s/5 s, minimo fino a target−10 °C); in tutti i casi 100 % a Tjmax−5 °C
+FAN_LEVELS = {1: (5000, 3000, 5), 2: (10000, 5000, 10)}
 CO_LIMITS_PATH = STATE + "/co_limits.json"
 BOOST_BENCHES = 4   # MT e ST a fabbrica e in boost: il guadagno misurato
 # parallel=1 (default): tutti i core insieme a ogni livello di CO, un worker per core (8x più
@@ -1242,6 +1245,7 @@ def at_params(mode, kvs):
         check_range("target", params["target"], 50, 90, " °C")
     check_range("parallel", params["parallel"], 0, 1)
     check_range("reuse", params["reuse"], 0, 1)
+    check_range("fans", params["fans"], 0, 2)
     if "loss" in params:
         check_range("loss", params["loss"], 1, 50, " %")
     return params
@@ -1418,8 +1422,8 @@ def boost_lines(st, base):
     for key in ("ppt", "tdc", "edc", "fmax"):
         if key in base:
             lines.append("%s %d" % (key, cap_of(base, key, unlock)))
-    lines += [l for l in preset_lines("boost", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax")]
-    return lines
+    lines += [l for l in preset_lines("boost", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax", "fan")]
+    return lines + at_fan_lines(st, base)
 
 
 def at_boost_bench(ctx, st, base):
@@ -1441,14 +1445,14 @@ def at_boost_bench(ctx, st, base):
 
 
 def at_finish_auto(ctx, st, base):
-    """Profilo auto: CO, limiti e FMax al ginocchio, ventole 3 s/2 s."""
+    """Profilo auto: CO, limiti e FMax al ginocchio, ventole secondo `fans` (default moderate)."""
     k = st["knee"]
     lim = at_scaled_limits(base, k["ppt"]["chosen"])
     co = "co " + " ".join(str(v) for v in st["final"])
     lines = [co] + ["%s %d" % (key, lim[key]) for key in ("ppt", "tdc", "edc") if lim[key] is not None]
     lines.append("fmax %d" % k["fmax"]["chosen"])
-    lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax")]
-    at_done(ctx, st, lines)
+    lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax", "fan")]
+    at_done(ctx, st, lines + at_fan_lines(st, base))
 
 
 def at_done(ctx, st, lines):
@@ -1779,19 +1783,33 @@ def at_final_failed(st, why=None):
         run(["apply", "baseline", "cpu"], {})
 
 
-def at_finish_eco(ctx, st, base):
-    """Profilo eco dalle misure: CO finale, FMax scelto, limiti eco, ventole lente + curva dal target."""
-    lines = ["co " + " ".join(str(v) for v in st["final"]), "fmax %d" % st["fmax"]["chosen"]]
-    lines += [l for l in preset_lines("eco", base) if l.split()[0] not in ("co", "fmax")]
+def at_fan_lines(st, base):
+    """Righe ventola della calibrazione secondo `fans` (vedi FAN_LEVELS); solo canali "ventola"."""
     d = fans_dir()
-    if d:
-        tj = min(base.get("tjmax", TJMAX_ABS_MAX), PRESETS["eco"]["tjmax"])
-        for n in fan_channels(d):
-            if fan_role(n) == "ventola":
-                cur = fan_info(d, n)["curva"]
-                pwm_min = int(cur[0].split(":")[1]) if cur else FAN_PWM_MIN
-                lines.append("fan %d curve %d:%d %d:255" % (n, st["params"]["target"] - 10, max(FAN_PWM_MIN, pwm_min), tj - 5))
-    at_done(ctx, st, lines)
+    if not d:
+        return []
+    level, lines = st["params"].get("fans", 0), []
+    for n in fan_channels(d):
+        if fan_role(n) != "ventola":
+            continue
+        if not level:   # BIOS: step della baseline (le curve del BIOS non vengono toccate)
+            lines += [" ".join(t) for t in profile_lines("baseline") if t[:3] == ["fan", str(n), "step"]]
+            continue
+        up, down, below = FAN_LEVELS[level]
+        tj = min(base.get("tjmax", TJMAX_ABS_MAX), PRESETS[st["mode"]]["tjmax"] or TJMAX_ABS_MAX)
+        lo = st["params"].get("target", AT_DEFAULTS["eco"]["target"]) - below
+        cur = fan_info(d, n)["curva"]
+        pwm_min = int(cur[0].split(":")[1]) if cur else FAN_PWM_MIN
+        lines.append("fan %d step %d %d" % (n, up, down))
+        lines.append("fan %d curve %d:%d %d:255" % (n, lo, max(FAN_PWM_MIN, pwm_min), max(tj - 5, lo + 5)))
+    return lines
+
+
+def at_finish_eco(ctx, st, base):
+    """Profilo eco dalle misure: CO finale, FMax scelto, limiti eco, ventole secondo `fans` (default silenziose)."""
+    lines = ["co " + " ".join(str(v) for v in st["final"]), "fmax %d" % st["fmax"]["chosen"]]
+    lines += [l for l in preset_lines("eco", base) if l.split()[0] not in ("co", "fmax", "fan")]
+    at_done(ctx, st, lines + at_fan_lines(st, base))
 
 
 # ---- Crash-guard: marker dirty / active / crashed -----------------------------------------
@@ -2854,6 +2872,8 @@ def selftest():
     assert run(["autotune", "save", "apply"]) == {"phase": None, "saved": "auto", "applied": True}
     auto = run(["profile", "show", "auto"])["lines"]
     assert "ppt 114" in auto and "tdc 84" in auto and "edc 127" in auto and "fmax 4725" in auto and "power balanced" in auto, auto
+    assert "fan 1 step 5000 3000" in auto and "fan 1 curve 65:77 90:255" in auto, auto   # fans=1: moderate, 100 % a Tjmax−5
+    expect_err(["autotune", "estimate", "auto", "fans=3"], "fuori")
     assert run(["status"])["profile"] == "auto" and run(["status"])["limits"]["ppt"] == 114.0
     run(["default"])
     run(["profile", "delete", "auto"])

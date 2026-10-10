@@ -119,7 +119,7 @@ successive); ogni modalità applica il proprio margine: Eco +5 (discreto), Auto 
 ```sh
 sudo ryzenctl preset quiet|performance|eco|auto|boost   # crea il profilo dai valori di fabbrica (segnaposto)
 sudo ryzenctl autotune estimate eco              # durata stimata (parallelo e core per core)
-sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1]
+sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1 fans=0|1|2]
 sudo ryzenctl autotune step                      # un test alla volta; ripetere finché phase == done
 sudo ryzenctl autotune status | abort            # abort interrompe subito anche un passo in corso
 sudo ryzenctl autotune save [apply]              # a phase == done: scrive il profilo proposto (e lo applica); abort lo scarta
@@ -130,7 +130,11 @@ sceglie se annullare, salvare (il profilo compare in Modalità, non attivo) o sa
 applicare. Senza scelta lo stato resta su disco e la GUI lo ripropone all'avvio successivo.
 
 Dalla GUI: Modalità → "Calibra…" su Eco, Auto o Boost, poi "Automatica" (valori di default) o
-"Scegli i valori…"; alla fine i pulsanti **Annulla / Salva / Salva e applica**. Di default i core si provano **tutti insieme** a ogni livello di CO (un worker per
+"Scegli i valori…"; alla fine i pulsanti **Annulla / Salva / Salva e applica**. In entrambi i casi
+si sceglie quanto la modalità tocca le ventole (`fans`): 0 BIOS invariate (default Boost), 1 moderate
+(salita 5 s / discesa 3 s, minimo del BIOS fino a `target` −5 °C; default Auto), 2 silenziose
+(10 s / 5 s, minimo fino a `target` −10 °C; default Eco); in ogni caso 100 % a Tjmax −5 °C, solo
+sui canali riconosciuti come ventola. Di default i core si provano **tutti insieme** a ogni livello di CO (un worker per
 core, ~8× più veloce; `parallel=0` = un core alla volta, che attribuisce con certezza anche un
 riavvio). Durante i test la GUI mostra il tempo rimanente stimato, la tensione reale misurata
 per core a ogni livello e quanti mV vale un passo di CO su questa CPU.
