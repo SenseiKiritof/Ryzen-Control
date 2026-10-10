@@ -18,6 +18,7 @@ limite CO è unica e condivisa (−40, salvata in `co_limits.json`, riusata), og
 suo margine (Eco +5, Auto/Boost +3); interruzione immediata (`serve` con lettore separato, flag +
 stress-ng terminati); tensione per core campionata a ogni livello (mV per passo misurati).
 Revisione 10 (2026-10-10): fasi 5 e 6 invertite — l'icona nel vassoio (fase 5, tag v0.5.0) precede i pacchetti deb/Arch (fase 6, tag v0.6.0).
+Revisione 11 (2026-10-10): nuova fase 5 — supporto a tutti i processori Ryzen (tabella FAMILIES, gate per famiglia, core dinamici); vassoio → fase 6 (v0.6.0), deb/Arch → fase 7 (v0.7.0).
 Revisione 8 (2026-10-09): nuova modalità **Eco** (Quiet resta come preset) con undervolt discreto calibrato; calibrazioni come
 macchina a passi in ryzenctl (`autotune`), GUI pilota con avanzamento e ripresa dopo crash.
 Revisione 7 (2026-10-09): curva ventole per modalità (Eco dal target, Auto step moderato).
@@ -190,7 +191,8 @@ il display: non sono mai inviati. RSMU 0x59/0x6E sono comandi di produzione ZenS
 Zen 4/5 (il range "proibito" riguarda solo MP1).
 
 Regole di transazione:
-- Gate: `codename` = Granite Ridge, altrimenti rifiuto totale. Mai scritture su `smn`.
+- Gate: `codename` = Granite Ridge, altrimenti rifiuto totale (fase 5: codename in `FAMILIES`,
+  ogni famiglia con la sua allowlist; fuori tabella rifiuto totale). Mai scritture su `smn`.
 - Ogni transazione sotto `flock(/run/ryzenctl.lock)`: `smu_args` del driver è globale.
   Documentato: non usare altri tool SMU (gnr-smu, ryzen_monitor) in contemporanea.
 - Ogni scrittura → readback. Discrepanza → una ripetizione → se ancora diversa, riscrive il
@@ -450,7 +452,82 @@ la ripresa dopo crash e il profilo generato.
 | 16 | `feat(ryzenctl): autotune eco — FMax dal target Tctl, limiti, ventole; profilo eco` | **tu**: p95 sotto target, profilo eco generato |
 | 17 | `feat(ryzenctl): autotune auto — ginocchio PPT/FMax con RAPL; GUI con avanzamento` | **tu**: tabella monotona, scelta ≤ slider |
 
-### Fase 5 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.5.0`
+### Fase 5 — tutti i processori Ryzen (desktop AM4/AM5, poi mobile) → `v0.5.0`
+Oggi tutto è cucito sul 9800X3D: gate `codename == 23`, `CORES = 8`, un solo set di ID SMU,
+offset PM table di 0x620105, `core<<20` nel CO. Obiettivo: la stessa `ryzenctl` su ogni Ryzen
+desktop, con le stesse garanzie (allowlist rigida, readback, fail closed), senza riscrivere
+nulla di quello che funziona.
+
+**Perimetro.** Prima ondata (desktop, PM table e mailbox note a ryzen_smu): Granite Ridge
+(9000, codename 23, già verificato), Raphael (7000, 20), Vermeer (5000, 12), Matisse (3000, 4).
+Seconda ondata (APU/mobile, limiti STAPM/fast/slow e spesso senza RSMU): Cezanne (14),
+Rembrandt (11), Phoenix (21), Hawk Point (24), Strix (22). Esclusi Threadripper/Epyc (HSMP,
+socket diversi, nessun hardware per provarli). Fonti dei dati: ZenStates-Core
+(`Zen5Settings.cs`, `Zen4Settings.cs`, `Zen3Settings.cs`, `Zen2Settings.cs` per gli ID MP1/RSMU
+e l'encoding del CO; `PowerTable.cs` per gli offset della PM table), ryzen_smu `smu.c`
+(indice codename, mailbox, versioni e dimensioni PM table), RyzenAdj per le APU.
+
+**Cosa cambia nel codice (minimo).**
+- Una tabella `FAMILIES` in testa a `ryzenctl`, indicizzata per codename del driver, che
+  assorbe le costanti oggi sparse (`GRANITE_RIDGE`, `CORES`, `PM_FAMILY`, `PM`, `PM_CORE_*`,
+  `CMD`): per famiglia nome, ID SMU (`co_set`, `co_get`, `ppt/tdc/edc_set`, `fmax_set/get`,
+  `tjmax_set`, `shaper_set/get`) con la mailbox di ciascuno, offset PM table (`ppt_limit`,
+  `ppt`, `tdc_limit`, `tdc`, `edc_limit`, `edc`, `thm_limit`, `tctl`, tensione/MHz/temperatura
+  per core), versioni PM table ammesse (prefisso `>>16`: 0x62 Granite Ridge, 0x54 Raphael,
+  0x38 Vermeer, 0x24 Matisse), Tjmax massimo (95 Granite Ridge/Raphael/Matisse, 90 Vermeer e
+  Zen 3 X3D; da confermare per famiglia), tetti di sblocco. Una voce può omettere una chiave:
+  funzione disabilitata per quella famiglia (Curve Shaper solo Zen 5; Tjmax e CO readback dove
+  ZenStates non ha l'ID). Il resto del codice continua a chiamare `smu("co_set", …)` e
+  `PM["ppt_limit"]`: cambia solo chi riempie `CMD` e `PM` (dalla voce scelta da `check_cpu`).
+- Gate: `check_cpu` cerca il codename in `FAMILIES`; assente → rifiuto totale come oggi (fail
+  closed). Un ID fuori dalla voce della famiglia non viene mai inviato: l'allowlist resta
+  rigida, solo che ce n'è una per famiglia.
+- `CORES` dinamico: numero di core fisici e CCD letti da sysfs (`topology/core_id`,
+  `thread_siblings_list`, `topology/die_id`), non più la costante 8. Mappa core logico →
+  fisico per il CO: oggi `core << 20` (giusto solo con 1 CCD/1 CCX); ZenStates costruisce la
+  maschera come `((ccd << 8) | (ccx << 4) | core) << 20`, quindi su 2 CCD il core 8 è
+  `(1 << 8) << 20`, non `8 << 20` — **da verificare con il readback 0xD5** (è l'unica prova
+  che vale: il set risponde OK anche con la maschera sbagliata). Core fusi (7600X3D: 6 di 8)
+  → la mappa salta gli indici assenti in sysfs. `core_cpus`/`best_core`/`co_test` usano la
+  mappa, non `c % CORES`.
+- Backend finto parametrizzato: `Fake.DEFAULT` prende la famiglia da `RYZENCTL_FAKE_FAMILY`
+  (default Granite Ridge); il selftest gira la stessa suite su 2-3 famiglie finte, compreso un
+  APU senza PM table (PPT/TDC/EDC/Tjmax rifiutati, CO/FMax ok) e una CPU a 16 core (CO su
+  16 righe, profili e baseline con 16 valori, maschera CCD nel finto che rifiuta `8 << 20`).
+- GUI: righe della pagina Curve e colonne del Monitor da `status.cores`; famiglia e codename
+  mostrati nello stato; funzioni disabilitate per famiglia con il motivo ("Curve Shaper: solo
+  Ryzen 9000"), non nascoste né in errore.
+- `hwtest` resta la verifica reversibile su hardware vero: scrive e rilegge ogni funzione
+  della famiglia, ripristina la baseline. **Nessuna famiglia è "supportata" finché qualcuno
+  non ha un `hwtest` ok** su quella CPU: nel README una tabella «Processori: verificato /
+  atteso / non supportato» con CPU, codename, SMU, PM table e chi lo ha verificato. Le
+  famiglie da ZenStates senza `hwtest` restano "atteso" e la GUI lo dice.
+
+**Rischi e invarianti.**
+- Gli ID pericolosi cambiano per famiglia: MP1 0x58–0x6F congela il 9800X3D e MP1 0x10 spegne
+  il display, ma su Vermeer/Raphael la numerazione MP1 è diversa; l'elenco di cosa non si manda
+  va rifatto per famiglia dalle fonti, mai supposto per analogia. Restano proibiti ovunque:
+  tensione/VID, OC mode, PBO scalar, `smn`, FCLK/memoria.
+- PM table assente o versione fuori dall'elenco della famiglia → PPT/TDC/EDC/Tjmax rifiutati
+  (fail closed), come oggi. Offset della PM table diversi per versione dentro la stessa
+  famiglia (0x540xxx vs 0x5401xx): la voce elenca solo le versioni con la mappa verificata.
+- Baseline e profili con numero di core diverso dal boot (cambio CPU, aggiornamento): righe
+  `co` con lunghezza ≠ `CORES` ignorate come oggi le righe non più ammesse
+  (`profile_lines("baseline")`).
+- Mobile: limiti STAPM/fast/slow PPT (RyzenAdj), niente RSMU su molte APU, Tjmax 100: fuori dal
+  perimetro della prima ondata, la tabella li ammette solo quando un `hwtest` li conferma.
+- La fase non è verificabile per intero su questo hardware (solo Granite Ridge): il tag
+  `v0.5.0` certifica il refactor (selftest multi-famiglia + `hwtest` ok sul 9800X3D, nessuna
+  regressione), non il supporto delle altre famiglie, che arriva con `hwtest` di terzi.
+
+| # | Commit | Verifica |
+|---|---|---|
+| 18 | `refactor(ryzenctl): tabella FAMILIES, CORES dinamico, gate per famiglia` | selftest su Granite Ridge finto identico a prima + suite ripetuta su 16 core finti e su APU finto senza PM table; **tu**: `hwtest` sul 9800X3D invariato, `status` mostra famiglia e core |
+| 19 | `feat(ryzenctl): Raphael/Vermeer/Matisse da ZenStates-Core` | selftest con le tre voci finte (ID, encoding CO con CCD, offset PM); `hwtest` su hardware vero di terzi, una famiglia alla volta → passa da "atteso" a "verificato" |
+| 20 | `feat(gui): core dinamici, famiglia mostrata, funzioni disabilitate spiegate` | `--mock` con `RYZENCTL_FAKE_FAMILY` = Granite Ridge / 16 core / APU: tabella Curve a 8/16 righe, Shaper disabilitato con motivo, nessun errore |
+| 21 | `docs: tabella processori nel README` | `make check`; README con la tabella verificato/atteso/non supportato e la procedura `hwtest` per chi vuole aggiungere la sua CPU |
+
+### Fase 6 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.6.0`
 Richiesta utente (rev. 6). Icona `StatusNotifierItem` (protocollo nativo di KDE Plasma, su
 GNOME serve l'estensione AppIndicator) con menu `com.canonical.dbusmenu`, implementati
 direttamente su D-Bus con `Gio` di PyGObject: nessuna dipendenza nuova, funziona su Wayland
@@ -466,13 +543,13 @@ viene assorbito, il banner crash diventa voce del menu).
 - Prima azione privilegiata della sessione → un solo prompt pkexec (come la GUI).
 | # | Commit | Verifica |
 |---|---|---|
-| 18 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
+| 22 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
 
-### Fase 6 — altre distro → `v0.6.0`
+### Fase 7 — altre distro → `v0.7.0`
 | # | Commit | Verifica |
 |---|---|---|
-| 19 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
-| 20 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
+| 23 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
+| 24 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
 
 ## Verifica
 
