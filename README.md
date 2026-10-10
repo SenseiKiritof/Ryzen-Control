@@ -10,8 +10,11 @@ crash.
 > Any other CPU is refused. A Curve Optimizer that is too negative can reboot the system (no
 > damage, but unsaved work is lost): read "Safety" before using it.
 
-Status: **phase 1** — `ryzenctl` helper/CLI, systemd services, driver via DKMS, RPM packages.
-Fans, GTK4 GUI, calibrations and deb/Arch packages follow (see `docs/plans/`).
+Status: phases 1–4 done on the development system — `ryzenctl` helper/CLI, systemd services,
+driver via DKMS, RPM package, fans, GTK4 GUI and calibrations. Next: other Ryzen CPUs, tray icon,
+deb/Arch packages (see `docs/plans/`).
+
+![Modes page: presets on the left, calibrated modes on the right](docs/screenshots/modes.png)
 
 ## Installation
 
@@ -55,6 +58,46 @@ sudo systemctl enable --now ryzenctl.service ryzenctl-resume.service
 ```
 
 To remove: `sudo make uninstall`.
+
+## Usage (GUI)
+
+Open **Ryzen Control** from the application menu (or run `ryzen-control`). The first action that
+needs root asks for the administrator password once per session; "Stop asking for the password"
+in Modes removes even that one. The screenshots below come from the fake backend
+(`make screenshots`), so the values are illustrative.
+
+**Monitor** — Tctl and per-core temperature, PPT and TDC against their limits, MHz, voltage and
+Curve Optimizer per core, the last 60 s of Tctl and PPT, fan speeds and power mode.
+
+![Monitor page](docs/screenshots/monitor.png)
+
+**Modes** — one click switches between stock values (Default), the fixed presets (Quiet,
+Performance), the modes calibrated on this CPU (Eco, Auto, Boost) and your own values (Custom).
+Every profile lists what it changes: green is more conservative than stock, red more aggressive.
+"Apply at startup" re-applies the selected profile at every boot and resume, never after a crash.
+
+**Calibration** — "Calibrate…" on Eco, Auto or Boost measures this CPU: the Curve Optimizer limit
+of every core under load, then FMax for silence (Eco), the performance/watt knee (Auto) or the
+gain over stock (Boost), with the remaining time and the real voltage measured per core. At the
+end you choose: discard, save, or save and apply. Save your work first: an unstable level can
+reboot the PC (see "Safety").
+
+![Calibration window at the end of an Eco calibration](docs/screenshots/calibration.png)
+
+**CPU** and **Curves** — the same values by hand: PPT/TDC/EDC, FMax, Tjmax and power mode, then
+the Curve Optimizer for all cores or one by one. "Apply now" writes them (each value is read
+back), "Save to profile…" keeps them.
+
+![CPU page](docs/screenshots/cpu.png)
+
+![Curves page](docs/screenshots/curve.png)
+
+**Fans** — the BIOS SmartFan stays in charge: you only change how fast each fan follows its
+curve (rise/fall) and the curve points, with the estimated rpm. Pumps and non-controllable
+channels are protected; the pump can only be left to the BIOS (recommended), capped, or set to a
+fixed speed (never below 50 %).
+
+![Fans page](docs/screenshots/fans.png)
 
 ## Usage (CLI)
 
@@ -227,6 +270,7 @@ the BIOS.
 make check          # selftest (fake backend), layout, systemd units, desktop, metainfo
 make driver-check   # builds the driver in a temporary copy (kbuild does not accept spaces in the path)
 make rpm            # tarball from HEAD + RPM in dist/
+make screenshots    # README screenshots: the GUI on a fresh fake backend (needs a display)
 RYZENCTL_ROOT=/tmp/fake python3 ryzenctl boot   # CLI on the fake backend, no root
 ```
 

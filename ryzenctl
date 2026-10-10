@@ -289,6 +289,8 @@ class Fake:
         t[PM["tdc_limit"]], t[PM["tdc"]] = s["tdc"], 23.0
         t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
         t[PM["edc_limit"]] = s["edc"]
+        for c in range(CORES):   # per-core temperatures (0x620105): a few degrees apart, like a real idle CPU
+            t[PM_CORE_TEMP + c] = s["tctl"] - 6.0 + c % 3
         return s["pm_version"], t
 
 
