@@ -422,10 +422,6 @@ msgstr "Verifica hardware"
 msgid "Hardware check: "
 msgstr "Verifica hardware: "
 
-#, python-format
-msgid "Hidden: %d"
-msgstr "Nascosti: %d"
-
 msgid "Identify"
 msgstr "Identifica"
 
@@ -641,9 +637,6 @@ msgstr "Salva nel profilo…"
 msgid "Set the values in the CPU, Curves and Fans pages and use \"Apply now\""
 msgstr "Imposta i valori nelle pagine CPU, Curve e Ventole e usa \"Applica ora\""
 
-msgid "Show unknown channels"
-msgstr "Mostra i canali sconosciuti"
-
 msgid "Start"
 msgstr "Avvia"
 
@@ -767,6 +760,10 @@ msgstr "Tempo fra un passo PWM e il successivo quando la temperatura sale: alto 
 
 msgid "Tjmax"
 msgstr "Tjmax"
+
+#, python-format
+msgid "Unknown channels (%d)"
+msgstr "Canali sconosciuti (%d)"
 
 msgid "Unlock"
 msgstr "Sblocca"

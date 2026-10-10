@@ -781,7 +781,7 @@ class MonitorPage(Gtk.Box):
             if pwm is None:   # telemetry does not carry the pwm: last `fan status` (updated at every reload)
                 pwm = next((c["pwm"] for c in (self.win.status.get("fans") or {}).get("canali", []) if c["canale"] == f["canale"]), None)
             role = f.get("role", "sconosciuto")
-            lab.set_visible(role != "sconosciuto" or bool(self.win.ui.get("show_unknown_fans")))   # same choice as the Fans page
+            lab.set_visible(role != "sconosciuto" or bool(self.win.ui.get("show_unknown_fans")))   # Fans page section expanded
             lab.set_text(_("%s (%s) · %d rpm%s") % (f.get("name") or _("Channel %d") % f["canale"], ROLE_NAMES.get(role, role), f["rpm"],
                                                    " · pwm %d (%d %%)" % (pwm, pwm_pct(pwm)) if pwm is not None else ""))
         if not self.fan_labels:
@@ -1583,18 +1583,23 @@ class FansPage(Page):
         self.chans = {}     # n -> (up, down, editor, info) of the "fan" channels
         self.pumps = {}     # n -> (fixed-speed switch, Param %, info) of the "pump" channels
         self.cards = []
-        self.unknown_cards = []   # cards of the "unknown" channels: shown only on request
-        self.unknown = Adw.SwitchRow(title=_("Show unknown channels"), active=bool(win.ui.get("show_unknown_fans")))
-        self.unknown.connect("notify::active", self.on_unknown)
-        self.unknown_list = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"], visible=False)
-        self.unknown_list.append(self.unknown)
-        self.body.append(self.unknown_list)
+        self.unknown_cards = []   # cards of the "unknown" channels: in a collapsible section at the end of the page
         self.missing = card()
         self.missing.append(label(_("Fans not available"), ["heading"]))
         self.missing_text = label("", ["dim-label"], wrap=True)
         self.missing.append(self.missing_text)
         self.missing.append(button(_("Enable (loads the nct6775 module)"), lambda: self.win.run([["fan", "enable"]], self.enabled), "suggested-action"))
         self.body.append(self.missing)
+        self.known = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)   # cards of the other channels
+        self.body.append(self.known)
+        # collapsing only hides the cards, never rebuilds them: values being edited are kept; the state
+        # (key of the former "show" switch, now meaning expanded) is remembered and followed by the Monitor fan line
+        self.unknown_title = label("", ["heading"])
+        self.unknown_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12)
+        self.unknown = Gtk.Expander(label_widget=self.unknown_title, child=self.unknown_box, visible=False,
+                                    expanded=bool(win.ui.get("show_unknown_fans")))
+        self.unknown.connect("notify::expanded", self.on_unknown)
+        self.body.append(self.unknown)
         self.spin = Gtk.Spinner(valign=Gtk.Align.CENTER)
         self.detect_btn = button(_("Detect roles"), self.autodetect)
         self.buttons(self.spin, self.detect_btn)
@@ -1609,7 +1614,7 @@ class FansPage(Page):
     def show_missing(self, msg):
         self.missing_text.set_text(msg + "\n\n" + FAN_MISSING_HELP)
         self.missing.set_visible(True)
-        self.unknown_list.set_visible(False)
+        self.unknown.set_visible(False)
         self.bar.set_sensitive(False)
         self.clear()
 
@@ -1620,27 +1625,18 @@ class FansPage(Page):
 
     def clear(self):
         for c in self.cards:
-            self.body.remove(c)
+            c.get_parent().remove(c)
         self.cards, self.chans, self.pumps, self.unknown_cards = [], {}, {}, []
 
-    def on_unknown(self, row, _p):
-        self.win.ui["show_unknown_fans"] = row.get_active()
+    def on_unknown(self, exp, _p):
+        self.win.ui["show_unknown_fans"] = exp.get_expanded()
         try:
             ui_save(self.win.ui)
         except OSError as e:
             self.win.toast(str(e))
-        self.filter_unknown()
-
-    def filter_unknown(self):
-        """Hidden, not rebuilt: values being edited in the other cards are kept."""
-        on = self.unknown.get_active()
-        for box in self.unknown_cards:
-            box.set_visible(on)
-        self.unknown.set_subtitle(_("Hidden: %d") % len(self.unknown_cards) if self.unknown_cards and not on else "")
 
     def show(self, fs):
         self.missing.set_visible(False)
-        self.unknown_list.set_visible(True)
         self.bar.set_sensitive(True)
         self.clear()
         for c in fs["canali"]:
@@ -1694,9 +1690,10 @@ class FansPage(Page):
                 self.pumps[n] = (mode, speed, c)
             elif role == "sconosciuto":
                 self.unknown_cards.append(box)
-            self.body.append(box)
+            (self.unknown_box if role == "sconosciuto" else self.known).append(box)
             self.cards.append(box)
-        self.filter_unknown()
+        self.unknown_title.set_text(_("Unknown channels (%d)") % len(self.unknown_cards))
+        self.unknown.set_visible(bool(self.unknown_cards))
 
     def identify(self, n):
         self.win.toast(_("Channel %d at 100 %% for 5 seconds…") % n)
@@ -2021,9 +2018,9 @@ class App(Adw.Application):
 
     def run_smoke(self):
         """--mock --smoke (make check): the calibration window shows every real state of the fake
-        backend for eco, auto and boost (all phases, end, resume dialog), the Fans page flag for unknown
-        channels hides/shows them and is saved, then the app exits; a rendering error becomes exit code 1
-        instead of a traceback on the desktop."""
+        backend for eco, auto and boost (all phases, end, resume dialog), the collapsible section of the
+        unknown channels on the Fans page hides/shows only them and is saved, then the app exits; a
+        rendering error becomes exit code 1 instead of a traceback on the desktop."""
         win = self.props.active_window
         try:
             win.h.call("autotune", "abort")
@@ -2045,10 +2042,18 @@ class App(Adw.Application):
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
                             "results": {str(c): -35 for c in range(8)}, "unstable": {"0": {"value": -40, "why": "crash"}}})
             fans = next(p for p in win.pages if isinstance(p, FansPage))
-            fans.show({"canali": [{"canale": 9, "rpm": 0, "pwm": 0, "modo": 5}]})   # no role = unknown
-            for on in (not fans.unknown.get_active(), fans.unknown.get_active()):   # flip and back: the user's choice stays
-                fans.unknown.set_active(on)
-                assert fans.unknown_cards[0].get_visible() == on and ui_load().get("show_unknown_fans") == on
+            chans = [{"canale": 8, "rpm": 0, "pwm": 255, "modo": 0, "role": "non-controllabile"},
+                     {"canale": 9, "rpm": 0, "pwm": 0, "modo": 5}]   # no role = unknown
+            fans.show({"canali": chans})
+            cards = list(fans.cards)
+            for on in (not fans.unknown.get_expanded(), fans.unknown.get_expanded()):   # flip and back: the user's choice stays
+                fans.unknown.set_expanded(on)
+                assert fans.unknown.get_visible() and fans.cards == cards, "unknown section missing or cards rebuilt"
+                assert cards[0].is_ancestor(fans.body) and cards[1].is_ancestor(fans.body) == on, "unknown channel not hidden/shown"
+                assert ui_load().get("show_unknown_fans") == on == win.ui["show_unknown_fans"], "expanded state not saved"
+            fans.show({"canali": chans[:1]})
+            assert not any(c.get_parent() for c in cards), "old cards kept on reload"
+            assert not fans.unknown.get_visible(), "unknown section shown without unknown channels"
         except Exception:
             import traceback
             traceback.print_exc()
