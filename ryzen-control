@@ -26,7 +26,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
-from gi.repository import Pango, Adw, Gdk, GLib, Gtk  # noqa: E402
+gi.require_version("Graphene", "1.0")
+from gi.repository import Pango, Adw, Gdk, GLib, Graphene, Gtk  # noqa: E402
 
 # User interface in the system language (po/ryzen-control/<lang>.po, installed as ryzen-control.mo);
 # the English source strings are the fallback. Numbers follow the locale's decimal separator (num()).
@@ -121,7 +122,8 @@ class Helper:
     def __init__(self, mock):
         env = dict(os.environ)
         if mock:
-            root = os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
+            # RYZENCTL_ROOT from outside: a fresh fake backend (make screenshots); otherwise one per session
+            root = os.environ.get("RYZENCTL_ROOT") or os.path.join(os.environ.get("XDG_RUNTIME_DIR") or tempfile.gettempdir(), "ryzen-control-mock")
             os.makedirs(root, exist_ok=True)
             env["RYZENCTL_ROOT"] = root
             subprocess.run([RYZENCTL, "boot"], env=env, check=False, stdout=subprocess.DEVNULL)   # the baseline of the fake "boot"
@@ -387,9 +389,11 @@ def values_of(lines):
 
 
 def profile_table(lines, st):
-    """Coloured 'parameter · stock → profile' table (baseline from status, fans from fan status)."""
+    """Coloured 'parameter · stock → profile' table: CPU values from the status baseline, fan values
+    from the baseline's fan lines (BIOS settings captured at boot), rpm estimates from fan status."""
     v, base = values_of(lines), st.get("baseline") or {}
     fans = {c["canale"]: c for c in (st.get("fans") or {}).get("canali", [])}
+    stock_fans = values_of(st.get("baseline_lines") or [])["fan"]
     rows = [(title, diff_label(base.get(key), v[key], unit)) for key, title, unit in CPU_PARAMS if key in v]
     if "power" in v:
         rows.append((_("Power mode"), diff_label(base.get("power"), v["power"])))
@@ -404,18 +408,19 @@ def profile_table(lines, st):
                 chips.append(chip)
         rows.append((_("CO (Curve Optimizer) per core"), chips, CO_TIP))
     for n, f in sorted(v["fan"].items()):
-        cur = fans.get(n, {})
+        cur, stock = fans.get(n, {}), stock_fans.get(n, {})   # no stock value (fan roles assigned after boot): no comparison
         if "step" in f:
             tol = (st.get("caps") or {}).get("fan_step_tol_ms", 0)   # the chip rounds (e.g. 5000 → 5200)
             sec = lambda ms: None if ms is None else round(ms / 1000.0, 1)   # the chip works in ms, the user reads seconds
-            for name, cur_v, new_v in ((_("rise"), cur.get("step_up_ms"), f["step"][0]), (_("fall"), cur.get("step_down_ms"), f["step"][1])):
-                same = cur_v is not None and abs(cur_v - new_v) <= tol
-                rows.append((_("Fan %d %s") % (n, name), diff_label(sec(new_v if same else cur_v), sec(new_v), "s", lower_is_better=False)))
+            stock_step = stock.get("step", (None, None))
+            for name, base_v, new_v in ((_("rise"), stock_step[0], f["step"][0]), (_("fall"), stock_step[1], f["step"][1])):
+                same = base_v is not None and abs(base_v - new_v) <= tol
+                rows.append((_("Fan %d %s") % (n, name), diff_label(sec(new_v if same else base_v), sec(new_v), "s", lower_is_better=False)))
         if "curve" in f:
             rm = cur.get("rpm_max")
-            rows.append((_("Fan %d curve") % n, curve_label(curve_text(cur["curva"], rm) if cur.get("curva") else None, curve_text(f["curve"], rm))))
-        if "pump" in f:   # current and new state as text: "auto" | "cap 70 %" | "fixed 65 %"
-            rows.append((_("Pump %d") % n, diff_label(pump_text(cur) if cur else None, pump_text(f["pump"]))))
+            rows.append((_("Fan %d curve") % n, curve_label(curve_text(stock["curve"], rm) if stock.get("curve") else None, curve_text(f["curve"], rm))))
+        if "pump" in f:   # stock and profile state as text: "auto" | "cap 70 %" | "fixed 65 %"
+            rows.append((_("Pump %d") % n, diff_label(pump_text(stock["pump"]) if "pump" in stock else None, pump_text(f["pump"]))))
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
     # short values (limits, FMax, Tjmax, power mode, step, pump) side by side, wrapping when space runs out
     flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=18, row_spacing=4, homogeneous=False,
@@ -607,8 +612,9 @@ class CurveEditor(Gtk.Box):
             cr.move_to(X(t), y0)
             cr.line_to(X(t), y1)
             cr.stroke()
-            cr.move_to(X(t) - 8, h - 3)
-            cr.show_text("%d°" % t)
+            text = "%d°" % t
+            cr.move_to(min(X(t) - 8, w - cr.text_extents(text).x_advance - 2), h - 3)   # last label inside the area
+            cr.show_text(text)
         cr.rectangle(x0, y0, x1 - x0, y1 - y0)
         cr.clip()
         for pts, rgb, width in ((self.read_pct, (0.55, 0.55, 0.55), 1.5), (self.values(), (0.21, 0.52, 0.89), 2.0)):
@@ -757,9 +763,10 @@ class MonitorPage(Gtk.Box):
             cr.move_to(0, y_t(t))
             cr.line_to(w, y_t(t))
             cr.stroke()
-            cr.move_to(4, y_t(t) - 2)
+            ty = y_t(t) - 2 if y_t(t) > 14 else y_t(t) + 12   # the top line's labels go below it, not off the area
+            cr.move_to(4, ty)
             cr.show_text("%d" % t)
-            cr.move_to(w - 30, y_t(t) - 2)
+            cr.move_to(w - 30, ty)
             cr.show_text("%d" % round(plim * (t - lo) / (hi - lo)))
         n = self.hist.maxlen
         for idx, rgb in ((0, (0.21, 0.52, 0.89)), (1, (0.90, 0.45, 0.13))):
@@ -1663,6 +1670,10 @@ class Window(Adw.ApplicationWindow):
                 if name in PRESETS:
                     st["profile_lines"][name] = self.h.call("profile", "show", name)["lines"]
             st["autotune"] = self.h.call("autotune", "status")
+            try:   # BIOS fan settings captured at boot: the "stock" side of the fan rows in the profile tables
+                st["baseline_lines"] = self.h.call("profile", "show", "baseline")["lines"]
+            except HelperError:
+                st["baseline_lines"] = []
             try:
                 st["fans"] = self.h.call("fan", "status")
             except HelperError as e:   # chip missing: the Fans page shows the message
@@ -1799,10 +1810,23 @@ class Window(Adw.ApplicationWindow):
         d.present(self)
 
 
+SHOT_SIZE = (1100, 800)   # window size of the README screenshots (make screenshots)
+
+
+def save_png(widget, path):
+    """PNG of a mapped widget rendered from its own widget tree: no screen grab, so it works on
+    Wayland and contains only the application."""
+    w, h = widget.get_width(), widget.get_height()
+    snap = Gtk.Snapshot()
+    Gtk.WidgetPaintable.new(widget).snapshot(snap, w, h)
+    tex = widget.get_native().get_renderer().render_texture(snap.to_node(), Graphene.Rect().init(0, 0, w, h))
+    tex.save_to_png(path)
+
+
 class App(Adw.Application):
-    def __init__(self, mock, smoke=False):
+    def __init__(self, mock, smoke=False, shots=None):
         super().__init__(application_id=APP_ID + (".Mock" if mock else ""))   # the mock must not activate the real instance
-        self.mock, self.smoke, self.smoke_failed = mock, smoke, False
+        self.mock, self.smoke, self.smoke_failed, self.shots = mock, smoke, False, shots
 
     def do_activate(self):
         if not self.props.active_window:
@@ -1812,10 +1836,70 @@ class App(Adw.Application):
             except AttributeError:   # GTK < 4.12
                 prov.load_from_data(CSS.encode())
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-            Window(self, Helper(self.mock))
+            win = Window(self, Helper(self.mock))
             if self.smoke:
                 GLib.timeout_add(500, self.run_smoke)
+            if self.shots:
+                Adw.StyleManager.get_default().set_color_scheme(Adw.ColorScheme.FORCE_DARK)
+                win.set_default_size(*SHOT_SIZE)
+                self.drive(self.screenshot_steps())
         self.props.active_window.present()
+
+    def drive(self, steps):
+        """Runs a generator that yields pauses in ms, letting GTK lay out and draw in between; an
+        exception becomes exit code 1."""
+        def tick():
+            try:
+                GLib.timeout_add(next(steps), tick)
+            except StopIteration:
+                self.quit()
+            except Exception:
+                import traceback
+                traceback.print_exc()
+                self.smoke_failed = True
+                self.quit()
+            return False
+        GLib.timeout_add(500, tick)
+
+    def screenshot_steps(self):
+        """--mock --screenshots DIR (make screenshots): fills a fresh fake backend (fan roles, presets,
+        the three calibrations), then saves the calibration window at its end and one PNG per page."""
+        win = self.props.active_window
+        h = win.h
+        h.call("fan", "autodetect")
+        h.call("fan", "identify", "1")
+        for name in ("quiet", "performance"):
+            h.call("preset", name)
+        dlg = AutotuneDialog(win, "eco")   # the real flow: steps in the background, choice at the end
+        dlg.start({"step": 3, "reuse": 0})
+        for _i in range(150):
+            if dlg.save_btn.get_visible() or dlg.close_btn.get_visible():
+                break
+            yield 200
+        if not dlg.save_btn.get_visible():
+            raise RuntimeError("the fake Eco calibration did not finish")
+        yield 800
+        save_png(dlg, os.path.join(self.shots, "calibration.png"))
+        h.call("autotune", "save")
+        dlg.closable = True
+        dlg.close()
+        for mode in ("auto", "boost"):
+            st = h.call("autotune", "start", mode, "step=3")
+            while st["phase"] != "done":
+                st = h.call("autotune", "step")
+            h.call("autotune", "save")
+        h.call("use", "auto")
+        h.call("apply", "auto")
+        h.call("autostart", "on")
+        win.reload()
+        yield 1500
+        mon = win.pages[0]
+        if mon.hist:   # the fake telemetry is steady: fill the 60 s window with it instead of waiting a minute
+            mon.hist.extend([mon.hist[-1]] * mon.hist.maxlen)
+        for page in win.pages:
+            win.stack.set_visible_child(page)
+            yield 1200 if page.NAME == "monitor" else 700
+            save_png(win, os.path.join(self.shots, page.NAME + ".png"))
 
     def run_smoke(self):
         """--mock --smoke (make check): the calibration window shows every real state of the fake
@@ -1850,9 +1934,18 @@ class App(Adw.Application):
 
 
 def main():
-    mock, smoke = "--mock" in sys.argv, "--smoke" in sys.argv
-    app = App(mock, smoke and mock)
-    rc = app.run([a for a in sys.argv if a not in ("--mock", "--smoke")])
+    argv = list(sys.argv)
+    mock, smoke = "--mock" in argv, "--smoke" in argv
+    shots = None
+    if "--screenshots" in argv:   # --mock --screenshots DIR: README screenshots from the fake backend
+        i = argv.index("--screenshots")
+        shots = argv[i + 1] if i + 1 < len(argv) else None
+        if not mock or not shots:
+            sys.exit("usage: ryzen-control --mock --screenshots DIR")
+        os.makedirs(shots, exist_ok=True)
+        del argv[i:i + 2]
+    app = App(mock, smoke and mock, shots)
+    rc = app.run([a for a in argv if a not in ("--mock", "--smoke")])
     sys.exit(1 if app.smoke_failed else rc)
 
 

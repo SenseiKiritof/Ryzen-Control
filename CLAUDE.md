@@ -97,6 +97,7 @@ make driver-check               # builds the driver in a copy outside the repo (
 make rpm                        # tarball from HEAD (only what is committed) + RPM in dist/; rpmlint NOT installed
 RYZENCTL_ROOT=/tmp/fake python3 ryzenctl boot   # CLI on the fake backend (state in $ROOT/fake_smu.json)
 python3 ryzen-control --mock    # GUI without driver or pkexec (phase 3)
+make screenshots                # docs/screenshots/*.png from a fresh fake backend (regenerate after visible UI changes)
 ```
 
 On hardware (the user runs them, with `! command`; commit after their result): checklist in

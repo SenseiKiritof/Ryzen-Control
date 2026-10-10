@@ -29,7 +29,7 @@ TMPROOT := $(or $(TMPDIR),/tmp)/ryzen-control-check
 PO := $(wildcard po/*/*.po)
 MO := $(foreach p,$(PO),build/locale/$(notdir $(basename $(p)))/LC_MESSAGES/$(notdir $(patsubst %/,%,$(dir $(p)))).mo)
 
-.PHONY: all install install-cli install-gui install-dkms-src install-locales locales dkms uninstall check driver-check dist rpm
+.PHONY: all install install-cli install-gui install-dkms-src install-locales locales dkms uninstall check driver-check dist rpm screenshots
 
 all:
 	@echo "Targets: install [DESTDIR=…] (install-cli install-gui install-dkms-src install-locales), locales, dkms, uninstall, check, driver-check, dist, rpm"
@@ -97,6 +97,11 @@ check: locales
 	-appstreamcli validate --no-net data/$(APPID).metainfo.xml
 	LANGUAGE=C LC_ALL=C.UTF-8 timeout 120 python3 ryzen-control --mock --smoke
 	LANGUAGE=it LC_ALL=it_IT.UTF-8 RYZEN_CONTROL_LOCALEDIR=build/locale timeout 120 python3 ryzen-control --mock --smoke
+
+# README screenshots: the GUI on a fresh fake backend (fan roles, presets, the three calibrations),
+# one PNG per page plus the calibration window, in English (needs a display; windows flash briefly).
+screenshots:
+	root=$$(mktemp -d) && LANGUAGE=C LC_ALL=C.UTF-8 RYZENCTL_ROOT=$$root timeout 120 python3 ryzen-control --mock --screenshots docs/screenshots; rc=$$?; rm -rf $$root; exit $$rc
 
 # Tarball from the current commit (HEAD): packages are built from what is versioned.
 dist:
