@@ -276,10 +276,6 @@ class Fake:
             return round(1000 * (1 - math.exp(-self.s["ppt"] / 50)), 1), round(self.s["ppt"] * 0.9, 1)
         return round(self.s["fmax"] / 5.0, 1), 45.0
 
-    def peak_tctl(self):
-        """Peak Tctl under bursts: 60 °C at 4000 MHz, +20 °C every 1250 MHz."""
-        return round(60 + (self.s["fmax"] - 4000) / 1250 * 20, 1)
-
     def pm(self):
         s = self.s
         if not s["pm_version"]:
@@ -928,10 +924,10 @@ def cmd_autostart(ctx, args):
 
 # ---- Mode presets (until the phase 4 calibration replaces them) ---------
 # ponytail: fixed ratios relative to the baseline (quiet ≈ AMD's 65 W eco on a 162 W part, auto ≈ 105 W eco);
-# the Eco/Auto calibration will replace them with values measured on this CPU.
+# the Auto calibration replaces them with values measured on this CPU, the Eco one adds the measured CO.
 PRESETS = {
     "quiet": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
-    # eco: same values as quiet until `autotune eco` replaces them with measurements (CO, FMax, curve)
+    # eco: same values as quiet; `autotune eco` adds Auto's validated CO and the fan curve
     "eco": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
     "auto": {"ppt": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
     "performance": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
@@ -977,11 +973,12 @@ def cmd_preset(ctx, args):
 
 # ---- Autotune: step machine (Eco/Auto), state on disk, resume after a crash ----------
 AT_PATH = STATE + "/autotune.json"
-# The CO stability limit is one per core: the search is shared between the modes
-# (Eco down to −50 = full scale, Auto/Boost −40; a deeper measurement is valid for all) and
-# saved in CO_LIMITS_PATH; each mode applies its
-# own margin (Eco +5 = conservative, Auto/Boost +3). reuse=1 reuses the previous measurement.
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -50, "margin": 5, "step": 90, "parallel": 1, "reuse": 1, "fans": 2},
+# The CO stability limit is one per core: the search is shared between the modes (down to −40; a
+# deeper measurement is valid for all) and saved in CO_LIMITS_PATH, with the memory of the final
+# passes (final_failures: never retried; final_passed: Eco reuses them without load tests). Every
+# mode applies the same margin +3: Eco = Auto's undervolt with the quiet limits. reuse=1 reuses the
+# previous measurement; `target` only places the quiet fan curve (fans=2: minimum up to target−10 °C).
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2},
                "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1},
                "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1}}   # no target: the fans use eco's
 # fans: 0 = BIOS (baseline steps and curves); 1 = moderate: rise 3 s / fall 2 s and the BIOS curve raised
@@ -994,11 +991,11 @@ CO_LIMITS_PATH = STATE + "/co_limits.json"
 BOOST_BENCHES = 4   # MT and ST at factory and in boost: the measured gain
 # parallel=1 (default): all cores together at each CO level, one worker per core (8x
 # faster); parallel=0: one core at a time (attributes even a crash with certainty).
-AT_FMAX_TESTS_EST, AT_PPT_TESTS_EST, AT_FKNEE_TESTS_EST, BURST_SEC = 5, 5, 6, 5   # for the duration estimates
+AT_PPT_TESTS_EST, AT_FKNEE_TESTS_EST = 5, 6   # for the duration estimates
 PPT_SWEEP_STEP, PPT_SWEEP_MIN, BENCH_SEC, FMAX_KNEE_SPAN = 0.10, 0.50, 15, 800   # Auto: performance/W knee
 CO_STEP, FINAL_SEC, FINAL_RETRIES = 5, 300, 3
 FINAL_HEAVY_SEC = 60   # final pass: first the heaviest method at full load (fft on 16 threads locked up the 9800X3D at −37)
-FMAX_STEP, FMAX_SWEEP_MIN, BURSTS = 100, 4000, 12
+FMAX_STEP = 100   # Auto: FMax knee sweep
 
 
 def boot_id():
@@ -1198,14 +1195,15 @@ def co_test_parallel(cores, seconds, method="all"):
 
 def at_total_estimate(mode, p):
     """Estimated duration (s) of a full calibration with these parameters (maximum for the CO)."""
+    reused = at_reused(mode, p)
+    if reused.get("eco_from"):
+        return 0                                                    # Eco: CO already validated, no load test
     levels = max(1, (-p["colimit"]) // CO_STEP)
-    t = (0 if co_limits_reusable(p) else levels * p["step"] * (1 if p.get("parallel", 1) else CORES))
+    t = (0 if reused else levels * p["step"] * (1 if p.get("parallel", 1) else CORES))
     t += len(BENCH_METHODS) * 6 + FINAL_HEAVY_SEC + FINAL_SEC       # method probe + final pass
-    if mode == "eco":
-        t += AT_FMAX_TESTS_EST * BURSTS * BURST_SEC
-    elif mode == "auto":
+    if mode == "auto":
         t += AT_PPT_TESTS_EST * (5 + BENCH_SEC) + AT_FKNEE_TESTS_EST * (3 + BENCH_SEC)
-    else:
+    elif mode == "boost":
         t += BOOST_BENCHES * (5 + BENCH_SEC)
     return int(t)
 
@@ -1223,12 +1221,6 @@ def at_estimate(st):
             rem += ((CORES - st["core"] - 1) * levels + (levels - level_idx)) * p["step"]
     if ph in ("co", "final"):
         rem += FINAL_SEC + FINAL_HEAVY_SEC + (0 if st.get("method") else len(BENCH_METHODS) * 6)
-    if st["mode"] == "eco" and ph in ("co", "final", "fmax"):
-        n = AT_FMAX_TESTS_EST
-        if ph == "fmax" and st["fmax"].get("current"):
-            possible = max(1, (st["fmax"]["current"] - FMAX_SWEEP_MIN) // FMAX_STEP + 1)
-            n = min(possible, max(1, AT_FMAX_TESTS_EST - len(st["fmax"]["tests"])))   # goes down at each test
-        rem += n * BURSTS * BURST_SEC
     if st["mode"] == "boost" and ph in ("co", "final", "bench"):
         rem += BOOST_BENCHES * (5 + BENCH_SEC)
     if st["mode"] == "auto" and ph in ("co", "final", "ppt", "fmax_knee"):
@@ -1267,6 +1259,15 @@ def co_limits_save(st):
                                                 "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"]}, indent=1))
 
 
+def co_limits_note(st, key, entry):
+    """Memory of the final passes for the next calibrations (final_failures: never retried,
+    final_passed: reused by Eco), only in the measurement this calibration is using."""
+    saved = co_limits_load()
+    if saved and saved.get("results") == st["results"]:
+        saved.setdefault(key, []).append(entry)
+        write_atomic(P(CO_LIMITS_PATH), json.dumps(saved, indent=1))
+
+
 def at_params(mode, kvs):
     params = dict(AT_DEFAULTS[mode])
     for kv in kvs:
@@ -1285,32 +1286,6 @@ def at_params(mode, kvs):
     if "loss" in params:
         check_range("loss", params["loss"], 1, 50, " %")
     return params
-
-
-def tctl_p95():
-    """p95 of the Tctl peaks over BURSTS bursts of 2 s, half all-core and half single-core (only
-    k10temp: no PM reads during the measurement, they heat the die)."""
-    if FAKE:
-        check_abort()
-        return FAKE.peak_tctl()
-    peaks = []
-    core = best_core()
-    for i in range(BURSTS):
-        # half of the bursts on all cores (the "jolt" when a heavy program starts), half on
-        # a single core at maximum boost: these are the two peaks that spin up the fans
-        args = ["--cpu", "0"] if i % 2 == 0 else ["--cpu", "1", "--taskset", str(core)]
-        p = spawn_load(args, 2)
-        peak = 0.0
-        while p.poll() is None:
-            check_abort()
-            peak = max(peak, tctl() or 0.0)
-            time.sleep(0.05)
-        _children.discard(p)
-        if p.returncode != 0:
-            raise Unstable(_("stress-ng terminated (exit code %d) during a burst") % p.returncode)
-        peaks.append(peak)
-        time.sleep(3)
-    return sorted(peaks)[max(0, int(len(peaks) * 0.95) - 1)]
 
 
 def rapl_energy():
@@ -1500,10 +1475,9 @@ def at_done(ctx, st, lines):
     st["profile_lines"] = lines
 
 
-def at_known_bad(st):
-    """Has the combination the final pass would try already proved unstable (or is it more
-    aggressive than an unstable one on every core)?"""
-    vals = at_final_values(st)
+def at_known_bad(st, vals):
+    """Has this CO combination already proved unstable (or is it more aggressive than an
+    unstable one on every core)?"""
     return any(all(v <= f for v, f in zip(vals, ff["values"])) for ff in st.get("final_failures", []))
 
 
@@ -1520,6 +1494,25 @@ def at_margin(st):
 def at_final_values(st):
     m = at_margin(st)
     return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
+
+
+def at_reused(mode, params):
+    """Fields of a calibration that reuses the saved CO limit ({} if not reusable): final pass from
+    the first margin not failed yet; for Eco also `eco_from`, the date of a recorded final pass at
+    least as negative on every core (and not contradicted by a failure): already validated."""
+    saved = co_limits_reusable(params)
+    if not saved:
+        return {}
+    st = {"params": params, "phase": "final", "results": saved["results"], "unstable": saved["unstable"],
+          "samples": saved.get("samples") or {}, "co_reused": saved["time"], "active_cores": [], "final_tries": 0,
+          "final_failures": list(saved.get("final_failures", []))}
+    while st["final_tries"] < FINAL_RETRIES and at_known_bad(st, at_final_values(st)):   # already failed (even with a crash): +3
+        st["final_tries"] += 1
+    vals = at_final_values(st)
+    for ps in saved.get("final_passed", []) if mode == "eco" else []:
+        if all(v <= e for v, e in zip(ps["values"], vals)) and not at_known_bad(st, ps["values"]):
+            st["eco_from"] = ps["time"]
+    return st
 
 
 def at_mv_per_step(st):
@@ -1552,18 +1545,18 @@ def cmd_autotune(ctx, args):
 
 def _autotune(ctx, args):
     if not args:
-        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
+        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
     if args[0] == "status":
         return at_load() or {"phase": None}
     if args[0] == "estimate":
         if len(args) < 2 or args[1] not in AT_DEFAULTS:
             raise Err(_("usage: autotune estimate eco|auto [key=value…]"))
         p = at_params(args[1], args[2:])
-        saved = co_limits_reusable(p)
+        reused = at_reused(args[1], p)
         return {"total_s": at_total_estimate(args[1], p),
                 "parallel_total_s": at_total_estimate(args[1], dict(p, parallel=1)),
                 "sequential_total_s": at_total_estimate(args[1], dict(p, parallel=0)), "params": p,
-                "co_reuse": saved["time"] if saved else None}
+                "co_reuse": reused.get("co_reused"), "eco_from": reused.get("eco_from")}
     if args[0] == "abort":
         st = at_load()
         if st:
@@ -1590,29 +1583,26 @@ def _autotune(ctx, args):
         if len(args) < 2 or args[1] not in AT_DEFAULTS:
             raise Err(_("usage: autotune start eco|auto [key=value…]"))
         check_cpu()
-        load_baseline()
+        base = load_baseline()
         params = at_params(args[1], args[2:])
         rm(P(AT_ABORT_FLAG))
-        apply_lines(profile_lines("baseline"), ctx, "cpu")      # all cores at baseline
-        method = heaviest_method()                              # probed at factory CO: used in the search, final pass and knee
-        _failed, ref = co_test_parallel(list(range(CORES)), 9, method)   # reference: voltages at factory CO, same load
-        saved = co_limits_reusable(params)
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
-              "samples": {"0": ref}, "method": method,
               "parallel": bool(params["parallel"]), "active_cores": list(range(CORES)),
               "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
-              "fmax": {"current": None, "tests": [], "chosen": None},
-              "started": time.strftime("%Y-%m-%d %H:%M"), "resumed_after_crash": False}
-        if saved:                                   # limit already measured: only the final pass with this mode's margin
-            st.update({"phase": "final", "results": saved["results"], "unstable": saved["unstable"],
-                       "samples": saved.get("samples", st["samples"]), "co_reused": saved["time"], "active_cores": [],
-                       "final_failures": list(saved.get("final_failures", []))})
-            while st["final_tries"] < FINAL_RETRIES and at_known_bad(st):   # already failed (even with a crash): +3
-                st["final_tries"] += 1
-            if st["final_tries"] >= FINAL_RETRIES:
-                raise Err(_("the combined CO already proved unstable up to margin +%d: raise margin or repeat the search with reuse=0")
-                          % (params["margin"] + 3 * (FINAL_RETRIES - 1)))
-        st["eta_total"] = at_total_estimate(args[1], params)   # fixed at start (afterwards the reuse would lower it)
+              "started": time.strftime("%Y-%m-%d %H:%M"), "resumed_after_crash": False,
+              "eta_total": at_total_estimate(args[1], params)}   # fixed at start (afterwards the reuse would lower it)
+        st.update(at_reused(args[1], params))       # limit already measured: only the final pass with this mode's margin
+        if st.get("eco_from"):                      # Eco: these values already passed a final pass, no load test
+            st["final"] = at_final_values(st)
+            at_finish_eco(ctx, st, base)
+        elif st["final_tries"] >= FINAL_RETRIES:
+            raise Err(_("the combined CO already proved unstable up to margin +%d: raise margin or repeat the search with reuse=0")
+                      % (params["margin"] + 3 * (FINAL_RETRIES - 1)))
+        else:
+            apply_lines(profile_lines("baseline"), ctx, "cpu")      # all cores at baseline
+            st["method"] = heaviest_method()                        # probed at factory CO: used in the search, final pass and knee
+            _failed, ref = co_test_parallel(list(range(CORES)), 9, st["method"])   # reference: voltages at factory CO, same load
+            st["samples"] = st.get("samples") or {"0": ref}
         at_save(st)
         return st
     if args[0] != "step":
@@ -1731,12 +1721,9 @@ def at_step(ctx, st, base):
         st["in_progress"] = None
         if ok:
             st["final"] = vals
+            co_limits_note(st, "final_passed", {"values": vals, "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"]})
             if st["mode"] == "eco":
-                st["phase"] = "fmax"
-                st["fmax"] = {"current": base["fmax"], "tests": [], "chosen": None}
-                for t in preset_lines("eco", base):    # eco limits, Tjmax and power profile BEFORE measuring the peaks
-                    if t.split()[0] in ("ppt", "tdc", "edc", "tjmax", "power"):
-                        run(t.split(), ctx)
+                at_finish_eco(ctx, st, base)
             elif st["mode"] == "boost":
                 st["phase"] = "bench"
             else:
@@ -1747,14 +1734,12 @@ def at_step(ctx, st, base):
             at_final_failed(st)
         at_save(st)
         return st
-    if st["phase"] in ("fmax", "ppt", "fmax_knee", "bench"):
+    if st["phase"] in ("ppt", "fmax_knee", "bench"):
         # phases with the final CO applied: a crash or a load that dies = unstable combination
         st["in_progress"] = {"kind": "post", "boot_id": boot_id()}
         at_save(st)
         try:
-            if st["phase"] == "fmax":
-                at_fmax_step(ctx, st, base)
-            elif st["phase"] == "bench":
+            if st["phase"] == "bench":
                 at_boost_bench(ctx, st, base)
             else:
                 at_knee_step(ctx, st, base)
@@ -1764,19 +1749,6 @@ def at_step(ctx, st, base):
         at_save(st)
         return st
     raise Err(_("unknown phase: %s") % st["phase"])
-
-
-def at_fmax_step(ctx, st, base):
-    """Eco: one point of the FMax sweep (p95 of the Tctl peaks over mixed bursts)."""
-    f = st["fmax"]["current"]
-    run(["fmax", str(f)], ctx)
-    p95 = tctl_p95()
-    st["fmax"]["tests"].append([f, p95])
-    if p95 <= st["params"]["target"] or f - FMAX_STEP < FMAX_SWEEP_MIN:
-        st["fmax"]["chosen"] = f
-        at_finish_eco(ctx, st, base)
-    else:
-        st["fmax"]["current"] = f - FMAX_STEP
 
 
 def at_post_failed(st, why):
@@ -1808,10 +1780,7 @@ def at_final_failed(st, why=None):
     (the measured per-core limits stay unchanged)."""
     entry = {"values": at_final_values(st), "why": why or LAST_FAIL["why"] or "crash"}
     st.setdefault("final_failures", []).append(entry)
-    saved = co_limits_load()
-    if saved and saved.get("results") == st["results"]:   # memory for the next calibrations: not retried
-        saved.setdefault("final_failures", []).append(entry)
-        write_atomic(P(CO_LIMITS_PATH), json.dumps(saved, indent=1))
+    co_limits_note(st, "final_failures", entry)
     st["final_tries"] += 1
     if st["final_tries"] >= FINAL_RETRIES:
         st["phase"] = "done"
@@ -1855,9 +1824,10 @@ def at_fan_lines(st, base):
 
 
 def at_finish_eco(ctx, st, base):
-    """Eco profile from the measurements: final CO, chosen FMax, eco limits, fans according to `fans` (default quiet)."""
-    lines = ["co " + " ".join(str(v) for v in st["final"]), "fmax %d" % st["fmax"]["chosen"]]
-    lines += [l for l in preset_lines("eco", base) if l.split()[0] not in ("co", "fmax", "fan")]
+    """Eco profile: the validated final CO (Auto's undervolt) with the Eco preset (limits, FMax,
+    Tjmax, power profile), fans according to `fans` (default quiet)."""
+    lines = ["co " + " ".join(str(v) for v in st["final"])]
+    lines += [l for l in preset_lines("eco", base) if l.split()[0] not in ("co", "fan")]
     at_done(ctx, st, lines + at_fan_lines(st, base))
 
 
@@ -2817,23 +2787,30 @@ def selftest():
     expect_err(["preset", "turbo"], "usage")
     run(["profile", "delete", "auto"])
 
-    # ---- autotune eco: conservative CO per core, final pass, FMax from the target, eco profile ----
+    # ---- autotune eco: Auto's CO (fresh install: search from scratch + final pass), eco preset values ----
     expect_err(["autotune", "step"], "no calibration")
     expect_err(["autotune", "start", "eco", "colimit=5"], "out of range")
     est = run(["autotune", "estimate", "eco"])
-    assert est["parallel_total_s"] == 10 * 90 + 24 + 60 + 300 + 5 * 12 * 5 and est["sequential_total_s"] == 8 * 10 * 90 + 24 + 60 + 300 + 300, est
+    assert est["parallel_total_s"] == 8 * 90 + 24 + 60 + 300 and est["sequential_total_s"] == 8 * 8 * 90 + 24 + 60 + 300, est
+    assert est["co_reuse"] is None and est["eco_from"] is None, est
     expect_err(["autotune", "estimate", "eco", "parallel=2"], "out of range")
     rm(P(CO_LIMITS_PATH))
     st = run(["autotune", "start", "eco", "step=9"])
-    assert st["phase"] == "co" and st["params"]["colimit"] == -50 and st["params"]["step"] == 9 and st["parallel"]
-    assert st["eta"]["remaining_s"] == 10 * 9 + 60 + 300 + 300 and st["eta"]["total_s"] == 10 * 9 + 24 + 60 + 300 + 300, st["eta"]
+    assert st["phase"] == "co" and st["params"]["colimit"] == -40 and st["params"]["margin"] == 3 and st["params"]["step"] == 9 and st["parallel"]
+    assert st["eta"]["remaining_s"] == 8 * 9 + 60 + 300 and st["eta"]["total_s"] == 8 * 9 + 24 + 60 + 300, st["eta"]
     steps = 0
     for _i in range(200):
         st = run(["autotune", "step"])
         steps += 1
         if st["phase"] == "done":
             break
-    assert steps == 10 + 1 + 7 and st["eta"]["remaining_s"] == 0, steps   # 10 levels in parallel, final pass, 7 FMax
+    assert steps == 8 + 1 and st["eta"]["remaining_s"] == 0, steps   # 8 levels in parallel, final pass, nothing else
+    eco_co = "co -37 -37 -37 -22 -37 -37 -37 -12"
+    eco_lines = [eco_co] + [l for l in preset_lines("eco", load_baseline()) if l.split()[0] not in ("co", "fan")] + [
+        "fan 1 step 10000 5000", "fan 1 curve 60:77 75:255"]   # eco preset with the CO and the quiet fans (curve from target −10)
+    assert st["profile_lines"] == eco_lines and "fmax 4825" in eco_lines and "ppt 89" in eco_lines, st["profile_lines"]
+    passed = json.loads(read_text(CO_LIMITS_PATH))["final_passed"]       # the successful final pass is remembered
+    assert len(passed) == 1 and passed[0]["values"] == st["final"] and passed[0]["mode"] == "eco" and passed[0]["time"], passed
     assert st["samples"]["0"]["volt"][0] == 1.25 and st["samples"]["-20"]["volt"][0] == 1.19, st["samples"]   # −20 ≈ −60 mV in the fake
     assert st["samples"]["-25"]["volt"][7] is None and st["samples"]["-25"]["volt"][0] == 1.175   # core 7 out of the test at −25
     assert run(["telemetry"])["cores"][0]["volt"] is not None
@@ -2849,13 +2826,29 @@ def selftest():
     run(["apply", "eco"])
     run(["use", "eco"])
     assert run(["status"])["limits"]["ppt"] == 89.0 and run(["status"])["limits"]["tjmax"] == 80.0
-    # core 7 stable down to -15 (unstable at -20) → -10; core 3 down to -25 → -20; the others at full scale -50 → -45
-    assert st["final"] == [-45, -45, -45, -20, -45, -45, -45, -10] and st["unstable"]["7"]["value"] == -20, st["final"]
-    assert st["fmax"]["chosen"] == 4625 and st["fmax"]["tests"][0][0] == 5225, st["fmax"]
-    eco = run(["profile", "show", "eco"])["lines"]
-    assert "co -45 -45 -45 -20 -45 -45 -45 -10" in eco and "fmax 4625" in eco and "ppt 89" in eco
-    assert "fan 1 step 10000 5000" in eco and "fan 1 curve 60:77 75:255" in eco, eco
-    assert run(["status"])["profile"] == "eco" and run(["status"])["co"][7] == -10
+    # core 7 stable down to -15 (unstable at -20) → -12; core 3 down to -25 → -22; the others at full scale -40 → -37
+    assert st["final"] == [-37, -37, -37, -22, -37, -37, -37, -12] and st["unstable"]["7"]["value"] == -20, st["final"]
+    assert run(["profile", "show", "eco"])["lines"][-len(eco_lines):] == eco_lines
+    assert run(["status"])["profile"] == "eco" and run(["status"])["co"][7] == -12
+    # limits measured but no recorded pass (measurement from an older version): final pass only, then remembered
+    write_atomic(P(CO_LIMITS_PATH), json.dumps(dict(json.loads(read_text(CO_LIMITS_PATH)), final_passed=[])))
+    est = run(["autotune", "estimate", "eco"])
+    assert est["co_reuse"] and est["eco_from"] is None and est["parallel_total_s"] == 24 + 60 + 300, est
+    st = run(["autotune", "start", "eco", "step=9"])
+    assert st["phase"] == "final" and st["co_reused"] and st["eta"]["total_s"] == 24 + 60 + 300, st
+    st = run(["autotune", "step"])
+    assert st["phase"] == "done" and st["profile_lines"] == eco_lines, st
+    assert json.loads(read_text(CO_LIMITS_PATH))["final_passed"][0]["values"] == st["final"]
+    run(["autotune", "abort"])
+    # a recorded pass covers the eco values: proposed at once, no load test (not even the method probe)
+    est = run(["autotune", "estimate", "eco"])
+    assert est["eco_from"] == json.loads(read_text(CO_LIMITS_PATH))["final_passed"][0]["time"] and est["total_s"] == 0, est
+    assert est["sequential_total_s"] == 0 and est["co_reuse"], est
+    st = run(["autotune", "start", "eco"])
+    assert st["phase"] == "done" and st["eco_from"] and "method" not in st and st["eta"] == {"total_s": 0, "remaining_s": 0}, st
+    assert st["profile_lines"] == eco_lines and run(["autotune", "status"])["phase"] == "done"
+    assert not run(["autotune", "estimate", "eco", "margin=2"])["eco_from"]   # more aggressive than validated: final pass
+    run(["autotune", "abort"])
     # resume after a crash (core by core): the step in progress becomes unstable, move on to the next core
     st = run(["autotune", "start", "auto", "step=9", "parallel=0", "reuse=0"])
     assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 60 + 300 + 5 * 20 + 6 * 18, st["eta"]
@@ -2884,7 +2877,7 @@ def selftest():
     st = run(["autotune", "step"])
     assert st["resumed_after_crash"] and st["phase"] == "final" and st["unstable"]["0"] == {"value": -10, "why": "crash"}
     assert st["results"]["0"] == -5 and json.loads(read_text(CO_LIMITS_PATH))["results"]["0"] == -5
-    assert st["final_margin"] == 5 + 3 and at_final_values(st) == [0] * CORES   # crash: eco margin 5 + 3 (−5 + 8, cap 0)
+    assert st["final_margin"] == 3 + 3 and at_final_values(st) == [0] * CORES   # crash: eco margin 3 + 3 (−5 + 6, cap 0)
     run(["autotune", "abort"])
     write_atomic(P(CO_LIMITS_PATH), limits_eco)        # the following cases reuse the complete eco measurement
     run(["profile", "delete", "eco"])
@@ -2900,7 +2893,7 @@ def selftest():
         if st["phase"] == "done":
             break
     assert st["final_tries"] == 1 and st["final_failures"][0]["why"] == "simulato", st
-    assert st["results"]["0"] == -50 and st["final"][0] == -44 and st["final"][7] == -9, (st["results"], st["final"])
+    assert st["results"]["0"] == -40 and st["final"][0] == -34 and st["final"][7] == -9, (st["results"], st["final"])
     assert st["eta"]["total_s"] == 300 + 60 + 4 * 6 + 4 * 20     # total fixed at start
     run(["autotune", "abort"])                                   # discards the proposal: no profile written
     assert "boost" not in run(["profile", "list"])["profiles"]
@@ -2908,13 +2901,14 @@ def selftest():
     FAKE.save()
     # ---- reuse of the measured limit: auto starts from the final pass with its own margin ----
     saved = json.loads(open(P(CO_LIMITS_PATH)).read())
-    assert saved["results"]["7"] == -15 and saved["colimit"] == -50 and saved["method"] == "matrixprod", saved   # −50 also covers −40
+    assert saved["results"]["7"] == -15 and saved["colimit"] == -40 and saved["method"] == "matrixprod", saved
+    assert run(["autotune", "estimate", "auto", "colimit=-45"])["co_reuse"] is None   # shallower than requested: new search
     est = run(["autotune", "estimate", "auto"])
     assert est["co_reuse"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + 5 * 20 + 6 * 18, est
     st = run(["autotune", "start", "auto", "step=3"])
     assert st["phase"] == "final" and st["co_reused"] and st["results"]["7"] == -15
     # the combination failed by boost (margin 3) is remembered: auto already starts from +6
-    assert st["final_tries"] == 1 and st["final_failures"][0]["why"] == "simulato" and at_final_values(st)[0] == -44, st
+    assert st["final_tries"] == 1 and st["final_failures"][0]["why"] == "simulato" and at_final_values(st)[0] == -34, st
     run(["autotune", "abort"])
     assert run(["autotune", "estimate", "auto", "reuse=0"])["co_reuse"] is None
     # ---- autotune auto: pushed CO + PPT/FMax knee (new search: reuse=0) ----
@@ -2942,6 +2936,11 @@ def selftest():
     expect_err(["autotune", "estimate", "auto", "fans=3"], "out of range")
     assert run(["status"])["profile"] == "auto" and run(["status"])["limits"]["ppt"] == 114.0
     run(["default"])
+    # Eco after Auto: Auto's successful final pass already validates the same CO, proposed without load tests
+    st = run(["autotune", "start", "eco"])
+    assert st["phase"] == "done" and st["final"] == [-37] * CORES and st["eco_from"] and "method" not in st, st
+    assert st["profile_lines"][0] == "co" + " -37" * CORES and "ppt 89" in st["profile_lines"] and "tjmax 80" in st["profile_lines"], st
+    run(["autotune", "abort"])
     run(["profile", "delete", "auto"])
     # ---- autotune boost: pushed CO + limits/FMax at the caps + measured gain ----
     est = run(["autotune", "estimate", "boost"])

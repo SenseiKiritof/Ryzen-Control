@@ -20,6 +20,10 @@ msgid " (load: %s)"
 msgstr " (carico: %s)"
 
 #, python-format
+msgid " (undervolt validated by the final pass of %s: no load test)"
+msgstr " (undervolt validato dalla passata finale del %s: nessun test di carico)"
+
+#, python-format
 msgid " (≈ %d rpm)"
 msgstr " (≈ %d giri)"
 
@@ -83,10 +87,6 @@ msgstr "Profilo %s: fabbrica → calibrato"
 #, python-format
 msgid "%s sweep:\n"
 msgstr "Sweep %s:\n"
-
-#, python-format
-msgid "%s → Tctl peak %s °C"
-msgstr "%s → picco Tctl %s °C"
 
 msgid "+ point"
 msgstr "+ punto"
@@ -198,9 +198,6 @@ msgstr "Calibrate"
 msgid "Calibrated with load tests, maximum power: aggressive undervolt (measured limit + margin 3), limits and FMax at the allowed ceilings, measured gain"
 msgstr "Calibrata con test di carico, potenza massima: undervolt spinto (limite misurato + margine 3), limiti e FMax ai tetti consentiti, guadagno misurato"
 
-msgid "Calibrated with load tests: moderate undervolt (measured limit + margin 5), FMax for silence, fans at the minimum at light load"
-msgstr "Calibrata con test di carico: undervolt discreto (limite misurato + margine 5), FMax per il silenzio, ventole al minimo a basso carico"
-
 msgid "Calibrated with load tests: undervolt (measured limit + margin 3), PPT and FMax at the performance/watt knee"
 msgstr "Calibrata con test di carico: undervolt (limite misurato + margine 3), PPT e FMax al ginocchio prestazioni/watt"
 
@@ -252,10 +249,6 @@ msgstr "Chip %s disponibile"
 
 msgid "Choose the values…"
 msgstr "Scegli i valori…"
-
-#, python-format
-msgid "Chosen FMax: %d MHz"
-msgstr "FMax scelta: %d MHz"
 
 msgid "Close"
 msgstr "Chiudi"
@@ -350,28 +343,14 @@ msgstr "Tempo rimanente stimato: %s"
 msgid "Every channel with rpm > 0 is brought to a reduced PWM for about 30 seconds under load (stress-ng), with Tctl monitored: a pump is recognised by the rise in temperature. Duration: about 30 s per channel. At the end the channels go back to how they were."
 msgstr "Ogni canale con giri > 0 viene portato a un PWM ridotto per circa 30 secondi sotto carico (stress-ng), con Tctl sorvegliata: una pompa si riconosce dall'aumento di temperatura. Durata: circa 30 s per canale. Al termine i canali tornano come erano."
 
-msgid "Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays stable, then a final pass on all cores; finally, for Eco the search for the FMax that keeps Tctl below the target, for Auto the performance/watt knee, for Boost the measurement of the gain (MT and ST) over stock. The CO limit search is shared by Eco, Auto and Boost: later calibrations reuse it, each with its own margin. An unstable CO can reboot the PC without warning: save everything before starting. The machine stays usable but slowed down; the calibration resumes from where it was."
-msgstr "Ogni core viene portato a CO (Curve Optimizer) sempre più negativo sotto carico (stress-ng) finché resta stabile, poi una passata finale su tutti i core; infine, per Eco la ricerca della FMax che tiene Tctl sotto l'obiettivo, per Auto il ginocchio prestazioni/watt, per Boost la misura del guadagno (MT e ST) rispetto alla fabbrica. La ricerca del limite CO è unica per Eco, Auto e Boost: le calibrazioni successive la riusano, ognuna con il proprio margine. Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. La macchina resta usabile ma rallentata; la calibrazione riprende da dove era."
+msgid "Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays stable, then a final pass on all cores; finally, for Auto the performance/watt knee, for Boost the measurement of the gain (MT and ST) over stock, while Eco takes the reduced limits of its preset. The CO limit search is shared by Eco, Auto and Boost and later calibrations reuse it; Eco also reuses a final pass already passed at the same CO (for example Auto's) without any load test. An unstable CO can reboot the PC without warning: save everything before starting. The machine stays usable but slowed down; the calibration resumes from where it was."
+msgstr "Ogni core viene portato a CO (Curve Optimizer) sempre più negativo sotto carico (stress-ng) finché resta stabile, poi una passata finale su tutti i core; infine, per Auto il ginocchio prestazioni/watt, per Boost la misura del guadagno (MT e ST) rispetto alla fabbrica, mentre Eco prende i limiti ridotti del suo preset. La ricerca del limite CO è unica per Eco, Auto e Boost e le calibrazioni successive la riusano; Eco riusa anche una passata finale già superata allo stesso CO (per esempio quella di Auto) senza alcun test di carico. Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. La macchina resta usabile ma rallentata; la calibrazione riprende da dove era."
 
 msgid "FMax"
 msgstr "FMax"
 
-#, python-format
-msgid "FMax %d MHz: Tctl peak %.1f °C > %d → trying %s MHz…"
-msgstr "FMax %d MHz: picco Tctl %.1f °C > %d → provo %s MHz…"
-
-#, python-format
-msgid "FMax %s MHz: measuring the Tctl peak…"
-msgstr "FMax %s MHz: misuro il picco Tctl…"
-
-msgid "FMax for silence"
-msgstr "FMax per il silenzio"
-
 msgid "FMax knee"
 msgstr "ginocchio FMax"
-
-msgid "FMax tests:\n"
-msgstr "Test FMax:\n"
 
 msgid "Fall"
 msgstr "Discesa"
@@ -383,6 +362,9 @@ msgstr "Ventola %d"
 #, python-format
 msgid "Fan %d curve"
 msgstr "Ventola %d curva"
+
+msgid "Fan target Tctl"
+msgstr "Tctl obiettivo ventole"
 
 msgid "Fans"
 msgstr "Ventole"
@@ -498,6 +480,9 @@ msgstr "Spenta: riusa la misura del %s; accesa: misura di nuovo il limite (più 
 
 msgid "One CO (Curve Optimizer) step is worth about 3–5 mV less voltage at the same frequency; here you see the real voltage measured at full load for every level."
 msgstr "Un passo di CO (Curve Optimizer) vale circa 3–5 mV di tensione in meno a parità di frequenza; qui vedi la tensione reale misurata a pieno carico per ogni livello."
+
+msgid "Only the Quiet fan level uses it: minimum speed up to this value −10 °C"
+msgstr "Lo usa solo il livello ventole Silenziose: velocità minima fino a questo valore −10 °C"
 
 msgid "Opens the window at every login (asks for the password, unless the option below is on). After a crash it shows the warning and leaves the profile deactivated: it never re-applies anything on its own"
 msgstr "Apre la finestra a ogni accesso (chiede la password, salvo l'opzione qui sotto). Dopo un crash mostra l'avviso e lascia il profilo disattivato: non riapplica nulla da sola"
@@ -622,6 +607,9 @@ msgstr "Esegui"
 msgid "Safety margin"
 msgstr "Margine di sicurezza"
 
+msgid "Same undervolt as Auto (validated), lower power, FMax −400, Tjmax 80 °C, fans at the minimum at light load: quiet under heavy load"
+msgstr "Stesso undervolt di Auto (validato), potenza ridotta, FMax −400, Tjmax 80 °C, ventole al minimo a basso carico: silenziosa sotto carico pesante"
+
 msgid "Save"
 msgstr "Salva"
 
@@ -692,9 +680,6 @@ msgstr "Interrompo…"
 msgid "TDC"
 msgstr "TDC"
 
-msgid "Target Tctl"
-msgstr "Tctl obiettivo"
-
 msgid "Telemetry: "
 msgstr "Telemetria: "
 
@@ -760,6 +745,10 @@ msgstr "Tempo fra un passo PWM e il successivo quando la temperatura sale: alto 
 
 msgid "Tjmax"
 msgstr "Tjmax"
+
+#, python-format
+msgid "Undervolt validated by the final pass of %s, reused without load tests. %s"
+msgstr "Undervolt validato dalla passata finale del %s, riusato senza test di carico. %s"
 
 #, python-format
 msgid "Unknown channels (%d)"
@@ -873,6 +862,10 @@ msgstr "preset"
 
 msgid "pump"
 msgstr "pompa"
+
+#, python-format
+msgid "reuses the undervolt validated by the final pass of %s, without load tests: the profile is proposed right away."
+msgstr "riusa l'undervolt validato dalla passata finale del %s, senza test di carico: il profilo viene proposto subito."
 
 msgid "rise"
 msgstr "salita"

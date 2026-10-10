@@ -53,7 +53,7 @@ CALIBRATED = ("eco", "auto", "boost")   # adapt to the hardware with load tests;
 MODES = (("default", _("Default"), _("Stock values (baseline), automatic start disabled")),
          ("quiet", _("Quiet"), _("Fixed preset: reduced limits, FMax −400, slow-reacting fans")),
          ("performance", _("Performance"), _("Fixed preset: stock values, power mode at maximum")),
-         ("eco", _("Eco"), _("Calibrated with load tests: moderate undervolt (measured limit + margin 5), FMax for silence, fans at the minimum at light load")),
+         ("eco", _("Eco"), _("Same undervolt as Auto (validated), lower power, FMax −400, Tjmax 80 °C, fans at the minimum at light load: quiet under heavy load")),
          ("auto", _("Auto"), _("Calibrated with load tests: undervolt (measured limit + margin 3), PPT and FMax at the performance/watt knee")),
          ("boost", _("Boost"), _("Calibrated with load tests, maximum power: aggressive undervolt (measured limit + margin 3), limits and FMax at the allowed ceilings, measured gain")),
          ("custom", _("Custom"), _("Values set by hand in the CPU, Curves and Fans pages")))
@@ -84,28 +84,29 @@ AUTODETECT_WARNING = _("Every channel with rpm > 0 is brought to a reduced PWM f
 FAN_MISSING_HELP = _("The Super I/O chip (nct67xx) is not visible in hwmon. \"Enable\" loads the nct6775 module and makes it "
                      "permanent; if the chip does not show up because of an ACPI conflict, it adds the kernel parameter "
                      "acpi_enforce_resources=lax and asks for a reboot.")
-# Calibration (autotune) parameters: key, title, unit, allowed range. The defaults come from `autotune estimate`.
-AT_PARAMS = (("target", _("Target Tctl"), "°C", (50, 90)),
-             ("colimit", _("CO (Curve Optimizer) limit"), "", (-50, 0)),
-             ("margin", _("Safety margin"), "", (0, 20)),
-             ("step", _("Duration of each test"), "s", (30, 600)))
+# Calibration (autotune) parameters: key, title, unit, allowed range, subtitle. The defaults come from `autotune estimate`.
+AT_PARAMS = (("target", _("Fan target Tctl"), "°C", (50, 90), _("Only the Quiet fan level uses it: minimum speed up to this value −10 °C")),
+             ("colimit", _("CO (Curve Optimizer) limit"), "", (-50, 0), None),
+             ("margin", _("Safety margin"), "", (0, 20), None),
+             ("step", _("Duration of each test"), "s", (30, 600), None))
 FAN_LEVELS = (_("BIOS: fans untouched"), _("Moderate: rise 3 s, fall 2 s, BIOS curve +10 % with 100 % at 100 °C"),
               _("Quiet: rise 10 s, fall 5 s, minimum up to target Tctl −10 °C, 100 % at Tjmax −5 °C"))
 AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays "
-               "stable, then a final pass on all cores; finally, for Eco the search for the FMax that keeps Tctl below the "
-               "target, for Auto the performance/watt knee, for Boost the measurement of the gain (MT and ST) over stock. "
-               "The CO limit search is shared by Eco, Auto and Boost: later calibrations reuse it, each with its own margin. "
+               "stable, then a final pass on all cores; finally, for Auto the performance/watt knee, for Boost the measurement "
+               "of the gain (MT and ST) over stock, while Eco takes the reduced limits of its preset. The CO limit search is "
+               "shared by Eco, Auto and Boost and later calibrations reuse it; Eco also reuses a final pass already passed at "
+               "the same CO (for example Auto's) without any load test. "
                "An unstable CO can reboot the PC without warning: save everything before starting. "
                "The machine stays usable but slowed down; the calibration resumes from where it was.")
 AT_PARALLEL_SUB = _("Off: one core at a time, slower (%s) but attributes even a reboot with certainty")
-AT_PHASES = {"co": 0.6, "final": 0.7, "fmax": 1.0, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # share of the bar at the end of the phase
+AT_PHASES = {"co": 0.6, "final": 0.7, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # share of the bar at the end of the phase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 # ryzenctl protocol values shown to the user (fan roles, why a CO level failed) through a translated name;
 # anything not listed is shown raw (free-text reasons arrive already translated from ryzenctl).
 ROLE_NAMES = {"ventola": _("fan"), "pompa": _("pump"), "sconosciuto": _("unknown"), "non-controllabile": _("not controllable")}
 WHY_NAMES = {"crash": _("crash"), "instabile": _("unstable"), "simulato": _("simulated")}
-AT_PHASE_NAMES = {"co": _("CO search"), "final": _("final pass"), "fmax": _("FMax for silence"), "ppt": _("PPT knee"),
-                  "fmax_knee": _("FMax knee"), "bench": _("benchmark")}
+AT_PHASE_NAMES = {"co": _("CO search"), "final": _("final pass"), "ppt": _("PPT knee"), "fmax_knee": _("FMax knee"),
+                  "bench": _("benchmark")}
 PUMP_KINDS = ("auto", "max", "fixed")   # same order as PUMP_MODES (ComboRow index)
 PUMP_MODES = (_("Automatic (BIOS) — recommended"), _("Maximum cap"), _("Fixed speed"))
 CSS = """
@@ -904,8 +905,8 @@ class AutotuneDialog(Adw.Window):
         body.append(self.slope)
         self.failures = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)   # failed final passes, one line each
         body.append(self.failures)
-        self.fmax = label("", ["numeric"], wrap=True)
-        body.append(self.fmax)
+        self.sweeps = label("", ["numeric"], wrap=True)
+        body.append(self.sweeps)
         self.result = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         body.append(self.result)
         bar = Gtk.Box(spacing=12, halign=Gtk.Align.END, css_classes=["toolbar"])
@@ -966,7 +967,11 @@ class AutotuneDialog(Adw.Window):
                                  "applied, the combination is unstable and the final pass is repeated with +3 on every core."))
             self.note.set_visible(True)
         if st.get("co_reused"):   # search skipped: table already populated, the CO phase counts as complete in the bar
-            self.reuse.set_text(_("CO limit reused from the measurement of %s. %s") % (st["co_reused"], crash_story(st)))
+            if st.get("eco_from"):   # Eco: final pass skipped too
+                text = _("Undervolt validated by the final pass of %s, reused without load tests. %s") % (st["eco_from"], crash_story(st))
+            else:
+                text = _("CO limit reused from the measurement of %s. %s") % (st["co_reused"], crash_story(st))
+            self.reuse.set_text(text)
             self.reuse.set_visible(True)
         eta = st.get("eta") or {}
         if eta:
@@ -982,13 +987,6 @@ class AutotuneDialog(Adw.Window):
         elif ph == "final":
             self.phase.set_text(_("Final pass on all cores at CO %s (attempt %d/3)") % (self.co_span(self.final_values(st)), st.get("final_tries", 0) + 1))
             frac = AT_PHASES["co"] + (AT_PHASES["final"] - AT_PHASES["co"]) * min(1.0, st.get("final_tries", 0) / 3)
-        elif ph == "fmax":
-            f, tests = st["fmax"].get("current"), st["fmax"].get("tests", [])
-            last = tests[-1] if tests else None
-            self.phase.set_text(_("FMax %d MHz: Tctl peak %.1f °C > %d → trying %s MHz…") % (last[0], last[1], p["target"], f) if last
-                                else _("FMax %s MHz: measuring the Tctl peak…") % f)
-            first = tests[0][0] if tests else f
-            frac = AT_PHASES["final"] + (AT_PHASES["fmax"] - AT_PHASES["final"]) * ((first - f) / max(1, first - 4000) if f else 0)
         elif ph == "bench":                       # Boost: a single step, performance at stock and in boost
             self.phase.set_text(_("Measuring performance at stock and in boost (MT and ST)…") + self.load_text(st))
             frac = (AT_PHASES["final"] + AT_PHASES["bench"]) / 2
@@ -1043,15 +1041,13 @@ class AutotuneDialog(Adw.Window):
         self.slope.set_visible(slope is not None)
         if slope is not None:
             self.slope.set_text(_("Measured on this CPU: ≈ %s mV per CO step") % locale.format_string("%g", round(slope, 1)))
-        tests = st.get("fmax", {}).get("tests", [])
-        text = _("FMax tests:\n") + "\n".join(_("%s → Tctl peak %s °C") % (mhz(t[0]), num(t[1], 1)) for t in tests) if tests else ""
-        knee = st.get("knee")
-        if knee:
+        knee, text = st.get("knee"), ""
+        if knee:   # Auto: the knee sweeps
             for key, unit in (("ppt", "W"), ("fmax", "MHz")):
                 if knee[key]["tests"]:
                     text += ("\n" if text else "") + _("%s sweep:\n") % key.upper() + "\n".join(
                         "%s %s → %.0f op/s, %.0f W" % (t[0], unit, t[1], t[2]) for t in knee[key]["tests"])
-        self.fmax.set_text(text)
+        self.sweeps.set_text(text)
 
     @staticmethod
     def final_values(st):
@@ -1124,8 +1120,6 @@ class AutotuneDialog(Adw.Window):
         if st.get("profile_lines"):
             self.result.append(label(_("%s profile: stock → calibrated") % self.mode, ["heading"]))
             self.result.append(profile_view(st["profile_lines"], self.win.status))
-        if st.get("fmax", {}).get("chosen") and not st.get("profile_lines"):
-            self.result.append(label(_("Chosen FMax: %d MHz") % st["fmax"]["chosen"], ["numeric"]))
         knee = st.get("knee")
         if knee and knee["ppt"].get("chosen"):
             self.result.append(label(_("Performance/watt knee: PPT %d W, FMax %d MHz (maximum loss %d %%)") % (
@@ -1270,7 +1264,9 @@ class ModesPage(Gtk.ScrolledWindow):
         def ask(est):
             p = est["params"]
             target = _("target Tctl %d °C, ") % p["target"] if "target" in p else ""   # Boost: no thermal target
-            if est.get("co_reuse"):   # limit search already done: only the final pass with this mode's margin
+            if est.get("eco_from"):   # Eco: these CO values already passed a final pass, nothing to test
+                auto = _("reuses the undervolt validated by the final pass of %s, without load tests: the profile is proposed right away.") % est["eco_from"]
+            elif est.get("co_reuse"):   # limit search already done: only the final pass with this mode's margin
                 auto = _("CO (Curve Optimizer) limit already measured on %s: reused (repeat the search from \"Choose the values…\"), %s — %smargin %d, %d s per test.") % (
                     est["co_reuse"], mins(est["parallel_total_s"]), target, p["margin"], p["step"])
             else:
@@ -1301,11 +1297,12 @@ class ModesPage(Gtk.ScrolledWindow):
         """Parameters (ranges from AT_PARAMS, defaults from ryzenctl) with an estimate that follows the changes → autotune start → progress."""
         group = Adw.PreferencesGroup()
         spins = {}
-        for key, title, unit, (lo, hi) in AT_PARAMS:
+        for key, title, unit, (lo, hi), sub in AT_PARAMS:
             if key not in est["params"]:   # e.g. Boost has no `target`
                 continue
             r = Adw.SpinRow.new_with_range(lo, hi, 1)
             r.set_title(title + (" (%s)" % unit if unit else ""))
+            r.set_subtitle(sub or "")
             r.set_value(est["params"][key])
             spins[key] = r
             group.add(r)
@@ -1319,7 +1316,8 @@ class ModesPage(Gtk.ScrolledWindow):
         params = lambda: dict(((k, int(r.get_value())) for k, r in spins.items()), parallel=int(parallel.get_active()),
                               reuse=int(not repeat.get_active()), fans=fans.get_selected())
         def show_est(e):
-            estimate.set_text(_("Estimated duration: %s") % mins(e["total_s"]))
+            estimate.set_text(_("Estimated duration: %s") % mins(e["total_s"]) + (
+                _(" (undervolt validated by the final pass of %s: no load test)") % e["eco_from"] if e.get("eco_from") else ""))
             parallel.set_subtitle(AT_PARALLEL_SUB % mins(e["sequential_total_s"]))
             repeat.set_subtitle(_("Off: reuses the measurement of %s; on: measures the limit again (longer)") % e["co_reuse"] if e.get("co_reuse")
                                 else (_("full search") if repeat.get_active() else _("no usable previous measurement")))
@@ -2024,15 +2022,17 @@ class App(Adw.Application):
         win = self.props.active_window
         try:
             win.h.call("autotune", "abort")
-            for mode in ("eco", "auto", "boost"):
+            # the first Eco measures from scratch, the last one reuses the final passes just recorded: done at once
+            for i, mode in enumerate(("eco", "auto", "boost", "eco")):
                 dlg = AutotuneDialog(win, mode)
-                st = win.h.call("autotune", "start", mode, "step=3")
+                st = win.h.call("autotune", "start", mode, "step=3", "reuse=%d" % (i > 0))
                 dlg.show(st)
                 for _i in range(300):
-                    st = win.h.call("autotune", "step")
-                    dlg.show(st)
                     if st["phase"] == "done":
                         break
+                    st = win.h.call("autotune", "step")
+                    dlg.show(st)
+                assert i < 3 or st.get("eco_from"), "Eco did not reuse the validated undervolt"
                 dlg.done(st)
                 win.h.call("autotune", "abort")
                 dlg.closable = True
