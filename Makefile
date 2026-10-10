@@ -79,7 +79,7 @@ rpm: dist
 	rpmdev-setuptree
 	cp dist/ryzen-control-$(VERSION).tar.gz "$$HOME/rpmbuild/SOURCES/"
 	rpmbuild -ba packaging/ryzen-control.spec
-	cp "$$HOME"/rpmbuild/RPMS/noarch/ryzen-control-$(VERSION)-*.rpm "$$HOME"/rpmbuild/RPMS/noarch/ryzen-smu-dkms-$(VERSION)-*.rpm dist/
+	cp "$$HOME"/rpmbuild/RPMS/noarch/ryzen-control-$(VERSION)-*.rpm dist/
 	ls -1 dist/
 
 # kbuild non accetta spazi nel percorso: compila una copia del driver fuori dal repo.
