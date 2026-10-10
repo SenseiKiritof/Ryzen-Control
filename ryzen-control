@@ -271,6 +271,18 @@ def crash_story(st):
         where, span(nxt), st.get("final_margin", 0))
 
 
+def curve_label(base_txt, new_txt):
+    """Curva del profilo sotto quella di fabbrica: due curve con una freccia in mezzo erano illeggibili."""
+    if base_txt is None or base_txt == new_txt:
+        return label(new_txt or "—", ["numeric", "dim-label"], wrap=True)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    box.append(label("fabbrica: " + base_txt, ["numeric", "dim-label", "caption"], wrap=True))
+    lab = label("", ["numeric", "accent"], wrap=True)
+    lab.set_markup("<b>%s</b>" % GLib.markup_escape_text(new_txt))
+    box.append(lab)
+    return box
+
+
 def pump_mode(c):
     """Stato pompa dal canale di `fan status`: ("auto"|"max"|"fixed", pct)."""
     if c.get("modo") == 1 and c.get("pwm") is not None:
@@ -377,7 +389,7 @@ def profile_table(lines, st):
                 rows.append(("Ventola %d %s" % (n, name), diff_label(sec(new_v if same else cur_v), sec(new_v), "s", lower_is_better=False)))
         if "curve" in f:
             rm = cur.get("rpm_max")
-            rows.append(("Ventola %d curva" % n, diff_label(curve_text(cur["curva"], rm) if cur.get("curva") else None, curve_text(f["curve"], rm))))
+            rows.append(("Ventola %d curva" % n, curve_label(curve_text(cur["curva"], rm) if cur.get("curva") else None, curve_text(f["curve"], rm))))
         if "pump" in f:   # stato attuale e nuovo come testo: "auto" | "tetto 70 %" | "fissa 65 %"
             rows.append(("Pompa %d" % n, diff_label(pump_text(cur) if cur else None, pump_text(f["pump"]))))
     box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
@@ -1064,7 +1076,7 @@ class ModesPage(Gtk.ScrolledWindow):
         # due colonne sempre affiancate (un FlowBox le metteva una sotto l'altra: le righe espanse
         # chiedono più larghezza naturale di metà finestra), a sinistra preset e scelte manuali, a destra le calibrate
         cols = Gtk.Box(spacing=18, homogeneous=True)
-        lists = {}
+        lists, colbox = {}, {}
         for name, title, desc in (("preset", "Preset", "Valori fissi ricavati da quelli di fabbrica, nessun test; più Default e Custom"),
                                   ("calibrate", "Calibrate", "Misurate su questa CPU con test di carico (Calibra…)")):
             col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.START, hexpand=True)
@@ -1073,6 +1085,7 @@ class ModesPage(Gtk.ScrolledWindow):
             lists[name] = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
             col.append(lists[name])
             cols.append(col)
+            colbox[name] = col
         content.append(cols)
         self.rows, first = {}, None
         self.tables = {}
@@ -1129,7 +1142,8 @@ class ModesPage(Gtk.ScrolledWindow):
         hw.add_suffix(self.hw_btn)
         for r in (self.autostart, self.login, self.trust, self.unlock, hw):
             g.add(r)
-        content.append(g)
+        g.set_margin_top(18)
+        colbox["preset"].append(g)          # sotto i preset: la colonna sinistra è corta, così lo spazio non resta vuoto
 
     def refresh(self, st):
         self.loading = True
