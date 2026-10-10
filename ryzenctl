@@ -637,12 +637,21 @@ def cmd_unlock(ctx, args):
     if args not in (["on"], ["off"]):
         raise Err(_("usage: unlock on|off"))
     s = load_settings()
+    if args == ["off"] and s["profile"] == "boost":   # it would stay applied (and reapplied at boot) without unlock
+        raise Err(_("Boost is the selected mode and requires unlock: switch to another mode first"))
     s["unlock"] = args == ["on"]
     save_settings(s)
     if s["unlock"]:
         return (_("WARNING: limits beyond the factory values enabled (PPT up to %d W, TDC %d A, EDC %d A, FMax +%d MHz). More heat and power draw; Tjmax stays <= baseline anyway.")
                 % (UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC, FMAX_UNLOCK_EXTRA))
     return _("limits back to the factory caps")
+
+
+def check_boost(name):
+    """Boost puts limits and FMax at the unlock ceilings by design: creating, calibrating, selecting
+    or applying it (also at boot) is refused while unlock is off."""
+    if name == "boost" and not load_settings()["unlock"]:
+        raise Err(_("Boost requires unlock (ryzenctl unlock on; in the GUI: Preferences, \"Allow beyond the stock values\")"))
 
 
 # ---- Remembered authorization: polkit rule for the calling user -----------------------------
@@ -873,6 +882,7 @@ def apply_lines(lines, ctx, part=None):
 def cmd_apply(ctx, args):
     if len(args) not in (1, 2) or (len(args) == 2 and args[1] not in ("cpu", "fan")):
         raise Err(_("usage: apply <profile|baseline> [cpu|fan]"))
+    check_boost(args[0])
     return {"applied": apply_lines(profile_lines(args[0]), ctx, args[1] if len(args) == 2 else None)}
 
 
@@ -908,6 +918,7 @@ def cmd_profile(ctx, args):
 def cmd_use(ctx, args):
     if len(args) != 1:
         raise Err(_("usage: use <profile>"))
+    check_boost(args[0])
     profile_lines(args[0])
     s = load_settings()
     s["profile"] = args[0]
@@ -972,6 +983,7 @@ def cmd_preset(ctx, args):
     lines = preset_lines(args[0], load_baseline())
     if len(args) == 2:   # what the profile will show and apply once created (stock values included)
         return {"profile": args[0], "lines": [" ".join(t) for t in with_stock([l.split() for l in lines])]}
+    check_boost(args[0])
     return cmd_profile(ctx, ["save", args[0]] + lines)
 
 
@@ -1589,6 +1601,7 @@ def _autotune(ctx, args):
     if args[0] == "start":
         if len(args) < 2 or args[1] not in AT_DEFAULTS:
             raise Err(_("usage: autotune start eco|auto [key=value…]"))
+        check_boost(args[1])
         check_cpu()
         load_baseline()
         params = at_params(args[1], args[2:])
@@ -1892,7 +1905,7 @@ def apply_autostart(ctx, parts):
             out["errors"][part] = _("CPU profile not applied: crash in the previous boot")
             continue
         try:
-            out["applied"][part] = apply_lines(profile_lines(s["profile"]), ctx, part)
+            out["applied"][part] = cmd_apply(ctx, [s["profile"], part])["applied"]   # same checks as `apply` (Boost)
         except Err as e:
             out["errors"][part] = str(e)
     return out
@@ -2816,6 +2829,23 @@ def selftest():
     assert run(["preset", "boost", "show"])["lines"] == bl        # boost = performance until calibrated
     expect_err(["preset", "turbo"], "usage")
     run(["profile", "delete", "auto"])
+    # Boost only with unlock: neither created, calibrated, selected nor applied without it (show stays allowed)
+    for argv in (["preset", "boost"], ["autotune", "start", "boost"], ["use", "boost"], ["apply", "boost"]):
+        expect_err(argv, "requires unlock")
+    assert at_load() is None and "boost" not in run(["profile", "list"])["profiles"]
+    run(["unlock", "on"])
+    run(["preset", "boost"])
+    assert run(["use", "boost"]) == {"profile": "boost"} and run(["apply", "boost"])["applied"]
+    expect_err(["unlock", "off"], "another mode")              # selected: it would stay applied without unlock
+    run(["default"])                                           # another mode: unlock off allowed again
+    run(["unlock", "off"])
+    s = load_settings()                                        # Boost selected without unlock by an older version:
+    s.update(profile="boost", autostart=True)                  # not reapplied at boot or resume
+    save_settings(s)
+    out = run(["resume"])
+    assert not out["applied"] and set(out["errors"]) == {"fan", "cpu"} and all("requires unlock" in e for e in out["errors"].values()), out
+    run(["default"])
+    run(["profile", "delete", "boost"])
 
     # ---- autotune eco: conservative CO per core, final pass, FMax from the target, eco profile ----
     expect_err(["autotune", "step"], "no calibration")
@@ -2893,6 +2923,7 @@ def selftest():
     # ---- failed final pass: +3 to all, measured limits intact, reason recorded ----
     FAKE.s["combined_stricter"] = 4           # margin 3 is not enough: the final pass fails once
     FAKE.save()
+    run(["unlock", "on"])                                       # Boost only with unlock
     st = run(["autotune", "start", "boost", "step=3"])          # reuses the eco limits
     assert st["phase"] == "final" and st["eta"]["total_s"] == 300 + 60 + 4 * 6 + 4 * 20
     for _i in range(20):
@@ -2904,6 +2935,7 @@ def selftest():
     assert st["eta"]["total_s"] == 300 + 60 + 4 * 6 + 4 * 20     # total fixed at start
     run(["autotune", "abort"])                                   # discards the proposal: no profile written
     assert "boost" not in run(["profile", "list"])["profiles"]
+    run(["unlock", "off"])
     FAKE.s["combined_stricter"] = 0
     FAKE.save()
     # ---- reuse of the measured limit: auto starts from the final pass with its own margin ----
@@ -2946,6 +2978,7 @@ def selftest():
     # ---- autotune boost: pushed CO + limits/FMax at the caps + measured gain ----
     est = run(["autotune", "estimate", "boost"])
     assert "target" not in est["params"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + 4 * 20 and est["co_reuse"], est
+    run(["unlock", "on"])                                   # Boost only with unlock: limits and FMax at the unlock ceilings
     st = run(["autotune", "start", "boost", "step=3"])      # reuses the limit measured by auto (−40 → −37)
     assert st["phase"] == "final" and st["co_reused"]
     for _i in range(300):
@@ -2956,10 +2989,12 @@ def selftest():
     assert st["method"] == "matrixprod" and st["mv_per_step"] == 3.0
     assert run(["status"])["co"] == [0] * CORES and run(["autotune", "save", "apply"])["applied"]
     bl = run(["profile", "show", "boost"])["lines"]
-    assert "co -37 -37 -37 -37 -37 -37 -37 -37" in bl and "ppt 162" in bl and "fmax 5225" in bl and "power performance" in bl, bl
+    assert "co -37 -37 -37 -37 -37 -37 -37 -37" in bl and "power performance" in bl, bl
+    assert "ppt %d" % UNLOCK_PPT in bl and "tdc %d" % UNLOCK_TDC in bl and "edc %d" % UNLOCK_EDC in bl and "fmax %d" % (5225 + FMAX_UNLOCK_EXTRA) in bl, bl
     assert run(["status"])["profile"] == "boost" and run(["status"])["co"] == [-37] * CORES
     run(["default"])
     run(["profile", "delete", "boost"])
+    run(["unlock", "off"])
     # ---- instability after the final pass: crash or dead benchmark → unstable combination, final pass repeated with +3 ----
     st = run(["autotune", "start", "auto", "step=3"])          # reuses −40: starts from the final pass at −37
     assert st["phase"] == "final" and st["final_tries"] == 0

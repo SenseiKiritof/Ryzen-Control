@@ -103,6 +103,10 @@ msgid "usage: unlock on|off"
 msgstr "uso: unlock on|off"
 
 #: ryzenctl
+msgid "Boost is the selected mode and requires unlock: switch to another mode first"
+msgstr "Boost è la modalità selezionata e richiede lo sblocco: passare prima a un'altra modalità"
+
+#: ryzenctl
 #, python-format
 msgid "WARNING: limits beyond the factory values enabled (PPT up to %d W, TDC %d A, EDC %d A, FMax +%d MHz). More heat and power draw; Tjmax stays <= baseline anyway."
 msgstr "ATTENZIONE: limiti oltre i valori di fabbrica abilitati (PPT fino a %d W, TDC %d A, EDC %d A, FMax +%d MHz). Più calore e consumo; Tjmax resta comunque <= baseline."
@@ -110,6 +114,10 @@ msgstr "ATTENZIONE: limiti oltre i valori di fabbrica abilitati (PPT fino a %d W
 #: ryzenctl
 msgid "limits back to the factory caps"
 msgstr "limiti riportati ai tetti di fabbrica"
+
+#: ryzenctl
+msgid "Boost requires unlock (ryzenctl unlock on; in the GUI: Preferences, \"Allow beyond the stock values\")"
+msgstr "Boost richiede lo sblocco (ryzenctl unlock on; nella GUI: Preferenze, \"Consenti oltre i valori di fabbrica\")"
 
 #: ryzenctl
 msgid "usage: trust on|off|status"

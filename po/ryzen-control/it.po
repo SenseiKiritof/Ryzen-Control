@@ -149,6 +149,9 @@ msgstr "Oltre i valori di fabbrica?"
 msgid "Boost"
 msgstr "Boost"
 
+msgid "Boost needs \"Allow beyond the stock values\": turn it on in Preferences"
+msgstr "Boost richiede \"Consenti oltre i valori di fabbrica\": attivalo nelle Preferenze"
+
 msgid "CO (Curve Optimizer)"
 msgstr "CO (Curve Optimizer)"
 
