@@ -1,8 +1,9 @@
-# Ryzen Control — unica fonte del layout installato. I pacchetti (RPM, deb, Arch) chiamano
-# `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` sono i pezzi.
+# Ryzen Control — the single source of truth for the installed layout. Packages (RPM, deb, Arch)
+# call `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` /
+# `install-locales` are the pieces.
 VERSION := 0.4.2
-# Versione del modulo DKMS: cambia SOLO quando cambia ryzen_smu/ (una nuova directory /usr/src =
-# ricompilazione + dracut, circa un minuto all'aggiornamento). Stesso valore di %drv_version nella spec.
+# DKMS module version: bump ONLY when ryzen_smu/ changes (a new /usr/src directory means a
+# rebuild + dracut, about a minute at upgrade time). Same value as %drv_version in the spec.
 DRV_VERSION := 0.4.1
 APPID := org.ryzencontrol.RyzenControl
 PREFIX ?= /usr
@@ -16,18 +17,24 @@ POLKITDIR := $(DESTDIR)$(PREFIX)/share/polkit-1/actions
 APPDIR := $(DESTDIR)$(PREFIX)/share/applications
 ICONDIR := $(DESTDIR)$(PREFIX)/share/icons/hicolor/scalable/apps
 METADIR := $(DESTDIR)$(PREFIX)/share/metainfo
+LOCALEDIR := $(DESTDIR)$(PREFIX)/share/locale
 AUTOSTARTDIR := $(DESTDIR)/etc/xdg/autostart
 ETCDIR := $(DESTDIR)/etc/ryzenctl
 STATEDIR := $(DESTDIR)/var/lib/ryzenctl
 DKMS_SRC := $(DESTDIR)$(PREFIX)/src/ryzen_smu-$(DRV_VERSION)
 TMPROOT := $(or $(TMPDIR),/tmp)/ryzen-control-check
 
-.PHONY: all install install-cli install-gui install-dkms-src dkms uninstall check driver-check dist rpm
+# Translations: po/<domain>/<lang>.po → build/locale/<lang>/LC_MESSAGES/<domain>.mo, compiled by
+# po/msgfmt.py (standard library only: no GNU gettext needed to build or install).
+PO := $(wildcard po/*/*.po)
+MO := $(foreach p,$(PO),build/locale/$(notdir $(basename $(p)))/LC_MESSAGES/$(notdir $(patsubst %/,%,$(dir $(p)))).mo)
+
+.PHONY: all install install-cli install-gui install-dkms-src install-locales locales dkms uninstall check driver-check dist rpm
 
 all:
-	@echo "Target: install [DESTDIR=…] (install-cli install-gui install-dkms-src), dkms, uninstall, check, driver-check, dist, rpm"
+	@echo "Targets: install [DESTDIR=…] (install-cli install-gui install-dkms-src install-locales), locales, dkms, uninstall, check, driver-check, dist, rpm"
 
-install: install-cli $(if $(wildcard ryzen-control),install-gui) install-dkms-src
+install: install-cli $(if $(wildcard ryzen-control),install-gui) install-dkms-src install-locales
 
 install-cli:
 	install -Dm755 ryzenctl $(BIN)/ryzenctl
@@ -44,13 +51,27 @@ install-gui:
 	install -Dm644 -t $(ICONDIR) data/$(APPID).svg
 	install -Dm644 -t $(METADIR) data/$(APPID).metainfo.xml
 
-# Sorgente del driver per DKMS (il pacchetto -dkms non contiene binari).
+# One .mo per catalog, mirrored under $(PREFIX)/share/locale.
+locales: $(MO)
+
+
+define MO_RULE
+build/locale/$(notdir $(basename $(1)))/LC_MESSAGES/$(notdir $(patsubst %/,%,$(dir $(1)))).mo: $(1) po/msgfmt.py
+	mkdir -p $$(dir $$@)
+	python3 po/msgfmt.py $(1) $$@
+endef
+$(foreach p,$(PO),$(eval $(call MO_RULE,$(p))))
+
+install-locales: locales
+	mkdir -p build/locale && cd build/locale && find . -name '*.mo' -exec install -Dm644 {} $(LOCALEDIR)/{} \;
+
+# Driver source for DKMS (no binaries are shipped: DKMS builds the module on the target kernel).
 install-dkms-src:
 	install -dm755 $(DKMS_SRC)
 	install -m644 -t $(DKMS_SRC) ryzen_smu/drv.c ryzen_smu/smu.c ryzen_smu/smu.h ryzen_smu/Makefile
 	sed -e 's/@VERSION@/$(DRV_VERSION)/' -e 's/@CFLGS@//' ryzen_smu/dkms.conf > $(DKMS_SRC)/dkms.conf
 
-# Ultima spiaggia senza pacchetto: `sudo make install && sudo make dkms`.
+# Last resort without a package: `sudo make install && sudo make dkms`.
 dkms:
 	dkms add ryzen_smu/$(DRV_VERSION) || true
 	dkms build ryzen_smu/$(DRV_VERSION) && dkms install ryzen_smu/$(DRV_VERSION)
@@ -62,23 +83,27 @@ uninstall:
 	rm -f $(UNITDIR)/ryzenctl.service $(UNITDIR)/ryzenctl-resume.service $(PRESETDIR)/80-ryzen-control.preset
 	rm -f $(MODPROBEDIR)/ryzen-control.conf $(POLKITDIR)/$(APPID).policy $(AUTOSTARTDIR)/ryzenctl-notify.desktop
 	rm -f $(APPDIR)/$(APPID).desktop $(ICONDIR)/$(APPID).svg $(METADIR)/$(APPID).metainfo.xml
+	rm -f $(LOCALEDIR)/*/LC_MESSAGES/ryzenctl.mo $(LOCALEDIR)/*/LC_MESSAGES/ryzen-control.mo
 
-# Verifiche senza root né hardware: selftest, layout in una radice temporanea, unit, desktop, metainfo.
-check:
+# Checks that need neither root nor hardware: selftest, layout in a scratch root, units,
+# desktop entries, metainfo, the calibration window over every state of the fake backend
+# (needs a display), once in English and once with the Italian catalog.
+check: locales
 	python3 ryzenctl selftest
 	rm -rf "$(TMPROOT)" && $(MAKE) install DESTDIR="$(TMPROOT)" >/dev/null
 	cd "$(TMPROOT)" && find . -type f | sort
 	systemd-analyze --root="$(TMPROOT)" verify --recursive-errors=no ryzenctl.service ryzenctl-resume.service
 	desktop-file-validate data/ryzenctl-notify.desktop data/$(APPID).desktop
 	-appstreamcli validate --no-net data/$(APPID).metainfo.xml
-	timeout 120 python3 ryzen-control --mock --smoke   # finestra di calibrazione su ogni stato del backend finto (serve un display)
+	LANGUAGE=C LC_ALL=C.UTF-8 timeout 120 python3 ryzen-control --mock --smoke
+	LANGUAGE=it LC_ALL=it_IT.UTF-8 RYZEN_CONTROL_LOCALEDIR=build/locale timeout 120 python3 ryzen-control --mock --smoke
 
-# Tarball dal commit corrente (HEAD): i pacchetti si costruiscono da ciò che è versionato.
+# Tarball from the current commit (HEAD): packages are built from what is versioned.
 dist:
 	mkdir -p dist
 	git archive --format=tar.gz --prefix=ryzen-control-$(VERSION)/ -o dist/ryzen-control-$(VERSION).tar.gz HEAD
 
-# RPM nell'albero standard ~/rpmbuild (niente spazi nei percorsi); risultato copiato in dist/.
+# RPM in the standard ~/rpmbuild tree (no spaces in paths); result copied to dist/.
 rpm: dist
 	rpmdev-setuptree
 	cp dist/ryzen-control-$(VERSION).tar.gz "$$HOME/rpmbuild/SOURCES/"
@@ -86,7 +111,7 @@ rpm: dist
 	cp "$$HOME"/rpmbuild/RPMS/noarch/ryzen-control-$(VERSION)-*.rpm dist/
 	ls -1 dist/
 
-# kbuild non accetta spazi nel percorso: compila una copia del driver fuori dal repo.
+# kbuild rejects spaces in the path: build a copy of the driver outside the repo.
 driver-check:
 	rm -rf "$(TMPROOT)-driver" && cp -r ryzen_smu "$(TMPROOT)-driver"
 	$(MAKE) -C "$(TMPROOT)-driver" && modinfo -F vermagic "$(TMPROOT)-driver/ryzen_smu.ko"
