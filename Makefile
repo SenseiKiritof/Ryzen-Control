@@ -1,7 +1,7 @@
 # Ryzen Control — the single source of truth for the installed layout. Packages (RPM, deb, Arch)
 # call `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` /
 # `install-locales` are the pieces.
-VERSION := 0.4.3
+VERSION := 0.4.4
 # DKMS module version: bump ONLY when ryzen_smu/ changes (a new /usr/src directory means a
 # rebuild + dracut, about a minute at upgrade time). Same value as %drv_version in the spec.
 DRV_VERSION := 0.4.1
@@ -99,9 +99,12 @@ check: locales
 	LANGUAGE=it LC_ALL=it_IT.UTF-8 RYZEN_CONTROL_LOCALEDIR=build/locale timeout 120 python3 ryzen-control --mock --smoke
 
 # README screenshots: the GUI on a fresh fake backend (fan roles, presets, the three calibrations),
-# one PNG per page plus the calibration window, in English (needs a display; windows flash briefly).
+# one PNG per page plus the calibration window and a short GIF of an Auto calibration (ImageMagick),
+# in English (needs a display; windows flash briefly).
 screenshots:
-	root=$$(mktemp -d) && LANGUAGE=C LC_ALL=C.UTF-8 RYZENCTL_ROOT=$$root timeout 120 python3 ryzen-control --mock --screenshots docs/screenshots; rc=$$?; rm -rf $$root; exit $$rc
+	root=$$(mktemp -d) && LANGUAGE=C LC_ALL=C.UTF-8 RYZENCTL_ROOT=$$root timeout 120 python3 ryzen-control --mock --screenshots docs/screenshots \
+	  && magick -delay 40 $$root/frames/f-*.png -delay 350 $$root/frames/last.png -loop 0 -resize 720x -layers Optimize docs/screenshots/calibration.gif; \
+	  rc=$$?; rm -rf $$root; exit $$rc
 
 # Tarball from the current commit (HEAD): packages are built from what is versioned.
 dist:

@@ -103,6 +103,10 @@ msgid "usage: unlock on|off"
 msgstr "uso: unlock on|off"
 
 #: ryzenctl
+msgid "Boost is the selected mode and requires unlock: switch to another mode first"
+msgstr "Boost è la modalità selezionata e richiede lo sblocco: passare prima a un'altra modalità"
+
+#: ryzenctl
 #, python-format
 msgid "WARNING: limits beyond the factory values enabled (PPT up to %d W, TDC %d A, EDC %d A, FMax +%d MHz). More heat and power draw; Tjmax stays <= baseline anyway."
 msgstr "ATTENZIONE: limiti oltre i valori di fabbrica abilitati (PPT fino a %d W, TDC %d A, EDC %d A, FMax +%d MHz). Più calore e consumo; Tjmax resta comunque <= baseline."
@@ -110,6 +114,10 @@ msgstr "ATTENZIONE: limiti oltre i valori di fabbrica abilitati (PPT fino a %d W
 #: ryzenctl
 msgid "limits back to the factory caps"
 msgstr "limiti riportati ai tetti di fabbrica"
+
+#: ryzenctl
+msgid "Boost requires unlock (ryzenctl unlock on; in the GUI: Preferences, \"Allow beyond the stock values\")"
+msgstr "Boost richiede lo sblocco (ryzenctl unlock on; nella GUI: Preferenze, \"Consenti oltre i valori di fabbrica\")"
 
 #: ryzenctl
 msgid "usage: trust on|off|status"
@@ -241,11 +249,6 @@ msgstr "parametro sconosciuto '%s' (%s)"
 
 #: ryzenctl
 #, python-format
-msgid "stress-ng terminated (exit code %d) during a burst"
-msgstr "stress-ng terminato (codice %d) durante una raffica"
-
-#: ryzenctl
-#, python-format
 msgid "stress-ng %s terminated after %.0f s (exit code %s) during the benchmark"
 msgstr "stress-ng %s terminato dopo %.0f s (codice %s) durante il benchmark"
 
@@ -254,8 +257,8 @@ msgid "stress-ng reported no metrics"
 msgstr "stress-ng non ha riportato le metriche"
 
 #: ryzenctl
-msgid "usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
-msgstr "uso: autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
+msgid "usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
+msgstr "uso: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
 
 #: ryzenctl
 msgid "usage: autotune estimate eco|auto [key=value…]"

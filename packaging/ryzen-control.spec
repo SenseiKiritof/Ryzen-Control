@@ -2,7 +2,7 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.4.3
+Version:        0.4.4
 Release:        1%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
@@ -122,6 +122,24 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.4-1
+- Eco reuses the undervolt validated by Auto/Boost with the Eco preset (instant when a recorded
+  final pass covers it); Boost only with "Allow beyond the stock values"; unknown fan channels in
+  a collapsed section; calibration window with the progress pinned on top; README GIF
+
+* Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-4
+- Every mode shows and applies a complete state: the stock values of what a profile does not set
+  (fan curve and steps, limits) are included, so switching mode never keeps another mode's fans
+
+* Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-3
+- Monitor graph with legend, coloured axes, PPT limit line and time hint; Preferences tab for
+  startup and limits; fan rows of the profile tables aligned and Eco fan texts matching the curve;
+  Fans page flag to show unknown channels (remembered)
+
+* Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-2
+- Moderate fan level (Auto and Boost default): BIOS curve +10 % with full speed at 100 °C instead
+  of 125 °C, rise 3 s / fall 2 s
+
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-1
 - Source, documentation and UI in English; UI and ryzenctl messages follow the system language
   (gettext, Italian catalog); CLI `unlock` crash fixed

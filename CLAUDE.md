@@ -30,15 +30,18 @@ notification, reactivate, restart, clean boot, resume). Tag `v0.1.0` on `main`.
 protected; step 10 s/5 s on the fan channels removes the jumps on spikes (3 s of full load, rpm
 steady). The chip rounds the steps to ~200 ms. Tag `v0.2.0`.
 **Phase 3 (GUI) and phase 4 (calibrations)** written and used on hardware: `ryzen-control`
-(pages Monitor, Modes with Quiet/Boost presets and calibrated Eco/Auto, CPU, Curves, Fans;
-values coloured against the factory ones; resizable calibration window with progress, duration
-estimates, measured voltage per core and mV per step; immediate interruption). `autotune` in
-ryzenctl is a step machine (`start/step/status/abort/estimate`, state in
-`/var/lib/ryzenctl/autotune.json`, resume after crash, parallel by default). Eco verified on
-hardware (CO −20 on 8 cores, ≈ 3.4 mV/step, FMax unchanged); Auto (PPT/FMax knee with RAPL)
-under verification; Boost calibrated, pump with cap or fixed speed, choice at the end of the
-calibration (Cancel / Save / Save and apply), `trust`, start at login, clickable notification.
-Tag `v0.4.3` (VERSION 0.4.3, DKMS module `DRV_VERSION` 0.4.1). Next: phase 5 support for all
+(pages Monitor, Modes with Quiet/Performance presets and calibrated Eco/Auto/Boost, CPU, Curves, Fans,
+Preferences;
+values coloured against the factory ones; resizable calibration window with the progress pinned on
+top, duration estimates, measured voltage per core and mV per step; immediate interruption).
+`autotune` in ryzenctl is a step machine (`start/step/status/abort/estimate`, state in
+`/var/lib/ryzenctl/autotune.json`, resume after crash, parallel by default). Auto verified on
+hardware (fft search: per-core limit −35, final pass −29 stable, PPT 114 W, FMax 4850, ≈ 3.4
+mV/step); Eco reuses Auto's validated CO with the Eco preset (instant when a recorded final pass
+covers it); Boost only with unlock (unlock ceilings); pump with cap or fixed speed; choice at the
+end of the calibration (Cancel / Save / Save and apply); `trust`, start at login, clickable
+notification; Preferences tab; unknown fan channels in a collapsed section. VERSION 0.4.4 (last
+tag `v0.4.3`), DKMS module `DRV_VERSION` 0.4.1. Next: phase 5 support for all
 Ryzen CPUs (`FAMILIES` table by codename, dynamic `CORES`, fail-closed gate), phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
@@ -56,8 +59,13 @@ combinations stay in `co_limits.json` (`final_failures`) and are not retried; th
 attribution (`at_attribute_crash`, no SMU) already happens in `boot`; the heavy method is also
 the first phase of the search (`co_limits` files without `method` are not reused). The nct6775
 driver does not write back a 0 ms step (minimum register 1 = 400 ms): `FAN_STEP_MIN_MS`,
-otherwise `default` failed on the baseline's fan lines. A freeze followed by a reboot from the
+otherwise `default` failed on the baseline's fan lines. The BIOS fan curves reach 100 % only at
+125 °C: under load the fans hardly react, so the "moderate" level (Auto, Boost) is the BIOS curve
++10 % with full speed at 100 °C and 3 s / 2 s steps (tuned by the user); generated curves always
+start from the baseline's BIOS curve (`bios_curve`), never from the chip's current one. A freeze followed by a reboot from the
 button can wipe the files written in the last seconds (btrfs): even freshly created git objects.
+A separate Eco calibration (FMax sweep for a Tctl target, margin +5) turned out redundant with
+Auto's undervolt: Eco now reuses the validated CO and the FMax sweep is gone.
 
 ## Layout
 
@@ -115,6 +123,9 @@ CLI: sudo ryzenctl …  ──────────────────�
 systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib/ryzenctl, /run/ryzenctl
 ```
 
+- **A profile = baseline + its own lines** (`with_stock` in `profile_lines`): the stock values of
+  what it does not set (CPU keys, fan `step`/`curve` of "ventola" channels; never the pump) come first,
+  so `profile show`, `apply` and the boot always see and write a complete state.
 - **A single command grammar** (`co 7 -3`, `ppt 88`, `fmax 4800`, `shaper 4 -5 -5 0`,
   `power balanced`, …) used identically by the CLI, profile file lines and the `serve` protocol
   (one JSON-array line per request, one `{"ok":…}` line as reply; `boot/shutdown/resume/serve`
@@ -142,6 +153,12 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   explicit modprobe).
 - **Modes** are static (no daemon, the dynamic behaviour is done by PBO): Default / Quiet (preset) /
   Eco (calibrated) / Auto (calibrated) / Performance (preset) / Boost (calibrated) / Custom.
+  The three calibrated modes share one CO measurement and one margin (+3): Auto adds the
+  PPT/FMax knee, Boost the unlock ceilings and a gain bench (`check_boost`: preset/autotune
+  start/use/apply refused without `unlock on`, `unlock off` refused while Boost is selected), Eco
+  is the Eco preset with that CO — every successful final pass is recorded in `co_limits.json`
+  (`final_passed`) and a covering one makes `autotune start eco` return `done` at once
+  (`at_reused`, `eco_from` in the estimate); without it the final pass, from scratch the search.
   `preset <name>` generates the profiles from the baseline (ratios in `PRESETS`); `autotune`
   replaces them with measurements, but only on `autotune save [apply]`: at `phase == done` the
   CPU is at baseline and the profile is proposed in `profile_lines` (the GUI asks Cancel / Save /

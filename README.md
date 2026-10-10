@@ -63,26 +63,29 @@ To remove: `sudo make uninstall`.
 
 Open **Ryzen Control** from the application menu (or run `ryzen-control`). The first action that
 needs root asks for the administrator password once per session; "Stop asking for the password"
-in Modes removes even that one. The screenshots below come from the fake backend
+in Preferences removes even that one. The screenshots below come from the fake backend
 (`make screenshots`), so the values are illustrative.
 
 **Monitor** — Tctl and per-core temperature, PPT and TDC against their limits, MHz, voltage and
-Curve Optimizer per core, the last 60 s of Tctl and PPT, fan speeds and power mode.
+Curve Optimizer per core, a 60 s graph of Tctl (blue, °C) and PPT (orange, W, its limit dashed),
+fan speeds and power mode.
 
 ![Monitor page](docs/screenshots/monitor.png)
 
 **Modes** — one click switches between stock values (Default), the fixed presets (Quiet,
 Performance), the modes calibrated on this CPU (Eco, Auto, Boost) and your own values (Custom).
-Every profile lists what it changes: green is more conservative than stock, red more aggressive.
-"Apply at startup" re-applies the selected profile at every boot and resume, never after a crash.
+Every profile lists its values, fans included: green is more conservative than stock, red more
+aggressive, grey unchanged. Boost needs "Allow beyond the stock values" (Preferences): until then
+it is shown dimmed, and hovering it says why.
 
-**Calibration** — "Calibrate…" on Eco, Auto or Boost measures this CPU: the Curve Optimizer limit
-of every core under load, then FMax for silence (Eco), the performance/watt knee (Auto) or the
-gain over stock (Boost), with the remaining time and the real voltage measured per core. At the
-end you choose: discard, save, or save and apply. Save your work first: an unstable level can
-reboot the PC (see "Safety").
+**Calibration** — "Calibrate…" on Auto or Boost measures this CPU: the Curve Optimizer limit of
+every core under load, a final pass on all cores, then the performance/watt knee (Auto) or the
+gain over stock (Boost), with the remaining time and the real voltage measured per core. Eco
+reuses the undervolt that Auto or Boost validated, so it is usually ready at once. At the end you
+choose: discard, save, or save and apply. Save your work first: an unstable level can reboot the
+PC (see "Safety").
 
-![Calibration window at the end of an Eco calibration](docs/screenshots/calibration.png)
+![An Auto calibration on the fake backend, sped up](docs/screenshots/calibration.gif)
 
 **CPU** and **Curves** — the same values by hand: PPT/TDC/EDC, FMax, Tjmax and power mode, then
 the Curve Optimizer for all cores or one by one. "Apply now" writes them (each value is read
@@ -95,13 +98,26 @@ back), "Save to profile…" keeps them.
 **Fans** — the BIOS SmartFan stays in charge: you only change how fast each fan follows its
 curve (rise/fall) and the curve points, with the estimated rpm. Pumps and non-controllable
 channels are protected; the pump can only be left to the BIOS (recommended), capped, or set to a
-fixed speed (never below 50 %).
+fixed speed (never below 50 %). Channels with an unknown role are grouped in a collapsed
+"Unknown channels" section at the end of the page (listed in Monitor only while it is open); its
+state is remembered.
 
 ![Fans page](docs/screenshots/fans.png)
 
+**Preferences** — "Apply at startup" re-applies the selected profile at every boot and resume,
+never after a crash; "Start Ryzen Control at login" opens the window at every login; "Stop asking
+for the password" writes the polkit rule described in "Safety"; "Allow beyond the stock values"
+raises the PPT/TDC/EDC and FMax ceilings (unlock); "Hardware check" writes and reads back one
+value per command, then restores the baseline.
+
+![Preferences page](docs/screenshots/preferences.png)
+
 ## Usage (CLI)
 
-All commands share the same grammar on the CLI, in profile files and in the GUI.
+All commands share the same grammar on the CLI, in profile files and in the GUI. A profile is
+the stock state (the baseline captured at boot) with its own lines on top: whatever it does not set
+— a fan curve, a limit — is applied and shown at its stock value, so switching mode never leaves
+the previous mode's fans or limits behind. The pump is never part of a mode.
 
 ```sh
 sudo ryzenctl status                 # current state and baseline
@@ -156,13 +172,13 @@ From the GUI (Modes page) or the CLI. Fixed presets (no test): **Default** = BIO
 **Quiet** = limits ×0.55/0.63/0.83, FMax −400, Tjmax 80, fans 10 s/5 s, **Performance** =
 factory values with power at maximum. Modes **calibrated on the hardware** with load tests
 (**Eco**, **Auto**, **Boost**): the search for the per-core CO stability limit is a single one,
-shared and saved (`/var/lib/ryzenctl/co_limits.json`, reused by later calibrations); each mode
-applies its own margin: Eco +5 (conservative), Auto and Boost +3.
+shared and saved (`/var/lib/ryzenctl/co_limits.json`, reused by later calibrations), and the three
+modes use the same margin (+3), so the same validated undervolt.
 
 ```sh
 sudo ryzenctl preset quiet|performance|eco|auto|boost   # creates the profile from the factory values (placeholder)
-sudo ryzenctl autotune estimate eco              # estimated duration (parallel and core by core)
-sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1 fans=0|1|2]
+sudo ryzenctl autotune estimate eco              # estimated duration (0 s when Eco reuses a validated final pass: eco_from)
+sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 fans=0|1|2]
 sudo ryzenctl autotune step                      # one test at a time; repeat until phase == done
 sudo ryzenctl autotune status | abort            # abort stops immediately, even a step in progress
 sudo ryzenctl autotune save [apply]              # at phase == done: writes the proposed profile (and applies it); abort discards it
@@ -175,47 +191,55 @@ next start.
 
 From the GUI: Modes → "Calibrate…" on Eco, Auto or Boost, then "Automatic" (default values) or
 "Choose the values…"; at the end the buttons **Cancel / Save / Save and apply**. In both cases you choose how much the
-mode touches the fans (`fans`): 0 BIOS untouched (Boost default), 1 moderate (rise 5 s / fall 3 s,
-BIOS minimum up to `target` −5 °C; Auto default), 2 quiet (10 s / 5 s, minimum up to `target`
-−10 °C; Eco default); in every case 100 % at Tjmax −5 °C, only on the channels recognised as fans.
+mode touches the fans (`fans`), only on the channels recognised as fans: 0 BIOS untouched;
+1 moderate (Auto and Boost default): rise 3 s / fall 2 s and the BIOS curve raised by 10 % with
+full speed at 100 °C — the BIOS curves reach 100 % only at 125 °C, so under load the fans hardly
+react; 2 quiet (Eco default): 10 s / 5 s, BIOS minimum up to `target` −10 °C, 100 % at Tjmax −5 °C
+(`target` only shapes this curve).
+The curve always starts from the BIOS one captured at boot, so a recalibration never raises it twice.
 By default the
 cores are tested **all together** at every CO level (one worker per core, ~8× faster;
 `parallel=0` = one core at a time, which attributes even a reboot with certainty). During the
 tests the GUI shows the estimated remaining time, the real voltage measured per core at every
 level and how many mV one CO step is worth on this CPU.
 
-- **Eco**: searches for the stable negative Curve Optimizer (steps of −5 down to `colimit`,
-  three load phases: full with verify, 50 %, 10 %, plus single bursts for the maximum boost;
-  MCE error check) and keeps the last stable one + `margin` (*conservative* undervolt); final
-  pass on all cores; then, with the eco limits already applied, lowers FMax by 100 MHz at a
-  time until the 95th percentile of the Tctl peaks under mixed bursts (all cores / one core)
-  stays below `target`; writes the `eco` profile with Quiet limits, slow fans and a curve from
-  the target. Result on the development 9800X3D: all cores stable down to −25 → CO −20,
-  ≈ 3.4 mV per step (−69 mV real at full load), FMax unchanged (peak 64 °C < 70 with the eco
-  profile).
-- **Auto**: CO = limit + 3, then the performance/watt knee: sweep of PPT (multi-thread) and
-  FMax (single-thread) measuring stress-ng bogo-ops/s and RAPL power, choosing the lowest value
-  that loses at most `loss` % (default 10) against the maximum.
-- **Boost**: CO = limit + 3, limits and FMax at the allowed ceilings (factory, or unlock),
-  power at maximum; measures the MT/ST gain against the factory.
+- **Auto**: searches for the stable negative Curve Optimizer (steps of −5 down to `colimit`,
+  load phases: the heaviest method, mixed methods with verify, 50 %, single bursts for the
+  maximum boost; MCE error check), CO = last stable + 3, final pass on all cores, then the
+  performance/watt knee: sweep of PPT (multi-thread) and FMax (single-thread) measuring
+  stress-ng bogo-ops/s and RAPL power, choosing the lowest value that loses at most `loss` %
+  (default 10) against the maximum.
+- **Eco**: the same validated undervolt with the Eco preset values: limits ×0.55/0.63/0.83
+  (≈ AMD 65 W class), FMax −400, Tjmax 80, balanced power, quiet fans — quiet under heavy load.
+  Every successful final pass is recorded in `co_limits.json` (`final_passed`): if one covers
+  Eco's CO, Eco is proposed at once with no load test; with only the per-core limits it runs the
+  final pass; on a fresh install (no measurement yet) the full search and the final pass.
+- **Boost** (needs `ryzenctl unlock on`, "Allow beyond the stock values" in the GUI): CO =
+  limit + 3, limits at the unlock ceilings (230 W / 160 A / 230 A) and FMax +200 MHz, power at
+  maximum; measures the MT/ST gain against stock. Without the unlock ryzenctl refuses `preset`,
+  `autotune start`, `use` and `apply` for boost, and `unlock off` is refused while Boost is the
+  selected mode (switch mode first).
 
 The CO search uses as the first phase of every level the heaviest stress-ng method on this CPU
 (probed at start with factory CO); measurements from earlier versions, taken without this load,
 are not reused. The **final pass** (all cores at the proposed CO) starts with the stress-ng
 method that draws the most power on this CPU, at full load for 60 s with verify, then 100 s
-full / 50 % / 10 %. If it fails, or if in a later phase (FMax, knee, benchmark) a load dies, an
+full / 50 % / 10 %. If it fails, or if in a later phase (knee, benchmark) a load dies, an
 MCE error appears or the system freezes and is rebooted, the combination is unstable: +3 on all
 cores and the final pass repeated (3 attempts at most). If the search itself ends with a system
 freeze, the margin gets an extra +3: the "stable" level below the crash one was tested only for
 `step` seconds. Failed combinations stay in `co_limits.json` and later calibrations do not
 retry them. After a forced reboot the interrupted step is marked unstable as soon as
 `ryzenctl.service` starts, before any choice in the GUI (Resume or Cancel). Result on the
-development 9800X3D: per-core limit −40, combined −37 failed twice (once with a system freeze
-under fft at 16 threads), −34 stable.
+development 9800X3D: with the heaviest method in the search the per-core limit is −35 (−40 froze
+the system), and the final pass at −29 on all cores is stable; one CO step is worth ≈ 3.4 mV.
 
 **Warning**: an unstable CO can reboot the PC during the calibration (no damage, unsaved work
 lost). The state is on disk: at reboot the interrupted step is marked unstable and the
-calibration resumes. Duration: Eco ~25–40 min, Auto longer.
+calibration resumes. Duration from scratch ~25–40 min (search and final pass, plus the knee or the
+bench); with the limits already measured ~7 min plus the knee or the bench; Eco covered by a
+recorded pass: immediate. An Eco calibration left halfway by a version before 0.4.4 (phase
+`fmax`) cannot be resumed: discard it.
 
 **Curve Shaper**: experimental and effectively disabled. On the 9800X3D with SMU 98.81.0 the
 write command (RSMU 0xA6) answers OK but the read command (0x84) returns only zeros or the
@@ -237,11 +261,11 @@ the BIOS.
   exist at the next boot, the system crashed: the CPU profile is **not reapplied**,
   `/var/lib/ryzenctl/crashed` is written, a notification arrives at login (one click opens
   Ryzen Control) and you decide (`ryzenctl crashed clear` + `autostart on` to reactivate, or stay on the BIOS values).
-  The "Start Ryzen Control at login" switch (Modes) only adds a user XDG autostart entry
+  The "Start Ryzen Control at login" switch (Preferences) only adds a user XDG autostart entry
   (`~/.config/autostart/`): the window opens at login with the pkexec prompt and, after a
   crash, shows the warning with Reactivate / Stay on Default. Reapplying at boot remains the
   exclusive job of `ryzenctl.service` (`autostart` ∧ no crash): the GUI applies nothing.
-  "Don't ask for the password again" (`ryzenctl trust on`) writes
+  "Stop asking for the password" (Preferences, `ryzenctl trust on`) writes
   `/etc/polkit-1/rules.d/50-ryzen-control.rules`: your user, in the active local session,
   starts `pkexec ryzenctl serve` without authenticating. It applies only to this action, it is
   not a generic sudo; in exchange every program run as your user can change limits, CO and fans
