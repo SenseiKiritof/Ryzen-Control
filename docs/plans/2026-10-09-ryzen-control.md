@@ -20,6 +20,7 @@ stress-ng terminated); per-core voltage sampled at every level (mV per step meas
 Revision 10 (2026-10-10): phases 5 and 6 swapped — the tray icon (phase 5, tag v0.5.0) precedes the deb/Arch packages (phase 6, tag v0.6.0).
 Revision 11 (2026-10-10): new phase 5 — support for all Ryzen processors (FAMILIES table, per-family gate, dynamic cores); tray → phase 6 (v0.6.0), deb/Arch → phase 7 (v0.7.0).
 Revision 12 (2026-10-10): project documentation, source comments and UI strings switched to English; UI localized with gettext (Italian catalog).
+Revision 13 (2026-10-11): user feedback on hardware. Eco no longer has its own calibration (FMax sweep for a Tctl target): it is the Eco preset (limits ×0.55/0.63/0.83, FMax −400, Tjmax 80, quiet fans) with the CO validated by Auto/Boost — successful final passes are recorded (`final_passed`) and a covering one makes Eco instant, otherwise the final pass, on a fresh install the full search; the three calibrated modes use the same margin (+3). Boost only with the explicit unlock (ceilings 230 W / 160 A / 230 A, FMax +200). A profile is the baseline plus its own lines (`with_stock`): every mode shows and applies its fans, switching never leaves another mode's curve. Fan level "moderate" = BIOS curve +10 % with full speed at 100 °C (Auto and Boost default). GUI: Preferences tab, readable Monitor graph, unknown fan channels in a collapsed section, calibration window with the progress pinned on top; README screenshots and GIF from `make screenshots`.
 Revision 8 (2026-10-09): new **Eco** mode (Quiet stays as a preset) with a calibrated conservative undervolt; calibrations as a
 step machine in ryzenctl (`autotune`), the GUI drives it with progress and resume after crash.
 Revision 7 (2026-10-09): fan curve per mode (Eco from the target, Auto moderate step).
@@ -345,6 +346,10 @@ Every page: **Apply now** (runtime) and **Save to profile** (profiles menu).
   by itself. The CPU stays protected by Tjmax whatever the fans do.
 
 ### Calibrations (phase 4) — step machine in `ryzenctl`, GUI as the driver
+
+> Rev. 13: the Eco calibration described below (CO margin +5, FMax sweep for a Tctl target) was
+> replaced: Eco reuses the CO validated by Auto/Boost (same margin +3) with the Eco preset, see
+> the revision list at the top. The rest of the section is the original design.
 
 User request (rev. 8): **Eco** = not only slow fans, also a **conservative undervolt based on
 the real capabilities of the hardware**. The calibrations run in `ryzenctl` as a step
