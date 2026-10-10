@@ -45,6 +45,10 @@ msgid "%d rpm · pwm %d (%d %%) · mode %d%s"
 msgstr "%d giri/min · pwm %d (%d %%) · modo %d%s"
 
 #, python-format
+msgid "%d s ago"
+msgstr "%d s fa"
+
+#, python-format
 msgid "%s %s %s: %.0f op/s at %.0f W → trying %s %s…%s"
 msgstr "%s %s %s: %.0f op/s a %.0f W → provo %s %s…%s"
 
@@ -180,6 +184,9 @@ msgstr "ricerca CO"
 
 msgid "CPU"
 msgstr "CPU"
+
+msgid "CPU temperature and power"
+msgstr "Temperatura e potenza della CPU"
 
 #, python-format
 msgid "Calibrate the %s mode?"
@@ -498,6 +505,9 @@ msgstr "PPT"
 msgid "PPT knee"
 msgstr "ginocchio PPT"
 
+msgid "PPT limit"
+msgstr "limite PPT"
+
 msgid "PPT, TDC and EDC will be allowed beyond the stock values and FMax beyond the baseline (up to the ryzenctl unlock ceilings). More heat and power draw, possible sudden reboots: save your work. Tjmax stays limited to the baseline anyway."
 msgstr "Verranno ammessi PPT, TDC ed EDC oltre i valori di fabbrica e FMax oltre la baseline (fino ai tetti di sblocco di ryzenctl). Più calore e consumo, possibili riavvii improvvisi: salva il lavoro. Tjmax resta comunque limitata alla baseline."
 
@@ -679,9 +689,6 @@ msgstr "TDC"
 msgid "Target Tctl"
 msgstr "Tctl obiettivo"
 
-msgid "Tctl (°C, left) and PPT (W, right) · last 60 s"
-msgstr "Tctl (°C, sinistra) e PPT (W, destra) · ultimi 60 s"
-
 msgid "Telemetry: "
 msgstr "Telemetria: "
 
@@ -847,6 +854,9 @@ msgstr "nessuna misura precedente utilizzabile"
 
 msgid "not controllable"
 msgstr "non controllabile"
+
+msgid "now"
+msgstr "adesso"
 
 msgid "preset"
 msgstr "preset"
