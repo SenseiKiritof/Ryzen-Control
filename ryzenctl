@@ -627,6 +627,56 @@ def cmd_unlock(ctx, args):
     return "limiti riportati ai tetti di fabbrica"
 
 
+# ---- Autorizzazione ricordata: regola polkit per l'utente che chiama -------------------------
+TRUST_RULE = "/etc/polkit-1/rules.d/50-ryzen-control.rules"
+POLKIT_ACTION = "org.ryzencontrol.RyzenControl.serve"
+
+
+def trust_user():
+    """Utente che ha chiamato ryzenctl via pkexec (GUI) o sudo (CLI); None se sconosciuto."""
+    uid = os.environ.get("PKEXEC_UID")
+    if uid:
+        import pwd
+        return pwd.getpwuid(int(uid)).pw_name
+    return os.environ.get("SUDO_USER")
+
+
+def trust_users():
+    try:
+        m = re.search(r"(\[[^\]]*\])\.indexOf\(subject\.user\)", read_text(TRUST_RULE))
+    except OSError:
+        return []
+    return json.loads(m.group(1)) if m else []
+
+
+def cmd_trust(ctx, args):
+    """trust on|off|status: l'utente chiamante non reinserisce più la password per Ryzen Control.
+    Regola polkit limitata a questa azione (pkexec ryzenctl serve), a quell'utente e alla sua
+    sessione locale attiva: non è un sudo generico. La prima scrittura richiede la password."""
+    if args == ["status"]:
+        return {"trusted": trust_users(), "user": trust_user()}
+    if args not in (["on"], ["off"]):
+        raise Err("uso: trust on|off|status")
+    user = trust_user()
+    if not user:
+        raise Err("utente chiamante sconosciuto (serve pkexec o sudo)")
+    users = set(trust_users())
+    users = users | {user} if args == ["on"] else users - {user}
+    users = sorted(users)
+    if users:
+        write_atomic(P(TRUST_RULE),
+                     "// Generato da `ryzenctl trust on`: questi utenti usano Ryzen Control senza reinserire la password.\n"
+                     "// Vale solo per l'azione %s (pkexec ryzenctl serve) in una sessione locale attiva.\n"
+                     "polkit.addRule(function(action, subject) {\n"
+                     "    if (action.id == \"%s\" && subject.local && subject.active &&\n"
+                     "        %s.indexOf(subject.user) >= 0)\n"
+                     "        return polkit.Result.YES;\n"
+                     "});\n" % (POLKIT_ACTION, POLKIT_ACTION, json.dumps(users)))
+    else:
+        rm(P(TRUST_RULE))
+    return {"trusted": users, "user": user}
+
+
 # ---- Status ------------------------------------------------------------------------------
 def cmd_status(ctx, args):
     check_cpu()
@@ -647,6 +697,7 @@ def cmd_status(ctx, args):
         "power": power_get(),
         "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
         "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
+        "trusted": trust_user() in trust_users(),
         "crashed": crashed_info(), "caps": caps(base, s["unlock"]) if base else None,
         "active": os.path.exists(marker("active")),
     }
@@ -2310,7 +2361,7 @@ COMMANDS = {
     "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
     "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
     "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "unlock": cmd_unlock,
-    "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart,
+    "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart, "trust": cmd_trust,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
     "fan": cmd_fan, "telemetry": cmd_telemetry, "preset": cmd_preset, "autotune": cmd_autotune,
@@ -2390,6 +2441,19 @@ def selftest():
     assert run(["power", "balanced"]) == {"power": "balanced"} and FAKE.s["power"] == "balanced"
     assert os.path.exists(P(STATE + "/active")) and FAKE.s["log"][-1]["active"]
     # sblocco
+    # autorizzazione ricordata: regola polkit per l'utente chiamante, idempotente, rimossa quando vuota
+    os.environ.pop("PKEXEC_UID", None)
+    os.environ.pop("SUDO_USER", None)
+    expect_err(["trust", "on"], "sconosciuto")
+    os.environ["PKEXEC_UID"] = str(os.getuid())
+    me = run(["trust", "status"])["user"]
+    assert me and not run(["status"])["trusted"]
+    assert run(["trust", "on"])["trusted"] == [me] and run(["status"])["trusted"]
+    rule = read_text(TRUST_RULE)
+    assert POLKIT_ACTION in rule and json.dumps([me]) in rule and "subject.active" in rule and "Result.YES" in rule, rule
+    assert run(["trust", "on"])["trusted"] == [me] and run(["trust", "status"])["trusted"] == [me]
+    assert run(["trust", "off"])["trusted"] == [] and not os.path.exists(P(TRUST_RULE)) and not run(["status"])["trusted"]
+    expect_err(["trust", "maybe"], "uso")
     assert "ATTENZIONE" in run(["unlock", "on"])
     assert run(["ppt", "200"]) == {"ppt": 200.0}
     expect_err(["ppt", "231"], "fuori")

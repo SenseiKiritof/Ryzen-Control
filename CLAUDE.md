@@ -108,7 +108,8 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   negati via serve). Un nuovo comando = una funzione `cmd_*` + voce in `COMMANDS` (+ in
   `PROFILE_CMDS` se ammesso nei profili) + caso nel selftest.
 - **`ryzenctl` è il confine di fiducia**: la GUI non valida nulla di definitivo, invia e mostra
-  gli errori. `serve` viene avviato una volta per sessione (un solo prompt pkexec).
+  gli errori. `serve` viene avviato una volta per sessione (un solo prompt pkexec; `trust on` scrive una regola polkit in
+  `/etc/polkit-1/rules.d/` per l'utente chiamante, `PKEXEC_UID`/`SUDO_USER`, e il prompt sparisce).
 - **Backend finto** (`class Fake`, attivo con `RYZENCTL_ROOT`): simula SMU, PM table, k10temp,
   profilo energetico; `drop` ignora le prossime scritture (prova del readback), `log` registra
   quali marker esistevano a ogni scrittura (prova dell'ordine). Nuova logica = caso nel selftest.

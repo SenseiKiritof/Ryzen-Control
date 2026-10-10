@@ -68,6 +68,7 @@ sudo ryzenctl fmax 5000              # frequenza massima di boost (MHz)
 sudo ryzenctl tjmax 85               # temperatura massima (°C), mai sopra la baseline
 sudo ryzenctl power balanced         # power-saver | balanced | performance
 sudo ryzenctl default                # tutto ai valori di base (BIOS), avvio automatico off
+sudo ryzenctl trust on|off|status    # regola polkit: il tuo utente avvia Ryzen Control senza password
 sudo ryzenctl hwtest                 # prova reversibile di ogni comando con readback
 ```
 
@@ -186,6 +187,11 @@ dal BIOS.
   dell'utente (`~/.config/autostart/`): la finestra si apre al login con il prompt pkexec e,
   dopo un crash, mostra l'avviso con Riattiva / Resta su Default. Il riapplicare al boot resta
   compito esclusivo di `ryzenctl.service` (`autostart` ∧ nessun crash): la GUI non applica nulla.
+  "Non chiedere più la password" (`ryzenctl trust on`) scrive
+  `/etc/polkit-1/rules.d/50-ryzen-control.rules`: il tuo utente, nella sessione locale attiva,
+  avvia `pkexec ryzenctl serve` senza autenticarsi. Vale solo per questa azione, non è un sudo
+  generico; in cambio ogni programma eseguito col tuo utente può cambiare limiti, CO e ventole
+  (entro i tetti di ryzenctl). `trust off` toglie la regola.
 - Via di fuga totale: al boot, in GRUB, `e` e aggiungere `ryzenctl.off` alla riga del kernel:
   il servizio non parte e il modulo non viene caricato (è in blacklist, lo carica solo il
   servizio).

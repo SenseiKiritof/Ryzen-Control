@@ -59,6 +59,10 @@ CO_HELP = ("CO (Curve Optimizer): " + CO_TIP.split(": ", 1)[1] + " Trascina lo s
 UNLOCK_WARNING = ("Verranno ammessi PPT, TDC ed EDC oltre i valori di fabbrica e FMax oltre la baseline "
                   "(fino ai tetti di sblocco di ryzenctl). Più calore e consumo, possibili riavvii "
                   "improvvisi: salva il lavoro. Tjmax resta comunque limitata alla baseline.")
+TRUST_WARNING = ("Viene scritta una regola polkit che autorizza il tuo utente, nella sessione locale attiva, ad avviare "
+                 "«ryzenctl serve» senza password: vale solo per Ryzen Control, non è un sudo generico. In cambio, qualunque "
+                 "programma eseguito col tuo utente potrà cambiare limiti, Curve Optimizer e ventole senza chiederti nulla "
+                 "(sempre entro i tetti di ryzenctl). Si disattiva da qui in qualsiasi momento.")
 AUTODETECT_WARNING = ("Ogni canale con giri > 0 viene portato a un PWM ridotto per circa 30 secondi sotto carico "
                       "(stress-ng), con Tctl sorvegliata: una pompa si riconosce dall'aumento di temperatura. "
                       "Durata: circa 30 s per canale. Al termine i canali tornano come erano.")
@@ -1055,9 +1059,13 @@ class ModesPage(Adw.PreferencesPage):
         self.autostart = Adw.SwitchRow(title="Applica all'avvio", subtitle="Riapplica il profilo selezionato al boot e al resume")
         self.autostart.connect("notify::active", self.on_autostart)
         self.login = Adw.SwitchRow(title="Avvia Ryzen Control al login", active=os.path.exists(LOGIN_DESKTOP),
-                                   subtitle="Apre la finestra a ogni accesso (chiede la password di amministratore). Dopo un crash mostra "
-                                            "l'avviso e lascia il profilo disattivato: non riapplica nulla da sola")
+                                   subtitle="Apre la finestra a ogni accesso (chiede la password, salvo l'opzione qui sotto). Dopo un crash "
+                                            "mostra l'avviso e lascia il profilo disattivato: non riapplica nulla da sola")
         self.login.connect("notify::active", self.on_login)
+        self.trust = Adw.SwitchRow(title="Non chiedere più la password",
+                                   subtitle="Regola polkit per il tuo utente, solo per Ryzen Control nella sessione locale: "
+                                            "la prima volta la password serve per scriverla, poi mai più")
+        self.trust.connect("notify::active", self.on_trust)
         self.unlock = Adw.SwitchRow(title="Consenti oltre i valori di fabbrica", subtitle="PPT/TDC/EDC fino ai tetti di sblocco, FMax oltre la baseline")
         self.unlock.connect("notify::active", self.on_unlock)
         hw = Adw.ActionRow(title="Verifica hardware", subtitle="Scrive e rilegge un valore per comando, poi ripristina la baseline")
@@ -1065,7 +1073,7 @@ class ModesPage(Adw.PreferencesPage):
         self.hw_btn = button("Esegui", self.hwtest)
         hw.add_suffix(self.hw_spin)
         hw.add_suffix(self.hw_btn)
-        for r in (self.autostart, self.login, self.unlock, hw):
+        for r in (self.autostart, self.login, self.trust, self.unlock, hw):
             g.add(r)
         self.add(g)
 
@@ -1089,6 +1097,7 @@ class ModesPage(Adw.PreferencesPage):
         self.rows[current][1].set_active(True)
         self.autostart.set_active(bool(st.get("autostart")))
         self.unlock.set_active(bool(st.get("unlock")))
+        self.trust.set_active(bool(st.get("trusted")))
         self.loading = False
 
     def on_mode(self, chk, key):
@@ -1236,6 +1245,19 @@ class ModesPage(Adw.PreferencesPage):
             else:
                 self.win.reload()   # riporta l'interruttore allo stato reale
         self.win.confirm("Oltre i valori di fabbrica?", UNLOCK_WARNING, "Sblocca", go, destructive=True)
+
+    def on_trust(self, row, _):
+        if self.loading:
+            return
+        if not row.get_active():
+            self.win.run([["trust", "off"]], lambda res: self.win.toast("Password di nuovo richiesta a ogni avvio"))
+            return
+        def go(ok):
+            if ok:
+                self.win.run([["trust", "on"]], lambda res: self.win.toast("Fatto: dal prossimo avvio nessuna password per %s" % res[0]["user"]))
+            else:
+                self.win.reload()   # riporta l'interruttore allo stato reale
+        self.win.confirm("Non chiedere più la password?", TRUST_WARNING, "Ricorda", go)
 
     def hwtest(self):
         self.hw_btn.set_sensitive(False)
