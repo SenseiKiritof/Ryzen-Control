@@ -30,7 +30,8 @@ notification, reactivate, restart, clean boot, resume). Tag `v0.1.0` on `main`.
 protected; step 10 s/5 s on the fan channels removes the jumps on spikes (3 s of full load, rpm
 steady). The chip rounds the steps to ~200 ms. Tag `v0.2.0`.
 **Phase 3 (GUI) and phase 4 (calibrations)** written and used on hardware: `ryzen-control`
-(pages Monitor, Modes with Quiet/Boost presets and calibrated Eco/Auto, CPU, Curves, Fans;
+(pages Monitor, Modes with Quiet/Performance presets and calibrated Eco/Auto/Boost, CPU, Curves, Fans,
+Preferences;
 values coloured against the factory ones; resizable calibration window with progress, duration
 estimates, measured voltage per core and mV per step; immediate interruption). `autotune` in
 ryzenctl is a step machine (`start/step/status/abort/estimate`, state in
