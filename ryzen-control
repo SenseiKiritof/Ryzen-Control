@@ -1048,6 +1048,7 @@ class AutotuneDialog(Adw.Window):
                     text += ("\n" if text else "") + _("%s sweep:\n") % key.upper() + "\n".join(
                         "%s %s → %.0f op/s, %.0f W" % (t[0], unit, t[1], t[2]) for t in knee[key]["tests"])
         self.sweeps.set_text(text)
+        self.sweeps.set_visible(bool(text))   # Eco and Boost have no sweep: no empty gap above the result
 
     @staticmethod
     def final_values(st):
