@@ -32,8 +32,8 @@ stime di durata, tensione misurata per core e mV per passo; interruzione immedia
 in ryzenctl è una macchina a passi (`start/step/status/abort/estimate`, stato in
 `/var/lib/ryzenctl/autotune.json`, ripresa dopo crash, parallelo di default). Eco verificata su
 hardware (CO −20 su 8 core, ≈ 3,4 mV/passo, FMax invariata); Auto (ginocchio PPT/FMax con RAPL)
-in verifica. Poi: fase 5 deb/PKGBUILD, fase 6 icona nel vassoio (StatusNotifierItem + dbusmenu
-via Gio, `ryzen-control --tray`, comandi rapidi).
+in verifica. Poi: fase 5 icona nel vassoio (StatusNotifierItem + dbusmenu via Gio,
+`ryzen-control --tray`, comandi rapidi), fase 6 deb/PKGBUILD.
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
 attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
@@ -62,7 +62,7 @@ nella sessione dell'utente.
   ricompila il modulo solo se manca per il kernel in uso o cambia la chiave: **quando cambia il
   sorgente in `ryzen_smu/` va bumpata `VERSION`** (Makefile + spec), altrimenti dkms tiene il
   modulo vecchio;
-  `packaging/debian/` e `packaging/PKGBUILD` in fase 5.
+  `packaging/debian/` e `packaging/PKGBUILD` in fase 6.
 
 Vincoli di compatibilità: sintassi Python ≥ 3.9 (nessuna feature più recente), libadwaita ≥ 1.5,
 niente dipendenze Python oltre PyGObject, nessun framework di test.

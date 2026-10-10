@@ -17,6 +17,7 @@ misurato), la statica di fabbrica + energia al massimo si chiama **Performance**
 limite CO è unica e condivisa (−40, salvata in `co_limits.json`, riusata), ogni modalità applica il
 suo margine (Eco +5, Auto/Boost +3); interruzione immediata (`serve` con lettore separato, flag +
 stress-ng terminati); tensione per core campionata a ogni livello (mV per passo misurati).
+Revisione 10 (2026-10-10): fasi 5 e 6 invertite — l'icona nel vassoio (fase 5, tag v0.5.0) precede i pacchetti deb/Arch (fase 6, tag v0.6.0).
 Revisione 8 (2026-10-09): nuova modalità **Eco** (Quiet resta come preset) con undervolt discreto calibrato; calibrazioni come
 macchina a passi in ryzenctl (`autotune`), GUI pilota con avanzamento e ripresa dopo crash.
 Revisione 7 (2026-10-09): curva ventole per modalità (Eco dal target, Auto step moderato).
@@ -449,13 +450,7 @@ la ripresa dopo crash e il profilo generato.
 | 16 | `feat(ryzenctl): autotune eco — FMax dal target Tctl, limiti, ventole; profilo eco` | **tu**: p95 sotto target, profilo eco generato |
 | 17 | `feat(ryzenctl): autotune auto — ginocchio PPT/FMax con RAPL; GUI con avanzamento` | **tu**: tabella monotona, scelta ≤ slider |
 
-### Fase 5 — altre distro → `v0.5.0`
-| # | Commit | Verifica |
-|---|---|---|
-| 18 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
-| 19 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
-
-### Fase 6 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.6.0`
+### Fase 5 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.5.0`
 Richiesta utente (rev. 6). Icona `StatusNotifierItem` (protocollo nativo di KDE Plasma, su
 GNOME serve l'estensione AppIndicator) con menu `com.canonical.dbusmenu`, implementati
 direttamente su D-Bus con `Gio` di PyGObject: nessuna dipendenza nuova, funziona su Wayland
@@ -471,7 +466,13 @@ viene assorbito, il banner crash diventa voce del menu).
 - Prima azione privilegiata della sessione → un solo prompt pkexec (come la GUI).
 | # | Commit | Verifica |
 |---|---|---|
-| 20 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
+| 18 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
+
+### Fase 6 — altre distro → `v0.6.0`
+| # | Commit | Verifica |
+|---|---|---|
+| 19 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
+| 20 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
 
 ## Verifica
 
