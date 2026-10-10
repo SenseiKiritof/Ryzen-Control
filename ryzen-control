@@ -872,7 +872,11 @@ class AutotuneDialog(Adw.Window):
         top.append(self.eta)
         self.progress = Gtk.ProgressBar(show_text=True)
         self.note = label("", ["warning"], wrap=True, visible=False)
-        for w in (self.header, self.reuse, top, self.progress, self.note, label(_("CO (Curve Optimizer) per core"), ["heading"], tooltip_text=CO_TIP)):
+        # progress (start, phase, time left, bar) pinned above the scrolled area: visible while scrolling the results
+        pinned = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=6, margin_bottom=10, margin_start=12, margin_end=12)
+        for w in (self.header, top, self.progress):
+            pinned.append(w)
+        for w in (self.reuse, self.note, label(_("CO (Curve Optimizer) per core"), ["heading"], tooltip_text=CO_TIP)):
             body.append(w)
         grid = Gtk.Grid(column_spacing=14, row_spacing=4, hexpand=True)
         heads = ((_("Core"), None), (_("Stock"), _("Stock CO; below, the reference voltage measured at start under the same load")),
@@ -923,8 +927,10 @@ class AutotuneDialog(Adw.Window):
             bar.append(b)
         # in a wide window the content stays centred and readable (max 1100 px), the grid widens
         clamp = Adw.Clamp(child=body, maximum_size=1100, tightening_threshold=800)
-        tv = Adw.ToolbarView(content=Gtk.ScrolledWindow(child=clamp, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER))
+        self.scroller = Gtk.ScrolledWindow(child=clamp, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER)
+        tv = Adw.ToolbarView(content=self.scroller, top_bar_style=Adw.ToolbarStyle.RAISED)
         tv.add_top_bar(Adw.HeaderBar())
+        tv.add_top_bar(Adw.Clamp(child=pinned, maximum_size=1100, tightening_threshold=800))
         tv.add_bottom_bar(bar)
         self.set_content(tv)
         self.present()
@@ -1007,6 +1013,7 @@ class AutotuneDialog(Adw.Window):
             frac = 1.0
         self.progress.set_fraction(max(0.0, min(1.0, frac)))
         self.queue_draw()                   # full redraw: no fragments of the previous frame
+        self.follow()
         res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
         base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
         ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
@@ -1079,6 +1086,14 @@ class AutotuneDialog(Adw.Window):
         if sub_css:
             pair[1].add_css_class(sub_css)
 
+    def follow(self):
+        """New lines (sweeps, failed passes, results) go at the bottom: scroll there, unless the user
+        scrolled up to read something."""
+        adj = self.scroller.get_vadjustment()
+        at_end = adj.get_value() >= adj.get_upper() - adj.get_page_size() - 40
+        if at_end:   # after the layout of the new content
+            GLib.idle_add(lambda: adj.set_value(adj.get_upper() - adj.get_page_size()) and False)
+
     def done(self, st):
         if st.get("error"):
             self.result.append(label(st["error"], ["warning"], wrap=True))
@@ -1141,6 +1156,7 @@ class AutotuneDialog(Adw.Window):
         else:
             self.phase.set_text(_("Calibration ended without a profile to save"))
             self.close_btn.set_visible(True)
+        self.follow()   # the proposed profile is at the bottom
         # the choice is mandatory: the window closes only afterwards (the state stays on disk and is proposed again)
 
     def choose(self, argv, msg):
@@ -1988,7 +2004,8 @@ class App(Adw.Application):
 
     def screenshot_steps(self):
         """--mock --screenshots DIR (make screenshots): fills a fresh fake backend (fan roles, presets,
-        the three calibrations), then saves the calibration window at its end and one PNG per page."""
+        the three calibrations), saves the frames of the Auto calibration (README GIF), then one PNG
+        per page."""
         win = self.props.active_window
         h = win.h
         h.call("fan", "autodetect")
@@ -2000,21 +2017,27 @@ class App(Adw.Application):
         subprocess.run([RYZENCTL, "boot"], env=dict(os.environ, RYZENCTL_ROOT=MOCK_DIR), check=True, stdout=subprocess.DEVNULL)
         for name in ("quiet", "performance"):
             h.call("preset", name)
-        dlg = AutotuneDialog(win, "eco")   # the real flow: steps in the background, choice at the end
-        dlg.start({"step": 3, "reuse": 0})
-        for _i in range(150):
-            if dlg.save_btn.get_visible() or dlg.close_btn.get_visible():
+        # Auto from scratch, one step at a time: a frame per step for the README GIF (assembled by `make
+        # screenshots` from $RYZENCTL_ROOT/frames), the end state as calibration.png
+        frames = os.path.join(MOCK_DIR, "frames")
+        os.makedirs(frames, exist_ok=True)
+        dlg = AutotuneDialog(win, "auto")
+        st = h.call("autotune", "start", "auto", "step=3", "reuse=0")
+        for i in range(300):
+            dlg.show(st)
+            yield 250
+            save_png(dlg, os.path.join(frames, "f-%03d.png" % i))
+            if st["phase"] == "done":
                 break
-            yield 200
-        if not dlg.save_btn.get_visible():
-            raise RuntimeError("the fake Eco calibration did not finish")
+            st = h.call("autotune", "step")
+        dlg.done(st)
         yield 800
-        save_png(dlg, os.path.join(self.shots, "calibration.png"))
+        save_png(dlg, os.path.join(frames, "last.png"))
         h.call("autotune", "save")
         dlg.closable = True
         dlg.close()
         h.call("unlock", "on")   # Boost is calibrated and used only with the unlock: the screenshots show it usable
-        for mode in ("auto", "boost"):
+        for mode in ("eco", "boost"):   # Eco reuses the final pass Auto just validated: done at once
             st = h.call("autotune", "start", mode, "step=3")
             while st["phase"] != "done":
                 st = h.call("autotune", "step")
