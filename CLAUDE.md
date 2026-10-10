@@ -38,7 +38,7 @@ ryzenctl is a step machine (`start/step/status/abort/estimate`, state in
 hardware (CO −20 on 8 cores, ≈ 3.4 mV/step, FMax unchanged); Auto (PPT/FMax knee with RAPL)
 under verification; Boost calibrated, pump with cap or fixed speed, choice at the end of the
 calibration (Cancel / Save / Save and apply), `trust`, start at login, clickable notification.
-Tag `v0.4.2` (VERSION 0.4.2, DKMS module `DRV_VERSION` 0.4.1). Next: phase 5 support for all
+Tag `v0.4.3` (VERSION 0.4.3, DKMS module `DRV_VERSION` 0.4.1). Next: phase 5 support for all
 Ryzen CPUs (`FAMILIES` table by codename, dynamic `CORES`, fail-closed gate), phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.

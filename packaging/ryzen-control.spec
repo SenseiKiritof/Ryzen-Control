@@ -2,8 +2,8 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.4.2
-Release:        4%{?dist}
+Version:        0.4.3
+Release:        1%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -53,6 +53,9 @@ enrolled once: mokutil --import /var/lib/dkms/mok.pub
 
 %install
 make install DESTDIR=%{buildroot} PREFIX=%{_prefix}
+# Translation catalogs (po/<domain>/<lang>.po, compiled by po/msgfmt.py during make install).
+%find_lang ryzenctl
+%find_lang ryzen-control
 # Created by the %%post only when the akmods key is enrolled; here only to track it (%%ghost).
 install -dm755 %{buildroot}%{_sysconfdir}/dkms/framework.conf.d
 touch %{buildroot}%{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
@@ -98,7 +101,7 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %postun
 %systemd_postun ryzenctl.service ryzenctl-resume.service
 
-%files
+%files -f ryzenctl.lang -f ryzen-control.lang
 %license LICENSE ryzen_smu/LICENSE
 %doc README.md ryzen_smu/UPSTREAM.md
 %{_bindir}/ryzenctl
@@ -119,6 +122,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.3-1
+- Source, documentation and UI in English; UI and ryzenctl messages follow the system language
+  (gettext, Italian catalog); CLI `unlock` crash fixed
+
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.2-4
 - Calibration: fan level (BIOS / moderate / quiet) chosen in automatic mode too; Auto touches
   the fans with 5 s/3 s steps and a curve from the target
