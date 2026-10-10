@@ -12,7 +12,15 @@ hwtest` automatizza la verifica reversibile su hardware. Resta manuale solo ciò
 impone (registrazione MOK al riavvio, se nessuna chiave è già registrata) e il test di crash.
 In fase 2 `ryzenctl fan enable` imposterà da sé il parametro kernel (grubby / /etc/default/grub)
 con conferma esplicita, reversibile con `fan disable`.
-Revisione 7 (2026-10-09): curva ventole per modalità (Quiet dal target, Auto step moderato).
+Revisione 9 (2026-10-10): **Boost** diventa calibrata (CO spinto, limiti e FMax ai tetti, guadagno
+misurato), la statica di fabbrica + energia al massimo si chiama **Performance**; la ricerca del
+limite CO è unica e condivisa (−40, salvata in `co_limits.json`, riusata), ogni modalità applica il
+suo margine (Eco +5, Auto/Boost +3); interruzione immediata (`serve` con lettore separato, flag +
+stress-ng terminati); tensione per core campionata a ogni livello (mV per passo misurati).
+Revisione 10 (2026-10-10): fasi 5 e 6 invertite — l'icona nel vassoio (fase 5, tag v0.5.0) precede i pacchetti deb/Arch (fase 6, tag v0.6.0).
+Revisione 8 (2026-10-09): nuova modalità **Eco** (Quiet resta come preset) con undervolt discreto calibrato; calibrazioni come
+macchina a passi in ryzenctl (`autotune`), GUI pilota con avanzamento e ripresa dopo crash.
+Revisione 7 (2026-10-09): curva ventole per modalità (Eco dal target, Auto step moderato).
 Revisione 6 (2026-10-09): fase 1 verificata su hardware e taggata `v0.1.0`; un solo pacchetto
 di installazione (driver DKMS dentro `ryzen-control`); nuova fase 6: icona nel vassoio di
 sistema con comandi rapidi.
@@ -20,7 +28,7 @@ sistema con comandi rapidi.
 ## Context
 
 Obiettivo utente: gestire da Linux Curve Optimizer, Curve Shaper, limiti PBO, FMax/Tjmax e
-ventole con una GUI completa, modalità Default/Quiet/Auto/Boost, calibrazione automatica e
+ventole con una GUI completa, modalità Default/Eco/Auto/Boost, calibrazione automatica e
 auto-tuning CO. Bisogno principale: AIO più silenzioso (oggi Tctl sale di colpo e le ventole
 vanno al massimo). Requisiti espliciti:
 - dopo un crash il profilo NON si riapplica da solo: decide l'utente;
@@ -28,7 +36,7 @@ vanno al massimo). Requisiti espliciti:
 - limiti ≤ stock; oltre stock solo con sblocco esplicito e avvertenza;
 - GTK4/libadwaita, compatibile con altre distro;
 - modalità Auto = efficienza/prestazioni ottimizzate automaticamente; Boost = sola potenza
-  bruta; Quiet = silenzio; Default = valori di fabbrica;
+  bruta; Eco = silenzio; Default = valori di fabbrica;
 - installazione con pacchetto classico (RPM) e strada praticabile per ogni distro;
 - niente che possa danneggiare l'hardware; ventole prima della GUI.
 
@@ -222,14 +230,17 @@ Regole di transazione:
   energetico, impostazioni ventole. Segue eventuali modifiche al BIOS.
 - Modalità (tutte statiche: il comportamento dinamico lo fa già PBO nell'SMU, nessun demone):
   - **Default**: `apply baseline`, rimuove `active`, disattiva autostart.
-  - **Quiet**: FMax da calibrazione Quiet, PPT/TDC/EDC eco AMD 88/75/150, Tjmax = target+10
-    (≤ baseline), CO da auto-tuning se presente, `power balanced`, ventole step up 10 s /
-    down 5 s sui canali marcati "ventola". Obiettivo: temperatura/rumore.
+  - **Eco** (ex Eco): CO discreto, FMax, limiti e ventole dalla calibrazione Eco (vedi
+    sotto); finché non calibrata, preset ×0.55/0.63/0.83, FMax −400, Tjmax 80, ventole 10 s /
+    5 s. Obiettivo: silenzio e temperature con undervolt prudente.
   - **Auto**: PPT/TDC/EDC e FMax dalla calibrazione Auto (punto di ginocchio prestazioni/W di
     *questa* CPU), CO da auto-tuning, Tjmax baseline, `power balanced`. Finché non calibrata:
     preset eco AMD 105 W (142/110/170), FMax baseline. Obiettivo: prestazioni per watt.
-  - **Boost**: limiti baseline (o tetti sbloccati), FMax massimo consentito, Tjmax baseline,
-    CO da auto-tuning, `power performance`. Obiettivo: potenza bruta.
+  - **Performance** (preset fisso, rev. 9): limiti, FMax e Tjmax di fabbrica, `power performance`,
+    ventole BIOS.
+  - **Boost** (calibrata, rev. 9): CO = limite misurato + 3, limiti e FMax ai tetti consentiti
+    (fabbrica o sblocco), `power performance`, ventole BIOS; a fine calibrazione misura il
+    guadagno MT/ST rispetto alla fabbrica. Obiettivo: potenza bruta.
   - **Custom**: valori impostati a mano nelle pagine.
 - `power`: profilo energetico via D-Bus `net.hadess.PowerProfiles` (`busctl`, funziona con
   power-profiles-daemon e tuned-ppd); se assente, scrittura EPP in sysfs.
@@ -291,8 +302,8 @@ Scenari verificati sulla macchina a stati:
 1. **Monitor** (polling 1 s, comando `telemetry`): Tctl/Tccd1 (k10temp) + grafico 60 s
    (cairo), PPT/TDC valore vs limite (LevelBar), MHz e CO per core, temp per core (solo
    0x620105), RPM ventole.
-2. **Modalità**: Default/Quiet/Auto/Boost/Custom, switch "Applica all'avvio", switch sblocco,
-   banner crash, pulsanti **Calibra Quiet**, **Calibra Auto** (slider perdita max %) e
+2. **Modalità**: Default/Eco/Auto/Boost/Custom, switch "Applica all'avvio", switch sblocco,
+   banner crash, pulsanti **Calibra Eco**, **Calibra Auto** (slider perdita max %) e
    **Auto-tuning CO** con progresso, log e tabella risultati.
 3. **CPU**: PPT/TDC/EDC, FMax, Tjmax, profilo energetico (Adw.SpinRow limitati ai tetti).
 4. **Curve**: CO per core (8 SpinRow + "tutti"), Curve Shaper 5 tier × 3 temperature.
@@ -332,49 +343,50 @@ Ogni pagina: **Applica ora** (runtime) e **Salva nel profilo** (menu profili).
   richiesto, `pwmN_auto_point*`. Niente demone: se l'app muore, il chip continua da solo.
   La CPU resta protetta da Tjmax qualunque cosa facciano le ventole.
 
-### Calibrazione Quiet (in GUI, sicura: abbassa solo limiti)
+### Calibrazioni (fase 4) — macchina a passi in `ryzenctl`, GUI come pilota
 
-Target Tctl (default 70 °C). Applica baseline + CO corrente; poi da FMax baseline scende a
-passi di 100 MHz (minimo 4000): per ogni passo 12 cicli `stress-ng --cpu 2 -t 2s` + 3 s pausa,
-campiona solo k10temp a 20 Hz (niente letture PM durante la misura: scaldano il die), prende il
-p95 dei picchi; primo FMax con p95 ≤ target → profilo Quiet. `# ponytail:` euristica, la
-temperatura del liquido deriva nel tempo.
+Richiesta utente (rev. 8): **Eco** = non solo ventole lente, anche un **undervolt discreto
+basato sulle capacità reali dell'hardware**. Le calibrazioni girano in `ryzenctl` come
+macchina a passi, così sopravvivono a un crash e `serve` resta reattivo:
+`autotune start eco|auto [target=70] [colimit=-25] [margin=5] [step=90]`,
+`autotune step` (esegue UN test e torna: la GUI lo chiama in loop mostrando l'avanzamento),
+`autotune status`, `autotune abort`. Stato in `/var/lib/ryzenctl/autotune.json` (atomico,
+fsync prima di ogni scrittura SMU). Il carico (`stress-ng`, argomenti fissi) lo lancia
+`ryzenctl` per il solo passo in corso. Ogni passo scrive `active` → un crash produce
+`crashed`; al riavvio `autotune status` mostra il passo interrotto e la GUI propone di
+riprendere marcandolo instabile. Avviso prima di partire: possibili riavvii, salvare tutto.
 
-Ventole nelle modalità (rev. 7, solo canali classificati "ventola"; pompa mai toccata):
-- **Quiet**: curva ricavata dal target: pwm minimo della curva BIOS fino a `target − 10 °C`,
-  salita lineare al 100 % a `Tjmax − 5 °C`; step 10 s / 5 s.
-- **Auto**: curva del BIOS, step 3 s / 2 s (toglie i picchi senza ritardare troppo).
-- **Boost / Default**: curva e step del BIOS.
+**Eco** (`autotune start eco`), nell'ordine:
+1. *Undervolt discreto*: per ogni core 0..7, gli altri a baseline, CO da 0 a passi di −5 fino a
+   `colimit` (default −25); ogni passo `step` secondi (default 90) in tre fasi: pieno carico
+   `stress-ng --cpu 1 --taskset c --cpu-method all --verify`, carico 50 % (`--cpu-load 50`),
+   carico 10 % (le instabilità CO emergono soprattutto a basso carico). Fallimento = exit ≠ 0
+   o nuovi errori MCE nel log kernel. Risultato core = ultimo stabile + `margin` (default +5:
+   discreto, non il limite). Passata finale 5 min con tutti i core ai valori trovati, tre
+   fasi; se fallisce, +3 a tutti e ripetizione.
+2. *FMax per il silenzio*: con il CO trovato, da FMax baseline a passi di −100 MHz (minimo
+   4000): 12 raffiche `stress-ng --cpu 2 -t 2s` + 3 s pausa, Tctl campionata a 20 Hz (mai
+   letture PM durante la misura: scaldano il die), p95 dei picchi; primo FMax con p95 ≤
+   `target` (default 70 °C). `# ponytail:` euristica, la temperatura del liquido deriva.
+3. *Limiti e ventole*: PPT/TDC/EDC ×0.55/0.63/0.83 della baseline (≈ eco 65 W AMD), Tjmax
+   min(baseline, 80), `power balanced`; sui canali "ventola": step 10 s / 5 s e curva dal
+   target (pwm minimo della curva BIOS fino a `target − 10 °C`, 100 % a `Tjmax − 5 °C`).
+Risultato: profilo `eco` riscritto (sostituisce il preset), con la tabella delle misure
+(CO per core, FMax scelto, p95) mostrata nella GUI. Durata ~25–40 min.
 
-### Calibrazione Auto (in GUI, sicura: abbassa solo limiti)
+**Auto** (`autotune start auto`): stessa ricerca CO ma spinta (`colimit` −40, `margin` +3,
+riusa i risultati Eco come punto di partenza se esistono); poi il ginocchio prestazioni/W:
+sweep PPT (multi-thread, −10 % per passo fino al 50 %, TDC/EDC scalati) e FMax
+(single-thread, −100 MHz fino a −800) con bogo-ops/s di `stress-ng --metrics -Y` e potenza
+RAPL (`intel-rapl:0/energy_uj`, fallback PM d[3]); scelta = valore più basso con prestazioni
+≥ (100 − perdita) % del massimo, `perdita` slider (default 10 %). Ventole: curva BIOS, step
+3 s / 2 s; `power balanced`. **Boost** = baseline + CO di Auto + `power performance` +
+ventole BIOS. Default e preset restano come oggi.
 
-Trova il punto in cui *questa* CPU rende di più per watt. Parametro unico esposto come slider:
-**perdita massima di prestazioni** rispetto a Boost (default 10 %). Prima applica Boost + CO
-corrente. Misure: prestazioni = bogo-ops/s di `stress-ng --metrics -Y`; potenza = energia RAPL
-(`intel-rapl:0/energy_uj`, via `ryzenctl`) / durata; fallback PM d[3].
-1. Sweep multi-thread: PPT da baseline a −10 % per passo fino al 50 % (TDC/EDC scalati con lo
-   stesso rapporto, floor rispettati); a ogni punto 5 s di assestamento + 15 s
-   `stress-ng --cpu 0 --cpu-method matrixprod`. Scelta: PPT più basso con prestazioni
-   ≥ (100 − perdita) % del massimo misurato.
-2. Sweep single-thread: FMax da baseline a passi di −100 MHz fino a −800; `stress-ng --cpu 1
-   --taskset <core migliore>`; stessa regola di scelta.
-Risultato salvato nel profilo Auto con la tabella misurata (W, ops/s, ops/W per punto).
-Durata ~5 min. `# ponytail:` una misura per punto, ripetere se la differenza fra punti
-adiacenti è sotto il rumore (~2 %).
-
-### Auto-tuning CO (in GUI, rischio crash gestito)
-
-Avvertenza + conferma ("salva tutto: possibili riavvii improvvisi"). Stato in
-`~/.local/state/ryzen-control/autotune.json` (fsync prima di ogni passo). Per core 0..7, gli
-altri core a baseline (così un crash è attribuibile): da 0 scende a passi di −5 fino al limite
-(default −40); ogni passo N minuti (default 3) in tre fasi: pieno carico `stress-ng --cpu 1
---taskset c --cpu-method all --verify`, carico variabile `--cpu-load 50`, carico basso
-`--cpu-load 10` (le instabilità CO emergono soprattutto in idle). Fallimento = exit
-stress-ng ≠ 0 o nuovi errori MCE (`ryzenctl mce-since`, root legge il log kernel). Risultato
-core = ultimo stabile + 3 di margine. Passata finale con tutti i core ai valori trovati
-(10 min, tre fasi): se fallisce, +3 a tutti e ripetizione. Crash/blocco → al riavvio `crashed`
-+ stato "core c a v": la GUI marca v instabile e chiede se continuare da v+5. Fine: CO salvato
-in Quiet/Auto/Boost.
+Pompa mai toccata; ogni valore prodotto passa comunque dalla validazione normale (≤ baseline
+salvo sblocco). Il backend finto simula stabilità per core (soglia CO per core, es. core 7
+instabile sotto −15) e la risposta termica a FMax, così il selftest copre la macchina a passi,
+la ripresa dopo crash e il profilo generato.
 
 ## File (in `~/Documenti/Progetti/Personali/Ryzen Control/`)
 
@@ -434,33 +446,33 @@ in Quiet/Auto/Boost.
 ### Fase 4 — calibrazioni → `v0.4.0`
 | # | Commit | Verifica |
 |---|---|---|
-| 15 | `feat: calibrazione Quiet` | **tu**: Verifica 8 (p95 sotto target) |
-| 16 | `feat: calibrazione Auto (sweep PPT/FMax, RAPL)` | **tu**: tabella monotona, scelta ≤ slider |
-| 17 | `feat: auto-tuning CO con ripresa dopo crash` | **tu**: prova su 1 core con passi da 1 min |
+| 15 | `feat(ryzenctl): autotune — macchina a passi, CO per core, ripresa dopo crash` | selftest con stabilità simulata; **tu**: prova su 1 core con `step=30` |
+| 16 | `feat(ryzenctl): autotune eco — FMax dal target Tctl, limiti, ventole; profilo eco` | **tu**: p95 sotto target, profilo eco generato |
+| 17 | `feat(ryzenctl): autotune auto — ginocchio PPT/FMax con RAPL; GUI con avanzamento` | **tu**: tabella monotona, scelta ≤ slider |
 
-### Fase 5 — altre distro → `v0.5.0`
-| # | Commit | Verifica |
-|---|---|---|
-| 18 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
-| 19 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
-
-### Fase 6 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.6.0`
+### Fase 5 — icona nel vassoio di sistema (in basso a destra, stile Telegram) → `v0.5.0`
 Richiesta utente (rev. 6). Icona `StatusNotifierItem` (protocollo nativo di KDE Plasma, su
 GNOME serve l'estensione AppIndicator) con menu `com.canonical.dbusmenu`, implementati
 direttamente su D-Bus con `Gio` di PyGObject: nessuna dipendenza nuova, funziona su Wayland
 (GTK4 non ha più la StatusIcon). È lo stesso processo `ryzen-control` avviato con `--tray`
 dall'autostart al login (finestra nascosta, un solo processo: l'autostart `ryzenctl-notify`
 viene assorbito, il banner crash diventa voce del menu).
-- Menu rapido: modalità **Default / Quiet / Auto / Boost** (spunta su quella attiva),
+- Menu rapido: modalità **Default / Quiet / Performance / Eco / Auto / Boost** (spunta su quella attiva),
   **Applica all'avvio** on/off, **Apri Ryzen Control**, **Esci**; dopo un crash in testa la voce
   "Profilo disattivato dopo un crash: Riattiva / Resta su Default".
 - Tooltip e icona di stato: Tctl e PPT attuali aggiornati ogni 2 s (icona normale /
-  attenzione se Tctl > target Quiet); nessun polling SMU senza `serve` attivo: finché non
+  attenzione se Tctl > target Eco); nessun polling SMU senza `serve` attivo: finché non
   si fa un'azione privilegiata si legge solo k10temp.
 - Prima azione privilegiata della sessione → un solo prompt pkexec (come la GUI).
 | # | Commit | Verifica |
 |---|---|---|
-| 20 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
+| 18 | `feat(tray): StatusNotifierItem + dbusmenu via Gio, --tray, autostart` | `--mock --tray`: icona in Plasma, menu, spunta modalità; **tu**: cambio modalità dal menu → `ryzenctl status` cambia; prompt pkexec una sola volta |
+
+### Fase 6 — altre distro → `v0.6.0`
+| # | Commit | Verifica |
+|---|---|---|
+| 19 | `build(deb): packaging/debian` | `dpkg-buildpackage` se disponibile, altrimenti marcato non testato |
+| 20 | `build(arch): PKGBUILD` | `namcap` se disponibile, altrimenti marcato non testato |
 
 ## Verifica
 
@@ -487,6 +499,6 @@ viene assorbito, il banner crash diventa voce del menu).
    (ΔT riportato) e le ventole del radiatore come "ventola"; `fan role N ventola` non esiste;
    canale pompa rifiutato in scrittura; step up 10 s → un picco di carico di 2 s non alza gli
    RPM; pompa a RPM invariati per tutta la prova.
-8. Calibrazione: Quiet riduce p95 picchi Tctl sotto target; Auto produce una tabella
+8. Calibrazione: Eco riduce p95 picchi Tctl sotto target; Auto produce una tabella
    monotona (W ↓ ⇒ ops/s ↓) e sceglie PPT/FMax con perdita ≤ slider, ops/W del punto scelto
    > ops/W di Boost; auto-tuning su 1 core con passi da 1 min per prova rapida.

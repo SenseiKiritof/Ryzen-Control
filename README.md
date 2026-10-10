@@ -68,6 +68,7 @@ sudo ryzenctl fmax 5000              # frequenza massima di boost (MHz)
 sudo ryzenctl tjmax 85               # temperatura massima (°C), mai sopra la baseline
 sudo ryzenctl power balanced         # power-saver | balanced | performance
 sudo ryzenctl default                # tutto ai valori di base (BIOS), avvio automatico off
+sudo ryzenctl trust on|off|status    # regola polkit: il tuo utente avvia Ryzen Control senza password
 sudo ryzenctl hwtest                 # prova reversibile di ogni comando con readback
 ```
 
@@ -92,6 +93,7 @@ sudo ryzenctl fan status             # canali, giri, pwm, step, curva, ruolo
 sudo ryzenctl fan autodetect         # ~30 s per canale sotto carico: assegna i ruoli ventola/pompa/non-controllabile
 sudo ryzenctl fan 1 step 10000 5000  # ritardo di reazione della SmartFan (ms, salita/discesa): ignora i picchi brevi
 sudo ryzenctl fan 1 curve 40:77 60:150 75:255   # punti temperatura:pwm (pwm >= 51, ultimo 255 entro 125 °C)
+sudo ryzenctl fan 2 pump max 70      # pompa: curva del BIOS con tetto al 70 %; `pump 65` = fissa; `pump auto` = BIOS
 sudo ryzenctl fan identify 2         # 100 % per 5 s per riconoscere fisicamente il canale
 sudo ryzenctl fan name 1 "radiatore alto"; sudo ryzenctl fan role 3 pompa   # a mano si può solo declassare
 sudo ryzenctl fan disable
@@ -99,8 +101,70 @@ sudo ryzenctl fan disable
 
 Si scrive solo su canali classificati **ventola** da `fan autodetect` (test fisico: canale al 40 %
 per 20 s sotto carico, la pompa fa salire Tctl di gradi in secondi, una ventola no); la pompa e i
-canali che non rispondono al PWM restano in sola lettura, `pwmN_enable` (modalità SmartFan del
-BIOS) non viene mai cambiato fuori dai test. Nei profili: `fan <N> step …` e `fan <N> curve …`.
+canali che non rispondono al PWM restano in sola lettura. Unica eccezione, a scelta
+dell'utente, per la pompa: **tetto massimo** (`fan N pump max 70`: curva del BIOS con i punti
+sopra il tetto ridotti, minimo 50 %) o velocità fissa (`fan N pump 65`), perché la curva del
+BIOS la porta al 100 % sotto carico prolungato e ronza; `fan N pump auto` ripristina il BIOS.
+Nei profili: `fan <N> step …`, `fan <N> curve …`, `fan <N> pump auto|max <pct>|<pct>`.
+
+### Modalità e calibrazione automatica
+
+Nella GUI (pagina Modalità) o da CLI. Preset fissi (nessun test): **Default** = valori BIOS,
+**Quiet** = limiti ×0.55/0.63/0.83, FMax −400, Tjmax 80, ventole 10 s/5 s, **Performance** =
+valori di fabbrica con energia al massimo. Modalità **calibrate sull'hardware** con test di
+carico (**Eco**, **Auto**, **Boost**): la ricerca del limite di stabilità del CO per core è una
+sola, condivisa e salvata (`/var/lib/ryzenctl/co_limits.json`, riusata dalle calibrazioni
+successive); ogni modalità applica il proprio margine: Eco +5 (discreto), Auto e Boost +3.
+
+```sh
+sudo ryzenctl preset quiet|performance|eco|auto|boost   # crea il profilo dai valori di fabbrica (segnaposto)
+sudo ryzenctl autotune estimate eco              # durata stimata (parallelo e core per core)
+sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=5 step=90 parallel=1 reuse=1]
+sudo ryzenctl autotune step                      # un test alla volta; ripetere finché phase == done
+sudo ryzenctl autotune status | abort            # abort interrompe subito anche un passo in corso
+sudo ryzenctl autotune save [apply]              # a phase == done: scrive il profilo proposto (e lo applica); abort lo scarta
+```
+
+A calibrazione finita la CPU torna ai valori di fabbrica e il profilo è solo **proposto**: si
+sceglie se annullare, salvare (il profilo compare in Modalità, non attivo) o salvare e
+applicare. Senza scelta lo stato resta su disco e la GUI lo ripropone all'avvio successivo.
+
+Dalla GUI: Modalità → "Calibra…" su Eco, Auto o Boost, poi "Automatica" (valori di default) o
+"Scegli i valori…"; alla fine i pulsanti **Annulla / Salva / Salva e applica**. Di default i core si provano **tutti insieme** a ogni livello di CO (un worker per
+core, ~8× più veloce; `parallel=0` = un core alla volta, che attribuisce con certezza anche un
+riavvio). Durante i test la GUI mostra il tempo rimanente stimato, la tensione reale misurata
+per core a ogni livello e quanti mV vale un passo di CO su questa CPU.
+
+- **Eco**: cerca il Curve Optimizer negativo stabile (passi di −5 fino a `colimit`, tre fasi di
+  carico: pieno con verifica, 50 %, 10 %, più raffiche singole per il boost massimo; controllo
+  errori MCE) e tiene l'ultimo stabile + `margin` (undervolt *discreto*); passata finale su tutti
+  i core; poi, con i limiti eco già applicati, abbassa FMax di 100 MHz alla volta finché il 95°
+  percentile dei picchi di Tctl sotto raffiche miste (tutti i core / un core) resta sotto
+  `target`; scrive il profilo `eco` con limiti Quiet, ventole lente e curva dal target.
+  Esito sul 9800X3D di sviluppo: tutti i core stabili fino a −25 → CO −20, ≈ 3,4 mV per passo
+  (−69 mV reali a pieno carico), FMax invariata (picco 64 °C < 70 con il profilo eco).
+- **Auto**: CO = limite + 3, poi il ginocchio prestazioni/watt: sweep di PPT (multi-thread) e
+  FMax (single-thread) misurando bogo-ops/s di stress-ng e potenza RAPL, scegliendo il valore
+  più basso che perde al massimo `loss` % (default 10) rispetto al massimo.
+- **Boost**: CO = limite + 3, limiti e FMax ai tetti consentiti (fabbrica, o sblocco), energia
+  al massimo; misura il guadagno MT/ST rispetto alla fabbrica.
+
+La ricerca del CO usa come prima fase di ogni livello il metodo stress-ng più pesante su questa
+CPU (sondato all'avvio a CO di fabbrica); le misure di versioni precedenti, fatte senza questo
+carico, non vengono riusate. La **passata finale** (tutti i core al CO proposto) comincia con il metodo stress-ng che consuma
+di più su questa CPU, a pieno carico per 60 s con verifica, poi 100 s pieno / 50 % / 10 %. Se
+fallisce, oppure se in una fase successiva (FMax, ginocchio, benchmark) un carico muore, compare
+un errore MCE o il sistema si blocca e viene riavviato, la combinazione è instabile: +3 su tutti
+i core e passata finale ripetuta (al massimo 3 tentativi). Le combinazioni fallite restano in
+`co_limits.json` e le calibrazioni successive non le riprovano. Dopo un riavvio forzato il passo
+interrotto viene marcato instabile già all'avvio di `ryzenctl.service`, prima di qualunque scelta
+nella GUI (Riprendi o Annulla). Esito sul 9800X3D di sviluppo:
+limite per core −40, combinato −37 fallito due volte (una con blocco del sistema sotto fft a
+16 thread), −34 stabile.
+
+**Attenzione**: un CO instabile può riavviare il PC durante la calibrazione (nessun danno,
+lavoro non salvato perso). Lo stato è su disco: al riavvio il passo interrotto viene marcato
+instabile e si riprende. Durata: Eco ~25–40 min, Auto di più.
 
 **Curve Shaper**: sperimentale e di fatto disattivato. Sul 9800X3D con SMU 98.81.0 il comando
 di scrittura (RSMU 0xA6) risponde OK ma quello di lettura (0x84) restituisce solo zeri o
@@ -121,8 +185,17 @@ dal BIOS.
 - **Crash-guard**: `ryzenctl.service` scrive i marker `dirty` (boot in corso) e `active`
   (stato modificato) *prima* di toccare l'SMU e toglie `dirty` allo spegnimento pulito. Se al
   boot successivo entrambi esistono, il sistema è andato in crash: il profilo CPU **non viene
-  riapplicato**, viene scritto `/var/lib/ryzenctl/crashed`, al login arriva una notifica e si
-  decide (`ryzenctl crashed clear` + `autostart on` per riattivare, o restare sui valori BIOS).
+  riapplicato**, viene scritto `/var/lib/ryzenctl/crashed`, al login arriva una notifica (un
+  clic apre Ryzen Control) e si decide (`ryzenctl crashed clear` + `autostart on` per riattivare, o restare sui valori BIOS).
+  L'interruttore "Avvia Ryzen Control al login" (Modalità) aggiunge solo un autostart XDG
+  dell'utente (`~/.config/autostart/`): la finestra si apre al login con il prompt pkexec e,
+  dopo un crash, mostra l'avviso con Riattiva / Resta su Default. Il riapplicare al boot resta
+  compito esclusivo di `ryzenctl.service` (`autostart` ∧ nessun crash): la GUI non applica nulla.
+  "Non chiedere più la password" (`ryzenctl trust on`) scrive
+  `/etc/polkit-1/rules.d/50-ryzen-control.rules`: il tuo utente, nella sessione locale attiva,
+  avvia `pkexec ryzenctl serve` senza autenticarsi. Vale solo per questa azione, non è un sudo
+  generico; in cambio ogni programma eseguito col tuo utente può cambiare limiti, CO e ventole
+  (entro i tetti di ryzenctl). `trust off` toglie la regola.
 - Via di fuga totale: al boot, in GRUB, `e` e aggiungere `ryzenctl.off` alla riga del kernel:
   il servizio non parte e il modulo non viene caricato (è in blacklist, lo carica solo il
   servizio).

@@ -1,6 +1,6 @@
 # Ryzen Control — unica fonte del layout installato. I pacchetti (RPM, deb, Arch) chiamano
 # `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` sono i pezzi.
-VERSION := 0.1.0
+VERSION := 0.4.0
 APPID := org.ryzencontrol.RyzenControl
 PREFIX ?= /usr
 DESTDIR ?=
@@ -68,6 +68,7 @@ check:
 	systemd-analyze --root="$(TMPROOT)" verify --recursive-errors=no ryzenctl.service ryzenctl-resume.service
 	desktop-file-validate data/ryzenctl-notify.desktop data/$(APPID).desktop
 	-appstreamcli validate --no-net data/$(APPID).metainfo.xml
+	timeout 120 python3 ryzen-control --mock --smoke   # finestra di calibrazione su ogni stato del backend finto (serve un display)
 
 # Tarball dal commit corrente (HEAD): i pacchetti si costruiscono da ciò che è versionato.
 dist:
@@ -79,7 +80,7 @@ rpm: dist
 	rpmdev-setuptree
 	cp dist/ryzen-control-$(VERSION).tar.gz "$$HOME/rpmbuild/SOURCES/"
 	rpmbuild -ba packaging/ryzen-control.spec
-	cp "$$HOME"/rpmbuild/RPMS/noarch/ryzen-control-$(VERSION)-*.rpm "$$HOME"/rpmbuild/RPMS/noarch/ryzen-smu-dkms-$(VERSION)-*.rpm dist/
+	cp "$$HOME"/rpmbuild/RPMS/noarch/ryzen-control-$(VERSION)-*.rpm dist/
 	ls -1 dist/
 
 # kbuild non accetta spazi nel percorso: compila una copia del driver fuori dal repo.

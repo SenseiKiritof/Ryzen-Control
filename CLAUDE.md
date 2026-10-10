@@ -24,21 +24,42 @@ profilo disattivato + notifica, riattiva, restart, boot pulito, resume). Tag `v0
 kernel): `fan enable/status/autodetect/step/curve/identify` ok; autodetect ha dato pwm2 pompa
 (2125→1898 giri al 21 %), pwm5/pwm6 ventola, pwm7 (100 %, senza tachimetro) non testabile e
 protetto; step 10 s/5 s sui canali ventola elimina gli scatti sui picchi (3 s di carico pieno,
-giri fermi). Il chip arrotonda gli step a ~200 ms. Tag `v0.2.0`. Poi: fase 3 GUI, fase 4
-calibrazioni Quiet/Auto e auto-tuning CO, fase 5 deb/PKGBUILD, fase 6 icona nel vassoio
-(StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, comandi rapidi).
+giri fermi). Il chip arrotonda gli step a ~200 ms. Tag `v0.2.0`.
+**Fase 3 (GUI) e fase 4 (calibrazioni)** scritte e usate su hardware: `ryzen-control` (pagine
+Monitor, Modalità con preset Quiet/Boost e calibrate Eco/Auto, CPU, Curve, Ventole; valori
+colorati rispetto alla fabbrica; finestra di calibrazione ridimensionabile con avanzamento,
+stime di durata, tensione misurata per core e mV per passo; interruzione immediata). `autotune`
+in ryzenctl è una macchina a passi (`start/step/status/abort/estimate`, stato in
+`/var/lib/ryzenctl/autotune.json`, ripresa dopo crash, parallelo di default). Eco verificata su
+hardware (CO −20 su 8 core, ≈ 3,4 mV/passo, FMax invariata); Auto (ginocchio PPT/FMax con RAPL)
+in verifica; Boost calibrata, pompa con tetto o velocità fissa, scelta a fine calibrazione (Annulla / Salva /
+Salva e applica), `trust`, avvio al login, notifica cliccabile. Tag `v0.4.0` (VERSION 0.4.0). Poi: fase 5 icona nel vassoio (StatusNotifierItem + dbusmenu via Gio,
+`ryzen-control --tray`, comandi rapidi), fase 6 deb/PKGBUILD.
 
 Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms → readback con
 attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
 che cambia il formato le righe non più ammesse vanno ignorate (`profile_lines("baseline")`);
 il backend finto non deve mai avere effetti reali (es. `notify-send`) perché il selftest gira
-nella sessione dell'utente.
+nella sessione dell'utente. Calibrazione: `--cpu-method all` per 5 min non basta, fft a 16 thread
+ha bloccato il sistema a −37 (limite per core −40) → la passata finale parte dal metodo più
+pesante (`FINAL_HEAVY_SEC`); uno stress-ng che termina in anticipo o con codice ≠ 0 è
+instabilità (`Unstable`), mai una metrica bassa; ogni fase con il CO finale applicato ha il marker
+`in_progress` (`post`) così un crash viene attribuito alla combinazione (+3, finale ripetuta); le
+combinazioni fallite restano in `co_limits.json` (`final_failures`) e non si riprovano;
+l'attribuzione del crash (`at_attribute_crash`, senza SMU) avviene già in `boot`; il metodo pesante
+è anche la prima fase della ricerca (file `co_limits` senza `method` non riusati). Il driver
+nct6775 non riscrive uno step di 0 ms (registro minimo 1 = 400 ms): `FAN_STEP_MIN_MS`, altrimenti
+`default` falliva sulle righe ventola della baseline. Un blocco
+con riavvio dal pulsante può azzerare i file scritti negli ultimi secondi (btrfs): anche oggetti
+git appena creati.
 
 ## Layout
 
 - `ryzenctl` — Python stdlib, unico punto privilegiato (CLI, `serve`, `selftest`).
-- `ryzen-control` — GUI Python/PyGObject (GTK4, libadwaita ≥ 1.5), gira come utente. Non esiste
-  ancora; il Makefile la installa solo se presente (`install-gui`).
+- `ryzen-control` — GUI Python/PyGObject (GTK4, libadwaita ≥ 1.5), gira come utente; un solo
+  processo `pkexec ryzenctl serve` per sessione (Helper con lettore + FIFO: le richieste partono
+  senza attendere le precedenti, le risposte arrivano in ordine); `--mock` usa il backend finto
+  con app id separato (`…Mock`) per non attivare l'istanza installata.
 - `ryzen_smu/` — driver upstream (amkillam/ryzen_smu, commit d298366) **copiato**, non subtree
   (git-subtree non è installato): origine, file esclusi, modifica locale a `smu.c` (PM table
   0x6211xx/0x6212xx) e procedura di aggiornamento in `ryzen_smu/UPSTREAM.md`.
@@ -53,7 +74,7 @@ nella sessione dell'utente.
   ricompila il modulo solo se manca per il kernel in uso o cambia la chiave: **quando cambia il
   sorgente in `ryzen_smu/` va bumpata `VERSION`** (Makefile + spec), altrimenti dkms tiene il
   modulo vecchio;
-  `packaging/debian/` e `packaging/PKGBUILD` in fase 5.
+  `packaging/debian/` e `packaging/PKGBUILD` in fase 6.
 
 Vincoli di compatibilità: sintassi Python ≥ 3.9 (nessuna feature più recente), libadwaita ≥ 1.5,
 niente dipendenze Python oltre PyGObject, nessun framework di test.
@@ -92,7 +113,8 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   negati via serve). Un nuovo comando = una funzione `cmd_*` + voce in `COMMANDS` (+ in
   `PROFILE_CMDS` se ammesso nei profili) + caso nel selftest.
 - **`ryzenctl` è il confine di fiducia**: la GUI non valida nulla di definitivo, invia e mostra
-  gli errori. `serve` viene avviato una volta per sessione (un solo prompt pkexec).
+  gli errori. `serve` viene avviato una volta per sessione (un solo prompt pkexec; `trust on` scrive una regola polkit in
+  `/etc/polkit-1/rules.d/` per l'utente chiamante, `PKEXEC_UID`/`SUDO_USER`, e il prompt sparisce).
 - **Backend finto** (`class Fake`, attivo con `RYZENCTL_ROOT`): simula SMU, PM table, k10temp,
   profilo energetico; `drop` ignora le prossime scritture (prova del readback), `log` registra
   quali marker esistevano a ogni scrittura (prova dell'ordine). Nuova logica = caso nel selftest.
@@ -109,13 +131,23 @@ systemd: ryzenctl.service, -resume ───────┘─ /etc/ryzenctl, /v
   solo `dirty`. `boot` non solleva mai eccezioni (la unit deve restare attiva perché ExecStop
   giri). Via di fuga: parametro kernel `ryzenctl.off` + modulo in blacklist (lo carica solo il
   servizio con modprobe esplicito).
-- **Modalità** statiche (nessun demone, il dinamismo lo fa PBO): Default / Quiet / Auto / Boost /
-  Custom. Quiet e Auto si ottengono da calibrazioni in GUI che abbassano solo limiti (fase 4).
+- **Modalità** statiche (nessun demone, il dinamismo lo fa PBO): Default / Quiet (preset) /
+  Eco (calibrata) / Auto (calibrata) / Performance (preset) / Boost (calibrata) / Custom. `preset <nome>` genera i profili
+  dalla baseline (rapporti in `PRESETS`); `autotune` li sostituisce con misure, ma solo su
+  `autotune save [apply]`: a `phase == done` la CPU è a baseline e il profilo è proposto in
+  `profile_lines` (la GUI chiede Annulla / Salva / Salva e applica; `abort` scarta). `serve` esegue
+  le richieste in ordine su un thread e legge su un altro: `autotune abort` alza il flag
+  `/run/ryzenctl/autotune-abort` e termina gli stress-ng registrati in `_children`.
 - **Ventole** (fase 2): nessun demone; si cambiano solo `pwmN_step_up_time`/`step_down_time` (e
   punti curva se richiesto) della SmartFan già programmata dal BIOS. Ruoli assegnati da
   `fan autodetect` (test fisico: canale al 40 % per 20 s sotto carico, ΔTctl distingue la pompa);
   a mano si può solo declassare, mai promuovere a "ventola". `pwmN_enable` non si tocca mai
-  fuori dai test (ripristino in `finally`). Il parametro kernel `acpi_enforce_resources=lax` lo
+  fuori dai test (ripristino in `finally`), con una sola eccezione esplicita per la pompa: `fan N pump max <50-100>`
+  (curva del BIOS con i punti sopra il tetto ridotti; la curva BIOS è memorizzata in
+  `settings.fans[N].bios_curve` e `pump_max` viene azzerato a ogni boot perché il BIOS la
+  riprogramma), `fan N pump <50-100>` (velocità fissa, modo manuale) e `fan N pump auto`
+  (ripristina); mai curve o step sulla pompa a mano (il BIOS la portava al 100 % sotto carico e
+  ronzava). Il parametro kernel `acpi_enforce_resources=lax` lo
   mette `ryzenctl fan enable` (azione esplicita dell'utente, grubby), mai il pacchetto.
   Il backend finto simula l'hwmon con file veri sotto `$ROOT/sys/class/hwmon/hwmon0` e la
   fisica in `Fake.after_fan_write`.
