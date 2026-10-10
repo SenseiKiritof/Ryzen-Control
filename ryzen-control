@@ -256,6 +256,21 @@ def curve_points(tokens):
     return out
 
 
+def crash_story(st):
+    """Frase per l'utente dopo un blocco: a quale CO è successo e da dove riparte ('' se nessun crash)."""
+    span = AutotuneDialog.co_span
+    crashed = [u["value"] for u in (st.get("unstable") or {}).values() if u.get("why") == "crash"]
+    fails = [f for f in (st.get("final_failures") or []) if f.get("why") == "crash"]
+    if not crashed and not fails:
+        return ""
+    where = "a CO %s" % span(crashed) if crashed else "nella passata finale a CO %s" % span(fails[-1]["values"])
+    nxt = AutotuneDialog.final_values(st)
+    if st.get("phase") == "done":
+        return "Il sistema si è bloccato %s." % where
+    return "Il sistema si è bloccato %s: quel livello è registrato come instabile e si riparte dalla passata finale a CO %s (margine +%d)." % (
+        where, span(nxt), st.get("final_margin", 0))
+
+
 def pump_mode(c):
     """Stato pompa dal canale di `fan status`: ("auto"|"max"|"fixed", pct)."""
     if c.get("modo") == 1 and c.get("pwm") is not None:
@@ -821,7 +836,7 @@ class AutotuneDialog(Adw.Window):
                                "applicato, la combinazione è instabile e la passata finale viene ripetuta con +3 su tutti i core.")
             self.note.set_visible(True)
         if st.get("co_reused"):   # ricerca saltata: tabella già popolata, la fase CO conta come completata nella barra
-            self.reuse.set_text("Limite CO riusato dalla misura del %s" % st["co_reused"])
+            self.reuse.set_text("Limite CO riusato dalla misura del %s. %s" % (st["co_reused"], crash_story(st)))
             self.reuse.set_visible(True)
         eta = st.get("eta") or {}
         if eta:
@@ -1600,10 +1615,11 @@ class Window(Adw.ApplicationWindow):
         where = AT_PHASE_NAMES.get(ph, ph)
         if ph == "co":
             where += ", livello CO %s" % at.get("value") if at.get("parallel") else ", core %s" % at.get("core")
+        story = crash_story(at) or "Il passo interrotto dal riavvio è già stato registrato come instabile."
         d = Adw.AlertDialog(heading="Calibrazione interrotta",
-                            body="Una calibrazione %s iniziata il %s è rimasta a metà (%s). Il passo interrotto dal riavvio è già "
-                                 "stato registrato come instabile. Riprenderla da dove era o annullarla restando ai valori di fabbrica?" % (
-                                     at.get("mode", "?").capitalize(), at.get("started", "?"), where))
+                            body="Una calibrazione %s iniziata il %s è rimasta a metà (%s). %s Riprenderla da dove era o "
+                                 "annullarla restando ai valori di fabbrica?" % (
+                                     at.get("mode", "?").capitalize(), at.get("started", "?"), where, story))
         d.add_response("abort", "Annulla calibrazione")
         d.add_response("resume", "Riprendi")
         d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)
@@ -1745,6 +1761,8 @@ class App(Adw.Application):
                 dlg.close()
             win.ask_resume({"mode": "auto", "phase": "ppt", "started": "oggi"})
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "oggi"})
+            win.ask_resume({"mode": "auto", "phase": "final", "started": "oggi", "params": {"margin": 3}, "final_margin": 6,
+                            "results": {str(c): -35 for c in range(8)}, "unstable": {"0": {"value": -40, "why": "crash"}}})
         except Exception:
             import traceback
             traceback.print_exc()
