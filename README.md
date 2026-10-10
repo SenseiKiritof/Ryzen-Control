@@ -149,12 +149,16 @@ per core a ogni livello e quanti mV vale un passo di CO su questa CPU.
 - **Boost**: CO = limite + 3, limiti e FMax ai tetti consentiti (fabbrica, o sblocco), energia
   al massimo; misura il guadagno MT/ST rispetto alla fabbrica.
 
-La **passata finale** (tutti i core al CO proposto) comincia con il metodo stress-ng che consuma
+La ricerca del CO usa come prima fase di ogni livello il metodo stress-ng più pesante su questa
+CPU (sondato all'avvio a CO di fabbrica); le misure di versioni precedenti, fatte senza questo
+carico, non vengono riusate. La **passata finale** (tutti i core al CO proposto) comincia con il metodo stress-ng che consuma
 di più su questa CPU, a pieno carico per 60 s con verifica, poi 100 s pieno / 50 % / 10 %. Se
 fallisce, oppure se in una fase successiva (FMax, ginocchio, benchmark) un carico muore, compare
 un errore MCE o il sistema si blocca e viene riavviato, la combinazione è instabile: +3 su tutti
 i core e passata finale ripetuta (al massimo 3 tentativi). Le combinazioni fallite restano in
-`co_limits.json` e le calibrazioni successive non le riprovano. Esito sul 9800X3D di sviluppo:
+`co_limits.json` e le calibrazioni successive non le riprovano. Dopo un riavvio forzato il passo
+interrotto viene marcato instabile già all'avvio di `ryzenctl.service`, prima di qualunque scelta
+nella GUI (Riprendi o Annulla). Esito sul 9800X3D di sviluppo:
 limite per core −40, combinato −37 fallito due volte (una con blocco del sistema sotto fft a
 16 thread), −34 stabile.
 

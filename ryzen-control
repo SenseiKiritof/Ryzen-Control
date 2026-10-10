@@ -1592,8 +1592,8 @@ class Window(Adw.ApplicationWindow):
         if ph == "co":
             where += ", livello CO %s" % at.get("value") if at.get("parallel") else ", core %s" % at.get("core")
         d = Adw.AlertDialog(heading="Calibrazione interrotta",
-                            body="Una calibrazione %s iniziata il %s è rimasta a metà (%s). Riprenderla da dove era (il passo "
-                                 "interrotto viene marcato instabile) o annullarla riportando la CPU ai valori di fabbrica?" % (
+                            body="Una calibrazione %s iniziata il %s è rimasta a metà (%s). Il passo interrotto dal riavvio è già "
+                                 "stato registrato come instabile. Riprenderla da dove era o annullarla restando ai valori di fabbrica?" % (
                                      at.get("mode", "?").capitalize(), at.get("started", "?"), where))
         d.add_response("abort", "Annulla calibrazione")
         d.add_response("resume", "Riprendi")
@@ -1690,8 +1690,8 @@ class Window(Adw.ApplicationWindow):
         def resp(_d, r):
             if r == "reactivate":
                 self.run([["crashed", "clear"], ["autostart", "on"], ["apply", prof]], lambda _: self.toast("Profilo '%s' riattivato" % prof))
-            elif r == "default":
-                self.run([["crashed", "clear"], ["autostart", "off"]], lambda _: self.toast("Avvio automatico disattivato"))
+            elif r == "default":   # valori di fabbrica anche per le ventole (il boot le aveva applicate), profilo deselezionato
+                self.run([["crashed", "clear"], ["default"]], lambda _: self.toast("Valori di fabbrica; avvio automatico disattivato"))
         d.connect("response", resp)
         d.present(self)
 

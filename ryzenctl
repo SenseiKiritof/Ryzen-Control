@@ -39,6 +39,7 @@ FAN_PUMP_DT, FAN_FAN_DT, FAN_PUMP_RPM = 2.0, 1.0, 1500
 FAN_ABORT_TCTL, FAN_ABORT_DT = 80.0, 8.0
 FAN_RPM_CHANGE = 0.05          # sotto: il canale non risponde al PWM
 FAN_STEP_MAX_MS, FAN_STEP_TOL_MS = 60000, 200
+FAN_STEP_MIN_MS = 400   # nct6775 non scrive 0: registro minimo 1 = 400 ms; lo 0 del BIOS si rilegge ma non si riscrive
 FAN_PWM_MIN, FAN_CURVE_LAST_TEMP_MAX = 51, 125    # 51 = 20 %, minimo delle curve BIOS; 125 = loro ultimo punto
 FAN_ROLES = ("ventola", "pompa", "non-controllabile", "sconosciuto")
 FAN_PUMP_MIN_PCT = 50          # pompa: solo velocità fissa esplicita, mai sotto il 50 % (flusso), mai curve/step
@@ -189,6 +190,10 @@ class Fake:
     def after_fan_write(self, path, value):
         """Fisica finta: in manuale la ventola segue il PWM e scalda poco, la pompa rallentata
         alza Tctl di 5 °C, il canale 3 pin ignora il PWM."""
+        if re.search(r"/pwm\d+_step_(up|down)_time$", path) and value < FAN_STEP_MIN_MS:   # come nct6775: registro minimo 1
+            with open(P(path), "w") as f:
+                f.write(str(FAN_STEP_MIN_MS))
+            return
         m = re.search(r"/pwm(\d+)(_enable)?$", path)
         if not m:
             return
@@ -1056,9 +1061,9 @@ def core_cpus(c):
         return str(c)
 
 
-def core_load_args(c, extra=()):
-    """Carico di stabilità per un core: entrambi i thread, metodi misti con verifica dei risultati."""
-    return ["--cpu", "2", "--taskset", core_cpus(c), "--cpu-method", "all", "--verify"] + list(extra)
+def core_load_args(c, extra=(), method="all"):
+    """Carico di stabilità per un core: entrambi i thread, con verifica dei risultati."""
+    return ["--cpu", "2", "--taskset", core_cpus(c), "--cpu-method", method, "--verify"] + list(extra)
 
 
 def co_test(cores, seconds):
@@ -1080,20 +1085,22 @@ def co_test_final(method, seconds):
     return co_test(list(range(CORES)), seconds)
 
 
-def co_test_sampled(cores, seconds):
-    """Come co_test, ma a metà della fase a pieno carico campiona tensione e MHz per core:
-    è la misura di "a cosa corrisponde" un passo di CO. Restituisce (ok, campione)."""
+def co_test_sampled(cores, seconds, method="all"):
+    """Un core alla volta: metodo più pesante a pieno carico (campionando tensione e MHz a metà:
+    è la misura di "a cosa corrisponde" un passo di CO), poi metodi misti pieno, 50 %, 10 %.
+    Restituisce (ok, campione)."""
     if FAKE:
         check_abort()
         return FAKE.load_ok(["--taskset", str(cores[0])] if len(cores) == 1 else []), sample_cores()
-    sec = max(1, seconds // 3)
+    sec = max(1, seconds // 4)
     base = core_load_args(cores[0]) if len(cores) == 1 else ["--cpu", "0", "--cpu-method", "all", "--verify"]
-    pr = spawn_load(base, sec)
+    heavy = core_load_args(cores[0], method=method) if len(cores) == 1 else ["--cpu", "0", "--cpu-method", method, "--verify"]
+    pr = spawn_load(heavy, sec)
     time.sleep(max(1, sec // 2))
     sample = sample_cores()
     if wait_child(pr) != 0 or mce_since(time.time() - sec - 1):
         return False, sample
-    for extra in (["--cpu-load", "50"], ["--cpu-load", "10"]):
+    for extra in ([], ["--cpu-load", "50"], ["--cpu-load", "10"]):
         if not run_load(base + extra, sec):
             return False, sample
     return True, sample
@@ -1122,10 +1129,12 @@ def mce_cores_since(ts, cores):
     return {int(c) % CORES for c in cpus} & set(cores)
 
 
-def co_test_parallel(cores, seconds):
+def co_test_parallel(cores, seconds, method="all"):
     """Tutti i core insieme, un worker per core su entrambi i thread SMT (così l'instabilità
-    software resta attribuita al core): pieno carico, poi 50 %, poi raffiche singole a turno per
-    toccare il boost massimo di ogni core. Restituisce (core falliti, campione tensioni/MHz)."""
+    software resta attribuita al core): metodo più pesante a pieno carico (è quello che sul
+    9800X3D ha bloccato il sistema dove `all` passava), metodi misti pieno, poi 50 %, poi
+    raffiche singole a turno per il boost massimo di ogni core. Restituisce (core falliti,
+    campione tensioni/MHz)."""
     if FAKE:
         check_abort()
         return {c for c in cores if not FAKE.load_ok(["--taskset", str(c)])}, sample_cores()
@@ -1133,9 +1142,9 @@ def co_test_parallel(cores, seconds):
     failed = set()
     sample = None
     t0 = time.time()
-    for extra in ([], ["--cpu-load", "50"]):
-        procs = {c: spawn_load(core_load_args(c, extra), sec) for c in cores if c not in failed}
-        if not extra:
+    for i, (meth, extra) in enumerate(((method, []), ("all", []), ("all", ["--cpu-load", "50"]))):
+        procs = {c: spawn_load(core_load_args(c, extra, meth), sec) for c in cores if c not in failed}
+        if i == 0:
             time.sleep(max(1, sec // 2))
             sample = sample_cores()                    # tensioni a pieno carico a questo livello di CO
         for c, pr in procs.items():
@@ -1207,12 +1216,15 @@ def co_limits_reusable(params):
         return None
     if saved.get("colimit", 0) > params["colimit"] or any(str(c) not in saved.get("results", {}) for c in range(CORES)):
         return None
+    if not saved.get("method"):          # misura di una versione senza il metodo pesante nella ricerca: non vale
+        return None
     return saved
 
 
 def co_limits_save(st):
     write_atomic(P(CO_LIMITS_PATH), json.dumps({"results": st["results"], "unstable": st["unstable"],
                                                 "colimit": st["params"]["colimit"], "samples": st.get("samples", {}),
+                                                "method": st.get("method"),
                                                 "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"]}, indent=1))
 
 
@@ -1504,6 +1516,8 @@ def _autotune(ctx, args):
                 "co_reuse": saved["time"] if saved else None}
     if args[0] == "abort":
         st = at_load()
+        if st:
+            at_attribute_crash(st)                     # un crash non ancora attribuito resta in memoria
         rm(P(AT_PATH))
         if st:
             apply_lines(profile_lines("baseline"), ctx, "cpu")
@@ -1530,10 +1544,11 @@ def _autotune(ctx, args):
         params = at_params(args[1], args[2:])
         rm(P(AT_ABORT_FLAG))
         apply_lines(profile_lines("baseline"), ctx, "cpu")      # tutti i core a baseline
-        _, ref = co_test_parallel(list(range(CORES)), 9)        # riferimento: tensioni a CO di fabbrica, stesso carico
+        method = heaviest_method()                              # sondato a CO di fabbrica: usato in ricerca, finale e ginocchio
+        _, ref = co_test_parallel(list(range(CORES)), 9, method)   # riferimento: tensioni a CO di fabbrica, stesso carico
         saved = co_limits_reusable(params)
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
-              "samples": {"0": ref},
+              "samples": {"0": ref}, "method": method,
               "parallel": bool(params["parallel"]), "active_cores": list(range(CORES)),
               "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
               "fmax": {"current": None, "tests": [], "chosen": None},
@@ -1567,24 +1582,40 @@ def _autotune(ctx, args):
         return st
 
 
+def at_attribute_crash(st):
+    """Il passo in `in_progress` è di un boot precedente: il sistema è andato in crash durante quel
+    test. Solo stato, nessuna scrittura SMU (così lo chiama anche `boot`, e la memoria dei
+    fallimenti si aggiorna prima che l'utente scelga Riprendi o Annulla)."""
+    ip = st.get("in_progress")
+    if not ip or ip.get("boot_id") == boot_id():
+        return False
+    st["resumed_after_crash"] = True
+    st["in_progress"] = None
+    if ip["kind"] == "co":
+        st["unstable"][str(ip["core"])] = {"value": ip["value"], "why": "crash"}
+        st["results"].setdefault(str(ip["core"]), 0)
+        st["core"] += 1                                # dopo il riavvio la CPU è già a baseline
+        st["value"] = -CO_STEP
+        if st["core"] >= CORES:
+            st["phase"] = "final"
+            co_limits_save(st)
+    elif ip["kind"] == "co_par":                       # non attribuibile: tutti i core in prova instabili a v
+        for c in ip["cores"]:
+            st["unstable"][str(c)] = {"value": ip["value"], "why": "crash"}
+            st["results"].setdefault(str(c), 0)
+        st["active_cores"] = []
+        st["phase"] = "final"
+        co_limits_save(st)
+    elif ip["kind"] == "final":
+        at_final_failed(st, "crash")
+    else:                                              # post: CO finale applicato, combinazione instabile
+        at_post_failed(st, "crash")
+    return True
+
+
 def at_step(ctx, st, base):
     st.pop("interrupted", None)
-    ip = st.get("in_progress")
-    if ip and ip.get("boot_id") != boot_id():          # il passo precedente ha fatto crashare il sistema
-        st["resumed_after_crash"] = True
-        st["in_progress"] = None
-        if ip["kind"] == "co":
-            at_core_failed(st, ip["core"], ip["value"], "crash")
-        elif ip["kind"] == "co_par":                   # non attribuibile: tutti i core in prova instabili a v
-            for c in ip["cores"]:
-                st["unstable"][str(c)] = {"value": ip["value"], "why": "crash"}
-                st["results"].setdefault(str(c), 0)
-            st["active_cores"] = []
-            st["phase"] = "final"
-        elif ip["kind"] == "final":
-            at_final_failed(st, "crash")
-        elif ip["kind"] == "post":                     # CO finale applicato: combinazione instabile
-            at_post_failed(st, "crash")
+    if at_attribute_crash(st):
         at_save(st)
         return st
     if st["phase"] == "co" and st.get("parallel"):
@@ -1593,7 +1624,7 @@ def at_step(ctx, st, base):
         at_save(st)
         for c in cores:
             run(["co", str(c), str(v)], ctx)
-        failed, sample = co_test_parallel(cores, st["params"]["step"])
+        failed, sample = co_test_parallel(cores, st["params"]["step"], st.get("method", "all"))
         st["in_progress"] = None
         if sample:   # i core già usciti dalla prova non sono a questo livello: campione non significativo
             for key in ("volt", "mhz"):
@@ -1619,7 +1650,7 @@ def at_step(ctx, st, base):
         st["in_progress"] = {"kind": "co", "core": c, "value": v, "boot_id": boot_id()}
         at_save(st)
         run(["co", str(c), str(v)], ctx)
-        ok, sample = co_test_sampled([c], st["params"]["step"])
+        ok, sample = co_test_sampled([c], st["params"]["step"], st.get("method", "all"))
         st["in_progress"] = None
         if sample:
             st.setdefault("samples", {}).setdefault(str(v), {"volt": [None] * CORES, "mhz": [None] * CORES})
@@ -1812,6 +1843,13 @@ def cmd_boot(ctx, args):
             cmd_baseline(ctx, [])
         except Err as e:
             out["baseline_error"] = str(e)
+    try:                                            # calibrazione interrotta da un crash: attribuita subito
+        at = at_load()
+        if at and at_attribute_crash(at):
+            at_save(at)
+            out["autotune_crash"] = at["phase"]
+    except Exception as e:  # boot non deve mai fallire
+        out["autotune_error"] = str(e)
     out.update(apply_autostart(ctx, ("fan", "cpu")))
     return out
 
@@ -2134,7 +2172,7 @@ def cmd_fan(ctx, args):
         for attr, v in (("step_up_time", up), ("step_down_time", down)):
             hw_write("%s/pwm%d_%s" % (d, n, attr), v)
             got = hw_read("%s/pwm%d_%s" % (d, n, attr))
-            if abs(got - v) > FAN_STEP_TOL_MS:
+            if abs(got - v) > FAN_STEP_TOL_MS and not v < got <= FAN_STEP_MIN_MS:
                 raise Err("fan %d %s: scritto %d ma riletto %d" % (n, attr, v, got))
         return {"canale": n, "step": [hw_read("%s/pwm%d_step_up_time" % (d, n)), hw_read("%s/pwm%d_step_down_time" % (d, n))]}
     if len(args) in (3, 4) and args[1] == "pump":
@@ -2617,6 +2655,7 @@ def selftest():
     assert [r[n]["ruolo"] for n in (1, 2, 3)] == ["ventola", "pompa", "non-controllabile"], r
     assert FAKE.s["tctl"] == FAKE.s["tctl_base"] and hw_read(Fake.FAN_DIR + "/pwm2_enable") == 5   # tutto ripristinato
     assert run(["fan", "1", "step", "10000", "5000"]) == {"canale": 1, "step": [10000, 5000]}
+    assert run(["fan", "1", "step", "0", "0"])["step"] == [400, 400]      # lo 0 del BIOS: il driver rilegge 400, accettato
     expect_err(["fan", "2", "step", "10000", "5000"], "pompa")
     expect_err(["fan", "1", "step", "70000", "5000"], "fuori")
     expect_err(["fan", "1", "curve", "40:50", "75:255"], "fuori")
@@ -2697,7 +2736,7 @@ def selftest():
     rm(P(CO_LIMITS_PATH))
     st = run(["autotune", "start", "eco", "step=9"])
     assert st["phase"] == "co" and st["params"]["colimit"] == -50 and st["params"]["step"] == 9 and st["parallel"]
-    assert st["eta"]["remaining_s"] == 10 * 9 + 24 + 60 + 300 + 300 and st["eta"]["total_s"] == 10 * 9 + 24 + 60 + 300 + 300, st["eta"]
+    assert st["eta"]["remaining_s"] == 10 * 9 + 60 + 300 + 300 and st["eta"]["total_s"] == 10 * 9 + 24 + 60 + 300 + 300, st["eta"]
     steps = 0
     for _ in range(200):
         st = run(["autotune", "step"])
@@ -2729,7 +2768,7 @@ def selftest():
     assert run(["status"])["profile"] == "eco" and run(["status"])["co"][7] == -10
     # ripresa dopo crash (core per core): il passo in corso diventa instabile, si passa al core successivo
     st = run(["autotune", "start", "auto", "step=9", "parallel=0", "reuse=0"])
-    assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 24 + 60 + 300 + 5 * 20 + 6 * 18, st["eta"]
+    assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 60 + 300 + 5 * 20 + 6 * 18, st["eta"]
     assert core_cpus(3) == "3,11" and core_load_args(3)[:4] == ["--cpu", "2", "--taskset", "3,11"]
     run(["autotune", "step"])                          # core 0 a -5: ok
     st = run(["autotune", "status"])
@@ -2745,15 +2784,18 @@ def selftest():
     st = run(["autotune", "step"])
     assert st.get("interrupted") and st["results"] == {} and st["phase"] == "co" and st["value"] == -5, st
     assert run(["autotune", "abort"])["aborted"] and not os.path.exists(P(AT_ABORT_FLAG))
-    # crash in parallelo: tutti i core in prova instabili a quel livello, si passa alla finale
+    # crash in parallelo: tutti i core in prova instabili a quel livello, si passa alla finale (e i
+    # limiti trovati fin lì vengono salvati, come a fine ricerca)
+    limits_eco = read_text(CO_LIMITS_PATH)
     run(["autotune", "start", "eco", "step=9", "reuse=0"])
     st = run(["autotune", "step"])                     # tutti a -5: ok
     st["in_progress"] = {"kind": "co_par", "cores": st["active_cores"], "value": -10, "boot_id": "altro-boot"}
     at_save(st)
     st = run(["autotune", "step"])
     assert st["resumed_after_crash"] and st["phase"] == "final" and st["unstable"]["0"] == {"value": -10, "why": "crash"}
-    assert st["results"]["0"] == -5
+    assert st["results"]["0"] == -5 and json.loads(read_text(CO_LIMITS_PATH))["results"]["0"] == -5
     run(["autotune", "abort"])
+    write_atomic(P(CO_LIMITS_PATH), limits_eco)        # i casi seguenti riusano la misura eco completa
     run(["profile", "delete", "eco"])
     run(["use", "quiet"]) if "quiet" in run(["profile", "list"])["profiles"] else None
 
@@ -2775,7 +2817,7 @@ def selftest():
     FAKE.save()
     # ---- riuso del limite misurato: auto parte dalla passata finale col suo margine ----
     saved = json.loads(open(P(CO_LIMITS_PATH)).read())
-    assert saved["results"]["7"] == -15 and saved["colimit"] == -50, saved       # −50 copre anche i −40 di Auto/Boost
+    assert saved["results"]["7"] == -15 and saved["colimit"] == -50 and saved["method"] == "matrixprod", saved   # −50 copre anche i −40
     est = run(["autotune", "estimate", "auto"])
     assert est["co_reuse"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + 5 * 20 + 6 * 18, est
     st = run(["autotune", "start", "auto", "step=3"])
@@ -2849,7 +2891,30 @@ def selftest():
     st = run(["autotune", "start", "auto", "step=3"])          # memoria: riparte dal margine non ancora fallito
     assert st["final_tries"] == 2 and len(st["final_failures"]) == 2 and at_final_values(st) == [-31] * CORES
     run(["autotune", "abort"])
+    # crash attribuito anche da `abort` e da `boot`, senza aspettare "Riprendi": la memoria non si perde
+    st = run(["autotune", "start", "auto", "step=3"])          # final_tries 2 → finale a −31
+    st["in_progress"] = {"kind": "final", "boot_id": "altro-boot"}
+    at_save(st)
+    run(["autotune", "abort"])
     saved = json.loads(open(P(CO_LIMITS_PATH)).read())
+    assert saved["final_failures"][-1] == {"values": [-31] * CORES, "why": "crash"} and saved["method"] == "matrixprod", saved
+    saved["final_failures"] = saved["final_failures"][:2]        # di nuovo due fallimenti per la prova di `boot`
+    write_atomic(P(CO_LIMITS_PATH), json.dumps(saved))
+    st = run(["autotune", "start", "auto", "step=3"])
+    st = run(["autotune", "step"])                            # finale a −31 ok → ginocchio
+    assert st["phase"] == "ppt"
+    st["in_progress"] = {"kind": "post", "boot_id": "altro-boot"}
+    at_save(st)
+    assert run(["boot"])["autotune_crash"] == "done"          # terzo fallimento: calibrazione chiusa con errore
+    st = run(["autotune", "status"])
+    assert st["in_progress"] is None and st["resumed_after_crash"] and st["final_tries"] == 3 and st["error"], st
+    assert json.loads(open(P(CO_LIMITS_PATH)).read())["final_failures"][-1] == {"values": [-31] * CORES, "why": "crash"}
+    run(["autotune", "abort"])
+    old = dict(saved)
+    old.pop("method")                                          # misura di una versione senza carico pesante: non riusata
+    write_atomic(P(CO_LIMITS_PATH), json.dumps(old))
+    assert run(["autotune", "estimate", "auto"])["co_reuse"] is None
+    write_atomic(P(CO_LIMITS_PATH), json.dumps(saved))
     saved["final_failures"].append({"values": [-31] * CORES, "why": "prova"})
     write_atomic(P(CO_LIMITS_PATH), json.dumps(saved))
     expect_err(["autotune", "start", "auto", "step=3"], "instabile")   # tutti i margini già falliti

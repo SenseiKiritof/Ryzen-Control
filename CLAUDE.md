@@ -44,7 +44,11 @@ ha bloccato il sistema a −37 (limite per core −40) → la passata finale par
 pesante (`FINAL_HEAVY_SEC`); uno stress-ng che termina in anticipo o con codice ≠ 0 è
 instabilità (`Unstable`), mai una metrica bassa; ogni fase con il CO finale applicato ha il marker
 `in_progress` (`post`) così un crash viene attribuito alla combinazione (+3, finale ripetuta); le
-combinazioni fallite restano in `co_limits.json` (`final_failures`) e non si riprovano. Un blocco
+combinazioni fallite restano in `co_limits.json` (`final_failures`) e non si riprovano;
+l'attribuzione del crash (`at_attribute_crash`, senza SMU) avviene già in `boot`; il metodo pesante
+è anche la prima fase della ricerca (file `co_limits` senza `method` non riusati). Il driver
+nct6775 non riscrive uno step di 0 ms (registro minimo 1 = 400 ms): `FAN_STEP_MIN_MS`, altrimenti
+`default` falliva sulle righe ventola della baseline. Un blocco
 con riavvio dal pulsante può azzerare i file scritti negli ultimi secondi (btrfs): anche oggetti
 git appena creati.
 
