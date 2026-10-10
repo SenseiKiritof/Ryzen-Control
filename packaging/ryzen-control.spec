@@ -1,6 +1,6 @@
 Name:           ryzen-control
 Version:        0.4.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Curve Optimizer, limiti PBO, boost e ventole per Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; driver ryzen_smu incluso (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -116,6 +116,9 @@ dkms remove -m ryzen_smu -v %{version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.0-3
+- Dopo un blocco la GUI indica il CO del crash e il valore da cui riparte
+
 * Sat Oct 10 2026 senseikiritof <tonifede98@gmail.com> - 0.4.0-2
 - Margine +3 quando la ricerca CO si chiude con un blocco del sistema
 
