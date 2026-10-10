@@ -27,7 +27,7 @@ gi.require_version("Gtk", "4.0")
 gi.require_version("Adw", "1")
 gi.require_version("Pango", "1.0")
 gi.require_version("Graphene", "1.0")
-from gi.repository import Pango, Adw, Gdk, GLib, Graphene, Gtk  # noqa: E402
+from gi.repository import Pango, Adw, Gdk, Gio, GLib, Graphene, Gtk  # noqa: E402
 
 # User interface in the system language (po/ryzen-control/<lang>.po, installed as ryzen-control.mo);
 # the English source strings are the fallback. Numbers follow the locale's decimal separator (num()).
@@ -1926,7 +1926,10 @@ def save_png(widget, path):
 
 class App(Adw.Application):
     def __init__(self, mock, smoke=False, shots=None):
-        super().__init__(application_id=APP_ID + (".Mock" if mock else ""))   # the mock must not activate the real instance
+        # the mock must not activate the real instance; --smoke/--screenshots run as their own instance,
+        # otherwise a mock window already open would receive the activation and the check would pass untested
+        super().__init__(application_id=APP_ID + (".Mock" if mock else ""),
+                         flags=Gio.ApplicationFlags.NON_UNIQUE if (smoke or shots) else Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.mock, self.smoke, self.smoke_failed, self.shots = mock, smoke, False, shots
 
     def do_activate(self):
@@ -1994,7 +1997,7 @@ class App(Adw.Application):
         h.call("autostart", "on")
         win.reload()
         yield 1500
-        mon = win.pages[0]
+        mon = next(p for p in win.pages if isinstance(p, MonitorPage))
         if mon.hist:   # the fake telemetry is steady: fill the 60 s window with it instead of waiting a minute
             mon.hist.extend([mon.hist[-1]] * mon.hist.maxlen)
         for page in win.pages:
@@ -2027,7 +2030,7 @@ class App(Adw.Application):
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
                             "results": {str(c): -35 for c in range(8)}, "unstable": {"0": {"value": -40, "why": "crash"}}})
-            fans = win.pages[-1]
+            fans = next(p for p in win.pages if isinstance(p, FansPage))
             fans.show({"canali": [{"canale": 9, "rpm": 0, "pwm": 0, "modo": 5}]})   # no role = unknown
             for on in (not fans.unknown.get_active(), fans.unknown.get_active()):   # flip and back: the user's choice stays
                 fans.unknown.set_active(on)
