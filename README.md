@@ -175,9 +175,11 @@ next start.
 
 From the GUI: Modes → "Calibrate…" on Eco, Auto or Boost, then "Automatic" (default values) or
 "Choose the values…"; at the end the buttons **Cancel / Save / Save and apply**. In both cases you choose how much the
-mode touches the fans (`fans`): 0 BIOS untouched (Boost default), 1 moderate (rise 5 s / fall 3 s,
-BIOS minimum up to `target` −5 °C; Auto default), 2 quiet (10 s / 5 s, minimum up to `target`
-−10 °C; Eco default); in every case 100 % at Tjmax −5 °C, only on the channels recognised as fans.
+mode touches the fans (`fans`), only on the channels recognised as fans: 0 BIOS untouched;
+1 moderate (Auto and Boost default): rise 3 s / fall 2 s and the BIOS curve raised by 10 % with
+full speed at 100 °C — the BIOS curves reach 100 % only at 125 °C, so under load the fans hardly
+react; 2 quiet (Eco default): 10 s / 5 s, BIOS minimum up to `target` −10 °C, 100 % at Tjmax −5 °C.
+The curve always starts from the BIOS one captured at boot, so a recalibration never raises it twice.
 By default the
 cores are tested **all together** at every CO level (one worker per core, ~8× faster;
 `parallel=0` = one core at a time, which attributes even a reboot with certainty). During the

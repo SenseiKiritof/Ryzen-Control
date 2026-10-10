@@ -86,7 +86,7 @@ AT_PARAMS = (("target", _("Target Tctl"), "°C", (50, 90)),
              ("colimit", _("CO (Curve Optimizer) limit"), "", (-50, 0)),
              ("margin", _("Safety margin"), "", (0, 20)),
              ("step", _("Duration of each test"), "s", (30, 600)))
-FAN_LEVELS = (_("BIOS: fans untouched"), _("Moderate: rise 5 s, fall 3 s, minimum up to target Tctl −5 °C"),
+FAN_LEVELS = (_("BIOS: fans untouched"), _("Moderate: rise 3 s, fall 2 s, BIOS curve +10 % with 100 % at 100 °C"),
               _("Quiet: rise 10 s, fall 5 s, minimum up to target Tctl −10 °C"))
 AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays "
                "stable, then a final pass on all cores; finally, for Eco the search for the FMax that keeps Tctl below the "

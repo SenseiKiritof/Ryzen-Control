@@ -963,10 +963,13 @@ AT_PATH = STATE + "/autotune.json"
 # own margin (Eco +5 = conservative, Auto/Boost +3). reuse=1 reuses the previous measurement.
 AT_DEFAULTS = {"eco": {"target": 70, "colimit": -50, "margin": 5, "step": 90, "parallel": 1, "reuse": 1, "fans": 2},
                "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1},
-               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 0}}   # no target: the fans use eco's
-# fans: 0 = BIOS (baseline steps), 1 = moderate (5 s/3 s, BIOS minimum up to target−5 °C),
-# 2 = quiet (10 s/5 s, minimum up to target−10 °C); in every case 100 % at Tjmax−5 °C
-FAN_LEVELS = {1: (5000, 3000, 5), 2: (10000, 5000, 10)}
+               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1}}   # no target: the fans use eco's
+# fans: 0 = BIOS (baseline steps and curves); 1 = moderate: rise 3 s / fall 2 s and the BIOS curve raised
+# by 10 % with 100 % at 100 °C (the BIOS curves reach 100 % only at 125 °C, so under load the fans hardly
+# react; this is the curve tuned by hand on the 9800X3D); 2 = quiet: 10 s / 5 s, BIOS minimum up to
+# target−10 °C, 100 % at Tjmax−5 °C
+FAN_STEPS = {1: (3000, 2000), 2: (10000, 5000)}
+FAN_RAISE_PWM, FAN_FULL_TEMP = 26, 100   # moderate: +10 % (26/255) on the BIOS points, 100 % at 100 °C
 CO_LIMITS_PATH = STATE + "/co_limits.json"
 BOOST_BENCHES = 4   # MT and ST at factory and in boost: the measured gain
 # parallel=1 (default): all cores together at each CO level, one worker per core (8x
@@ -1796,8 +1799,18 @@ def at_final_failed(st, why=None):
         run(["apply", "baseline", "cpu"], {})
 
 
+def bios_curve(d, n):
+    """BIOS curve of channel n as [(°C, pwm)]: from the baseline, captured at boot before any profile (a
+    profile's curve must never be raised again by a recalibration); the chip's current curve only if the
+    baseline has none (fan roles assigned after boot)."""
+    for t in profile_lines("baseline"):
+        if t[:3] == ["fan", str(n), "curve"]:
+            return [tuple(int(x) for x in p.split(":")) for p in t[3:]]
+    return [tuple(int(x) for x in p.split(":")) for p in fan_info(d, n)["curva"]]
+
+
 def at_fan_lines(st, base):
-    """Fan lines of a calibration according to `fans` (see FAN_LEVELS); only "ventola" (fan) channels."""
+    """Fan lines of a calibration according to `fans` (see FAN_STEPS); only "ventola" (fan) channels."""
     d = fans_dir()
     if not d:
         return []
@@ -1808,13 +1821,16 @@ def at_fan_lines(st, base):
         if not level:   # BIOS: baseline steps (the BIOS curves are left alone)
             lines += [" ".join(t) for t in profile_lines("baseline") if t[:3] == ["fan", str(n), "step"]]
             continue
-        up, down, below = FAN_LEVELS[level]
-        tj = min(base.get("tjmax", TJMAX_ABS_MAX), PRESETS[st["mode"]]["tjmax"] or TJMAX_ABS_MAX)
-        lo = st["params"].get("target", AT_DEFAULTS["eco"]["target"]) - below
-        cur = fan_info(d, n)["curva"]
-        pwm_min = int(cur[0].split(":")[1]) if cur else FAN_PWM_MIN
-        lines.append("fan %d step %d %d" % (n, up, down))
-        lines.append("fan %d curve %d:%d %d:255" % (n, lo, max(FAN_PWM_MIN, pwm_min), max(tj - 5, lo + 5)))
+        bios = bios_curve(d, n)
+        if level == 1:   # the BIOS shape, 10 % higher, full speed at 100 °C instead of its last point (125 °C)
+            full = min(bios[-1][0], FAN_FULL_TEMP)
+            pts = [(t, min(255, pw + FAN_RAISE_PWM)) for t, pw in bios if t < full] + [(full, 255)]
+        else:
+            tj = min(base.get("tjmax", TJMAX_ABS_MAX), PRESETS[st["mode"]]["tjmax"] or TJMAX_ABS_MAX)
+            lo = st["params"].get("target", AT_DEFAULTS["eco"]["target"]) - 10
+            pts = [(lo, max(FAN_PWM_MIN, bios[0][1])), (max(tj - 5, lo + 5), 255)]
+        lines.append("fan %d step %d %d" % ((n,) + FAN_STEPS[level]))
+        lines.append("fan %d curve %s" % (n, " ".join("%d:%d" % p for p in pts)))
     return lines
 
 
@@ -2888,7 +2904,11 @@ def selftest():
     assert run(["autotune", "save", "apply"]) == {"phase": None, "saved": "auto", "applied": True}
     auto = run(["profile", "show", "auto"])["lines"]
     assert "ppt 114" in auto and "tdc 84" in auto and "edc 127" in auto and "fmax 4725" in auto and "power balanced" in auto, auto
-    assert "fan 1 step 5000 3000" in auto and "fan 1 curve 65:77 90:255" in auto, auto   # fans=1: moderate, 100 % a Tjmax−5
+    # fans=1 (moderate): 3 s / 2 s and the BIOS curve 40:77 … 80:255 raised by 26 pwm (10 %), full speed kept at 80 °C (< 100)
+    assert "fan 1 step 3000 2000" in auto and "fan 1 curve 40:103 50:136 60:176 70:226 80:255" in auto, auto
+    # the raised curve is now on the chip: a recalibration starts again from the BIOS curve of the baseline, it never raises twice
+    assert hw_read(Fake.FAN_DIR + "/pwm1_auto_point1_pwm") == 103
+    assert at_fan_lines({"params": {"fans": 1}, "mode": "auto"}, load_baseline())[1] == "fan 1 curve 40:103 50:136 60:176 70:226 80:255"
     expect_err(["autotune", "estimate", "auto", "fans=3"], "out of range")
     assert run(["status"])["profile"] == "auto" and run(["status"])["limits"]["ppt"] == 114.0
     run(["default"])

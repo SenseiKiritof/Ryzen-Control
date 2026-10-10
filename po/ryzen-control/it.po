@@ -918,8 +918,8 @@ msgstr "Ventole"
 msgid "BIOS: fans untouched"
 msgstr "BIOS: ventole invariate"
 
-msgid "Moderate: rise 5 s, fall 3 s, minimum up to target Tctl −5 °C"
-msgstr "Moderate: salita 5 s, discesa 3 s, minimo fino a Tctl obiettivo −5 °C"
+msgid "Moderate: rise 3 s, fall 2 s, BIOS curve +10 % with 100 % at 100 °C"
+msgstr "Moderate: salita 3 s, discesa 2 s, curva del BIOS +10 % con 100 % a 100 °C"
 
 msgid "Quiet: rise 10 s, fall 5 s, minimum up to target Tctl −10 °C"
 msgstr "Silenziose: salita 10 s, discesa 5 s, minimo fino a Tctl obiettivo −10 °C"

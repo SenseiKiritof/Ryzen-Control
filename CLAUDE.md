@@ -56,7 +56,10 @@ combinations stay in `co_limits.json` (`final_failures`) and are not retried; th
 attribution (`at_attribute_crash`, no SMU) already happens in `boot`; the heavy method is also
 the first phase of the search (`co_limits` files without `method` are not reused). The nct6775
 driver does not write back a 0 ms step (minimum register 1 = 400 ms): `FAN_STEP_MIN_MS`,
-otherwise `default` failed on the baseline's fan lines. A freeze followed by a reboot from the
+otherwise `default` failed on the baseline's fan lines. The BIOS fan curves reach 100 % only at
+125 °C: under load the fans hardly react, so the "moderate" level (Auto, Boost) is the BIOS curve
++10 % with full speed at 100 °C and 3 s / 2 s steps (tuned by the user); generated curves always
+start from the baseline's BIOS curve (`bios_curve`), never from the chip's current one. A freeze followed by a reboot from the
 button can wipe the files written in the last seconds (btrfs): even freshly created git objects.
 
 ## Layout
