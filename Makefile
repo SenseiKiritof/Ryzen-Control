@@ -68,6 +68,7 @@ check:
 	systemd-analyze --root="$(TMPROOT)" verify --recursive-errors=no ryzenctl.service ryzenctl-resume.service
 	desktop-file-validate data/ryzenctl-notify.desktop data/$(APPID).desktop
 	-appstreamcli validate --no-net data/$(APPID).metainfo.xml
+	timeout 120 python3 ryzen-control --mock --smoke   # finestra di calibrazione su ogni stato del backend finto (serve un display)
 
 # Tarball dal commit corrente (HEAD): i pacchetti si costruiscono da ciò che è versionato.
 dist:

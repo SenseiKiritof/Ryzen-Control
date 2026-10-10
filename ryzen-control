@@ -83,8 +83,8 @@ AT_WARNING = ("Ogni core viene portato a CO (Curve Optimizer) sempre più negati
 AT_PARALLEL_SUB = "Spento: un core alla volta, più lento (%s) ma attribuisce con certezza anche un riavvio"
 AT_PHASES = {"co": 0.6, "final": 0.7, "fmax": 1.0, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # quota della barra a fine fase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
-AT_PHASES = {"co": "ricerca CO", "final": "passata finale", "fmax": "FMax per il silenzio", "ppt": "ginocchio PPT",
-             "fmax_knee": "ginocchio FMax", "bench": "benchmark"}
+AT_PHASE_NAMES = {"co": "ricerca CO", "final": "passata finale", "fmax": "FMax per il silenzio", "ppt": "ginocchio PPT",
+                  "fmax_knee": "ginocchio FMax", "bench": "benchmark"}
 PUMP_KINDS = ("auto", "max", "fixed")   # stesso ordine di PUMP_MODES (indice del ComboRow)
 PUMP_MODES = ("Automatica (BIOS) — consigliata", "Tetto massimo", "Velocità fissa")
 CSS = """
@@ -1588,7 +1588,7 @@ class Window(Adw.ApplicationWindow):
 
     def ask_resume(self, at):
         ph = at.get("phase")
-        where = AT_PHASES.get(ph, ph)
+        where = AT_PHASE_NAMES.get(ph, ph)
         if ph == "co":
             where += ", livello CO %s" % at.get("value") if at.get("parallel") else ", core %s" % at.get("core")
         d = Adw.AlertDialog(heading="Calibrazione interrotta",
@@ -1697,9 +1697,9 @@ class Window(Adw.ApplicationWindow):
 
 
 class App(Adw.Application):
-    def __init__(self, mock):
+    def __init__(self, mock, smoke=False):
         super().__init__(application_id=APP_ID + (".Mock" if mock else ""))   # il mock non deve attivare l'istanza reale
-        self.mock = mock
+        self.mock, self.smoke, self.smoke_failed = mock, smoke, False
 
     def do_activate(self):
         if not self.props.active_window:
@@ -1710,12 +1710,45 @@ class App(Adw.Application):
                 prov.load_from_data(CSS.encode())
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
             Window(self, Helper(self.mock))
+            if self.smoke:
+                GLib.timeout_add(500, self.run_smoke)
         self.props.active_window.present()
+
+    def run_smoke(self):
+        """--mock --smoke (make check): la finestra di calibrazione mostra ogni stato reale del backend
+        finto per eco, auto e boost (tutte le fasi, fine, dialogo di ripresa), poi l'app esce; un
+        errore di rendering diventa codice di uscita 1 invece di un traceback sul desktop."""
+        win = self.props.active_window
+        try:
+            win.h.call("autotune", "abort")
+            for mode in ("eco", "auto", "boost"):
+                dlg = AutotuneDialog(win, mode)
+                st = win.h.call("autotune", "start", mode, "step=3")
+                dlg.show(st)
+                for _ in range(300):
+                    st = win.h.call("autotune", "step")
+                    dlg.show(st)
+                    if st["phase"] == "done":
+                        break
+                dlg.done(st)
+                win.h.call("autotune", "abort")
+                dlg.closable = True
+                dlg.close()
+            win.ask_resume({"mode": "auto", "phase": "ppt", "started": "oggi"})
+            win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "oggi"})
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            self.smoke_failed = True
+        self.quit()
+        return False
 
 
 def main():
-    mock = "--mock" in sys.argv
-    sys.exit(App(mock).run([a for a in sys.argv if a != "--mock"]))
+    mock, smoke = "--mock" in sys.argv, "--smoke" in sys.argv
+    app = App(mock, smoke and mock)
+    rc = app.run([a for a in sys.argv if a not in ("--mock", "--smoke")])
+    sys.exit(1 if app.smoke_failed else rc)
 
 
 if __name__ == "__main__":
