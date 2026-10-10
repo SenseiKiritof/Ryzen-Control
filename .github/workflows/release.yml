@@ -1,0 +1,32 @@
+# A ogni tag v* costruisce l'RPM in un container Fedora e lo allega a una release GitHub.
+# Il tag deve coincidere con VERSION del Makefile (stessa regola dei tag locali).
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+jobs:
+  rpm:
+    runs-on: ubuntu-latest
+    container: fedora:latest
+    steps:
+      - name: Dipendenze di build
+        run: dnf install -y git make rpm-build rpmdevtools systemd-rpm-macros python3
+      - uses: actions/checkout@v4
+      - name: Il tag corrisponde a VERSION
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          v="$(sed -n 's/^VERSION := //p' Makefile)"
+          test "v$v" = "$GITHUB_REF_NAME" || { echo "tag $GITHUB_REF_NAME ≠ VERSION $v"; exit 1; }
+      - name: Selftest (backend finto)
+        run: python3 ryzenctl selftest
+      - name: RPM
+        run: make rpm
+      - name: Release con l'RPM allegato
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.rpm
+            dist/*.tar.gz
+          generate_release_notes: true

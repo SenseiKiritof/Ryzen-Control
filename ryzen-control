@@ -380,13 +380,30 @@ def profile_table(lines, st):
             rows.append(("Ventola %d curva" % n, diff_label(curve_text(cur["curva"], rm) if cur.get("curva") else None, curve_text(f["curve"], rm))))
         if "pump" in f:   # stato attuale e nuovo come testo: "auto" | "tetto 70 %" | "fissa 65 %"
             rows.append(("Pompa %d" % n, diff_label(pump_text(cur) if cur else None, pump_text(f["pump"]))))
-    grid = Gtk.Grid(column_spacing=18, row_spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
-    for i, row in enumerate(rows):
-        grid.attach(label(row[0], ["dim-label"], tooltip_text=row[2] if len(row) > 2 else None), 0, i, 1, 1)
-        grid.attach(row[1], 1, i, 1, 1)
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin_top=6, margin_bottom=6, margin_start=12, margin_end=12)
+    # valori corti (limiti, FMax, Tjmax, energia, step, pompa) uno accanto all'altro, a capo quando manca spazio
+    flow = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=18, row_spacing=4, homogeneous=False,
+                       min_children_per_line=1, max_children_per_line=6, halign=Gtk.Align.START)
+    wide = Gtk.Grid(column_spacing=18, row_spacing=4)
+    n_wide = 0
+    for row in rows:
+        is_wide = isinstance(row[1], Gtk.Box) or "curva" in row[0]      # chip del CO e punti curva: riga intera
+        head = label(row[0], ["dim-label"], tooltip_text=row[2] if len(row) > 2 else None)
+        if is_wide:
+            wide.attach(head, 0, n_wide, 1, 1)
+            wide.attach(row[1], 1, n_wide, 1, 1)
+            n_wide += 1
+        else:
+            cell = Gtk.Box(spacing=6)
+            cell.append(head)
+            cell.append(row[1])
+            flow.append(cell)
+    for child in (flow, wide):
+        if child.get_first_child():
+            box.append(child)
     if not rows:
-        grid.attach(label("profilo vuoto", ["dim-label"]), 0, 0, 1, 1)
-    return grid
+        box.append(label("profilo vuoto", ["dim-label"]))
+    return box
 
 
 def profile_view(lines, st):
@@ -1035,14 +1052,28 @@ class AutotuneDialog(Adw.Window):
         self.win.run([["autotune", "abort"]], lambda _: (self.win.toast("Calibrazione annullata, CPU a baseline"), setattr(self, "closable", True), self.close()))
 
 
-class ModesPage(Adw.PreferencesPage):
+class ModesPage(Gtk.ScrolledWindow):
     NAME, TITLE, ICON = "modes", "Modalità", "emblem-default-symbolic"
 
     def __init__(self, win):
-        super().__init__()
+        super().__init__(hscrollbar_policy=Gtk.PolicyType.NEVER, vexpand=True)
         self.win = win
         self.loading = False
-        g = Adw.PreferencesGroup(title="Modalità", description="Quiet e Performance sono preset fissi dai valori di fabbrica; Eco, Auto e Boost si calibrano con test di carico su questa CPU")
+        content = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=24, margin_top=12, margin_bottom=24, margin_start=12, margin_end=12)
+        self.set_child(Adw.Clamp(child=content, maximum_size=1400, tightening_threshold=1000))   # due colonne: più larga di una PreferencesPage
+        # due colonne (una sola se la finestra è stretta): a sinistra preset e scelte manuali, a destra le calibrate
+        cols = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=18, row_spacing=18, homogeneous=True,
+                           min_children_per_line=1, max_children_per_line=2)
+        lists = {}
+        for name, title, desc in (("preset", "Preset", "Valori fissi ricavati da quelli di fabbrica, nessun test; più Default e Custom"),
+                                  ("calibrate", "Calibrate", "Misurate su questa CPU con test di carico (Calibra…)")):
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.START)
+            col.append(label(title, ["heading"]))
+            col.append(label(desc, ["dim-label", "caption"], wrap=True))
+            lists[name] = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+            col.append(lists[name])
+            cols.append(col)
+        content.append(cols)
         self.rows, first = {}, None
         self.tables = {}
         for key, title, sub in MODES:
@@ -1077,8 +1108,7 @@ class ModesPage(Adw.PreferencesPage):
                 regen.connect("clicked", lambda *_, k=key: self.regen(k))
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
-            g.add(row)
-        self.add(g)
+            lists["calibrate" if key in CALIBRATED else "preset"].append(row)
         g = Adw.PreferencesGroup(title="Avvio e limiti")
         self.autostart = Adw.SwitchRow(title="Applica all'avvio", subtitle="Riapplica il profilo selezionato al boot e al resume")
         self.autostart.connect("notify::active", self.on_autostart)
@@ -1099,7 +1129,7 @@ class ModesPage(Adw.PreferencesPage):
         hw.add_suffix(self.hw_btn)
         for r in (self.autostart, self.login, self.trust, self.unlock, hw):
             g.add(r)
-        self.add(g)
+        content.append(g)
 
     def refresh(self, st):
         self.loading = True
