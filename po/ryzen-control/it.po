@@ -421,6 +421,9 @@ msgstr "Identifica"
 msgid "Last stable"
 msgstr "Ultimo stabile"
 
+msgid "Limits and checks"
+msgstr "Limiti e verifiche"
+
 #, python-format
 msgid "Mark as %s"
 msgstr "Segna %s"
@@ -525,6 +528,9 @@ msgstr "Energia"
 
 msgid "Power mode: "
 msgstr "Profilo energetico: "
+
+msgid "Preferences"
+msgstr "Preferenze"
 
 msgid "Presets"
 msgstr "Preset"
@@ -634,8 +640,8 @@ msgstr "Avviata alle %s · stimati %s in totale"
 msgid "Starting…"
 msgstr "Avvio…"
 
-msgid "Startup and limits"
-msgstr "Avvio e limiti"
+msgid "Startup"
+msgstr "Avvio"
 
 msgid "Stay on Default"
 msgstr "Resta su Default"

@@ -1110,7 +1110,7 @@ class ModesPage(Gtk.ScrolledWindow):
         # two columns always side by side (a FlowBox stacked them: the expanded rows ask for more
         # natural width than half the window), presets and manual choices on the left, calibrated ones on the right
         cols = Gtk.Box(spacing=18, homogeneous=True)
-        lists, colbox = {}, {}
+        lists = {}
         for name, title, desc in (("preset", _("Presets"), _("Fixed values derived from the stock ones, no test; plus Default and Custom")),
                                   ("calibrate", _("Calibrated"), _("Measured on this CPU with load tests (Calibrate…)"))):
             col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.START, hexpand=True)
@@ -1119,7 +1119,6 @@ class ModesPage(Gtk.ScrolledWindow):
             lists[name] = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
             col.append(lists[name])
             cols.append(col)
-            colbox[name] = col
         content.append(cols)
         self.rows, first = {}, None
         self.tables = {}
@@ -1156,28 +1155,6 @@ class ModesPage(Gtk.ScrolledWindow):
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
             lists["calibrate" if key in CALIBRATED else "preset"].append(row)
-        g = Adw.PreferencesGroup(title=_("Startup and limits"))
-        self.autostart = Adw.SwitchRow(title=_("Apply at startup"), subtitle=_("Re-applies the selected profile at boot and on resume"))
-        self.autostart.connect("notify::active", self.on_autostart)
-        self.login = Adw.SwitchRow(title=_("Start Ryzen Control at login"), active=os.path.exists(LOGIN_DESKTOP),
-                                   subtitle=_("Opens the window at every login (asks for the password, unless the option below is on). After a crash "
-                                              "it shows the warning and leaves the profile deactivated: it never re-applies anything on its own"))
-        self.login.connect("notify::active", self.on_login)
-        self.trust = Adw.SwitchRow(title=_("Stop asking for the password"),
-                                   subtitle=_("Polkit rule for your user, only for Ryzen Control in the local session: "
-                                              "the password is needed once to write it, then never again"))
-        self.trust.connect("notify::active", self.on_trust)
-        self.unlock = Adw.SwitchRow(title=_("Allow beyond the stock values"), subtitle=_("PPT/TDC/EDC up to the unlock ceilings, FMax above the baseline"))
-        self.unlock.connect("notify::active", self.on_unlock)
-        hw = Adw.ActionRow(title=_("Hardware check"), subtitle=_("Writes and reads back one value per command, then restores the baseline"))
-        self.hw_spin = Gtk.Spinner(valign=Gtk.Align.CENTER)
-        self.hw_btn = button(_("Run"), self.hwtest)
-        hw.add_suffix(self.hw_spin)
-        hw.add_suffix(self.hw_btn)
-        for r in (self.autostart, self.login, self.trust, self.unlock, hw):
-            g.add(r)
-        g.set_margin_top(18)
-        colbox["preset"].append(g)          # under the presets: the left column is short, so the space does not stay empty
 
     def refresh(self, st):
         self.loading = True
@@ -1197,9 +1174,6 @@ class ModesPage(Gtk.ScrolledWindow):
                     row.set_expanded(True)
         current = prof if prof in PRESETS else ("custom" if prof else "default")
         self.rows[current][1].set_active(True)
-        self.autostart.set_active(bool(st.get("autostart")))
-        self.unlock.set_active(bool(st.get("unlock")))
-        self.trust.set_active(bool(st.get("trusted")))
         self.loading = False
 
     def on_mode(self, chk, key):
@@ -1324,6 +1298,44 @@ class ModesPage(Gtk.ScrolledWindow):
             self.win.confirm(_("Regenerate '%s' from the stock values?") % key, _("The current profile is replaced by these values (green = more conservative, red = more aggressive):"),
                              _("Regenerate"), go, destructive=True, extra=profile_view(res["lines"], self.win.status))
         bg(lambda: self.win.h.call("preset", key, "show"), ask, self.win.toast)
+
+
+class PrefsPage(Adw.PreferencesPage):
+    NAME, TITLE, ICON = "preferences", _("Preferences"), "emblem-system-symbolic"
+
+    def __init__(self, win):
+        super().__init__()
+        self.win = win
+        self.loading = False
+        self.autostart = Adw.SwitchRow(title=_("Apply at startup"), subtitle=_("Re-applies the selected profile at boot and on resume"))
+        self.autostart.connect("notify::active", self.on_autostart)
+        self.login = Adw.SwitchRow(title=_("Start Ryzen Control at login"), active=os.path.exists(LOGIN_DESKTOP),
+                                   subtitle=_("Opens the window at every login (asks for the password, unless the option below is on). After a crash "
+                                              "it shows the warning and leaves the profile deactivated: it never re-applies anything on its own"))
+        self.login.connect("notify::active", self.on_login)
+        self.trust = Adw.SwitchRow(title=_("Stop asking for the password"),
+                                   subtitle=_("Polkit rule for your user, only for Ryzen Control in the local session: "
+                                              "the password is needed once to write it, then never again"))
+        self.trust.connect("notify::active", self.on_trust)
+        self.unlock = Adw.SwitchRow(title=_("Allow beyond the stock values"), subtitle=_("PPT/TDC/EDC up to the unlock ceilings, FMax above the baseline"))
+        self.unlock.connect("notify::active", self.on_unlock)
+        hw = Adw.ActionRow(title=_("Hardware check"), subtitle=_("Writes and reads back one value per command, then restores the baseline"))
+        self.hw_spin = Gtk.Spinner(valign=Gtk.Align.CENTER)
+        self.hw_btn = button(_("Run"), self.hwtest)
+        hw.add_suffix(self.hw_spin)
+        hw.add_suffix(self.hw_btn)
+        for title, items in ((_("Startup"), (self.autostart, self.login, self.trust)), (_("Limits and checks"), (self.unlock, hw))):
+            g = Adw.PreferencesGroup(title=title)
+            for r in items:
+                g.add(r)
+            self.add(g)
+
+    def refresh(self, st):
+        self.loading = True
+        self.autostart.set_active(bool(st.get("autostart")))
+        self.unlock.set_active(bool(st.get("unlock")))
+        self.trust.set_active(bool(st.get("trusted")))
+        self.loading = False
 
     def on_autostart(self, row, _p):
         if not self.loading:
@@ -1654,7 +1666,7 @@ class Window(Adw.ApplicationWindow):
         tv.add_top_bar(header)
         tv.add_top_bar(self.banner)
         self.set_content(tv)
-        self.pages = [P(self) for P in (MonitorPage, ModesPage, CpuPage, CurvePage, FansPage)]
+        self.pages = [P(self) for P in (MonitorPage, ModesPage, CpuPage, CurvePage, FansPage, PrefsPage)]
         for p in self.pages:
             self.stack.add_titled_with_icon(p, p.NAME, p.TITLE, p.ICON)
         self.connect("close-request", lambda *_a: helper.close())
