@@ -676,6 +676,7 @@ class Page(Gtk.Box):
 # ---- Pages -----------------------------------------------------------------------------
 class MonitorPage(Gtk.Box):
     NAME, TITLE, ICON = "monitor", _("Monitor"), "utilities-system-monitor-symbolic"
+    TCTL_RGB, PPT_RGB = (0.21, 0.52, 0.89), (0.90, 0.45, 0.13)   # graph series (line, axis labels, legend): readable on light and dark
 
     def __init__(self, win):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12,
@@ -713,7 +714,15 @@ class MonitorPage(Gtk.Box):
         mid.append(table)
         gcard = card()
         gcard.set_hexpand(True)
-        gcard.append(label(_("Tctl (°C, left) and PPT (W, right) · last 60 s"), ["heading"]))
+        head = Gtk.Box(spacing=6)
+        head.append(label(_("CPU temperature and power"), ["heading"], hexpand=True))
+        self.legend = {}
+        for key, rgb in (("tctl", self.TCTL_RGB), ("ppt", self.PPT_RGB)):   # swatch in the series' colour + current value
+            head.append(Gtk.Label(label='<span foreground="#%02x%02x%02x">■</span>' % tuple(round(c * 255) for c in rgb),
+                                  use_markup=True, margin_start=12))
+            self.legend[key] = label("", ["numeric"])
+            head.append(self.legend[key])
+        gcard.append(head)
         self.graph = Gtk.DrawingArea(vexpand=True, content_height=150)
         self.graph.set_draw_func(self.draw)
         gcard.append(self.graph)
@@ -744,6 +753,8 @@ class MonitorPage(Gtk.Box):
         value, sub, _bar = self.tiles["fmax"]
         value.set_text(fmt(t["fmax"], " MHz"))
         sub.set_text(_("EDC limit ") + fmt(t["edc_limit"], " A"))
+        self.legend["tctl"].set_text("Tctl " + fmt(t["tctl"], " °C"))
+        self.legend["ppt"].set_text("PPT " + fmt(t["ppt"], " W") + " / " + _("limit ") + fmt(t["ppt_limit"], " W"))
         if t["tctl"] is not None:
             self.hist.append((t["tctl"], t["ppt"]))
             self.ppt_limit = t["ppt_limit"]
@@ -772,31 +783,62 @@ class MonitorPage(Gtk.Box):
         self.power.set_text(_("Power mode: ") + (t["power"] or _("n/a")))
 
     def draw(self, area, cr, w, h):
-        lo, hi, plim = 30, 95, self.ppt_limit or 1
-        y_t = lambda t: h - 14 - (min(max(t, lo), hi) - lo) / (hi - lo) * (h - 18)
-        y_p = lambda p: h - 14 - min(max(p, 0), plim) / plim * (h - 18)
-        col = area.get_color()
-        cr.set_source_rgba(col.red, col.green, col.blue, 0.35)
-        cr.set_line_width(1)
+        """Four-step grid shared by both scales: Tctl 20–100 °C on the left, PPT in round watts that
+        cover its limit on the right (the limit dashed); time runs left to right, newest at the edge."""
+        plim = self.ppt_limit or 0
+        pstep = -(-plim // 20) * 5   # a quarter of the PPT scale: limit / 4 rounded up to 5 W
+        left = ["%d °C" % (20 + 20 * i) for i in range(5)]
+        right = ["%d W" % (pstep * i) for i in range(5)] if pstep else []
         cr.set_font_size(10)
-        for t in (40, 60, 80, 95):
-            cr.move_to(0, y_t(t))
-            cr.line_to(w, y_t(t))
+        x0 = max(cr.text_extents(s).x_advance for s in left) + 8
+        x1 = w - max([cr.text_extents(s).x_advance for s in right] or [0]) - 8
+        y0, y1 = 14, h - 20   # room above the top line for the limit label
+        Y = lambda f: y1 - min(max(f, 0), 1) * (y1 - y0)   # f: fraction of the scale
+        col = area.get_color()
+        cr.set_line_width(1)
+        for i in range(5):
+            y = round(Y(i / 4)) + 0.5   # 1 px lines on a pixel row: crisp
+            cr.set_source_rgba(col.red, col.green, col.blue, 0.25)
+            cr.move_to(x0, y)
+            cr.line_to(x1, y)
             cr.stroke()
-            ty = y_t(t) - 2 if y_t(t) > 14 else y_t(t) + 12   # the top line's labels go below it, not off the area
-            cr.move_to(4, ty)
-            cr.show_text("%d" % t)
-            cr.move_to(w - 30, ty)
-            cr.show_text("%d" % round(plim * (t - lo) / (hi - lo)))
+            cr.set_source_rgb(*self.TCTL_RGB)
+            cr.move_to(x0 - 4 - cr.text_extents(left[i]).x_advance, y + 3.5)
+            cr.show_text(left[i])
+            if right:
+                cr.set_source_rgb(*self.PPT_RGB)
+                cr.move_to(x1 + 4, y + 3.5)
+                cr.show_text(right[i])
+        cr.set_source_rgba(col.red, col.green, col.blue, 0.7)
+        cr.move_to(x0, h - 4)
+        cr.show_text(_("%d s ago") % self.hist.maxlen)
+        now = _("now")
+        cr.move_to(x1 - cr.text_extents(now).x_advance, h - 4)
+        cr.show_text(now)
+        series = [(0, self.TCTL_RGB, 20, 80)]
+        if pstep:
+            series.append((1, self.PPT_RGB, 0, 4 * pstep))
+            yl = round(Y(plim / (4 * pstep))) + 0.5
+            cr.set_source_rgb(*self.PPT_RGB)
+            cr.set_dash([5, 4])
+            cr.move_to(x0, yl)
+            cr.line_to(x1, yl)
+            cr.stroke()
+            cr.set_dash([])
+            text = _("PPT limit")
+            cr.move_to(x1 - 4 - cr.text_extents(text).x_advance, yl - 4 if yl - y0 > 14 else y0 - 4)   # above the line, else above the top one
+            cr.show_text(text)
         n = self.hist.maxlen
-        for idx, rgb in ((0, (0.21, 0.52, 0.89)), (1, (0.90, 0.45, 0.13))):
-            pts = [(w * (n - len(self.hist) + i) / (n - 1), v[idx]) for i, v in enumerate(self.hist) if v[idx] is not None]
+        cr.set_line_width(2)
+        for idx, rgb, base, span in series:
+            pts = [(x0 + (x1 - x0) * (n - len(self.hist) + i) / (n - 1), Y((v[idx] - base) / span))
+                   for i, v in enumerate(self.hist) if v[idx] is not None]
             if len(pts) < 2:
                 continue
             cr.set_source_rgb(*rgb)
-            cr.set_line_width(2)
-            for i, (x, v) in enumerate(pts):
-                (cr.move_to if i == 0 else cr.line_to)(x, y_t(v) if idx == 0 else y_p(v))
+            cr.move_to(*pts[0])
+            for p in pts[1:]:
+                cr.line_to(*p)
             cr.stroke()
 
 
