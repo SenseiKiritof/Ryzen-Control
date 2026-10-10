@@ -79,6 +79,8 @@ AT_WARNING = ("Ogni core viene portato a CO (Curve Optimizer) sempre più negati
 AT_PARALLEL_SUB = "Spento: un core alla volta, più lento (%s) ma attribuisce con certezza anche un riavvio"
 AT_PHASES = {"co": 0.6, "final": 0.7, "fmax": 1.0, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # quota della barra a fine fase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
+AT_PHASES = {"co": "ricerca CO", "final": "passata finale", "fmax": "FMax per il silenzio", "ppt": "ginocchio PPT",
+             "fmax_knee": "ginocchio FMax", "bench": "benchmark"}
 PUMP_KINDS = ("auto", "max", "fixed")   # stesso ordine di PUMP_MODES (indice del ComboRow)
 PUMP_MODES = ("Automatica (BIOS) — consigliata", "Tetto massimo", "Velocità fissa")
 CSS = """
@@ -807,7 +809,8 @@ class AutotuneDialog(Adw.Window):
     def show(self, st):
         ph, p = st.get("phase"), st.get("params", {})
         if st.get("resumed_after_crash"):
-            self.note.set_text("Il sistema si è riavviato durante un test: quel passo è stato marcato instabile e la calibrazione è ripresa dal successivo.")
+            self.note.set_text("Il sistema si è riavviato durante un test: quel passo è stato marcato instabile. Se il CO finale era già "
+                               "applicato, la combinazione è instabile e la passata finale viene ripetuta con +3 su tutti i core.")
             self.note.set_visible(True)
         if st.get("co_reused"):   # ricerca saltata: tabella già popolata, la fase CO conta come completata nella barra
             self.reuse.set_text("Limite CO riusato dalla misura del %s" % st["co_reused"])
@@ -1562,11 +1565,14 @@ class Window(Adw.ApplicationWindow):
                 self.ask_resume(at)
 
     def ask_resume(self, at):
+        ph = at.get("phase")
+        where = AT_PHASES.get(ph, ph)
+        if ph == "co":
+            where += ", livello CO %s" % at.get("value") if at.get("parallel") else ", core %s" % at.get("core")
         d = Adw.AlertDialog(heading="Calibrazione interrotta",
-                            body="Una calibrazione %s iniziata il %s è rimasta a metà (fase %s, %s). Riprenderla da dove era "
-                                 "o annullarla riportando la CPU ai valori di fabbrica?" % (
-                                     at.get("mode", "?").capitalize(), at.get("started", "?"), at.get("phase"),
-                                     "livello CO %s" % at.get("value") if at.get("parallel") else "core %s" % at.get("core")))
+                            body="Una calibrazione %s iniziata il %s è rimasta a metà (%s). Riprenderla da dove era (il passo "
+                                 "interrotto viene marcato instabile) o annullarla riportando la CPU ai valori di fabbrica?" % (
+                                     at.get("mode", "?").capitalize(), at.get("started", "?"), where))
         d.add_response("abort", "Annulla calibrazione")
         d.add_response("resume", "Riprendi")
         d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)

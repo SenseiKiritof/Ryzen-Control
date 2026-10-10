@@ -39,7 +39,14 @@ Lezioni dall'hardware: la PM table riflette un nuovo limite dopo decine di ms �
 attesa (`READBACK_WAIT`); la baseline si ricattura solo al boot, quindi dopo un aggiornamento
 che cambia il formato le righe non più ammesse vanno ignorate (`profile_lines("baseline")`);
 il backend finto non deve mai avere effetti reali (es. `notify-send`) perché il selftest gira
-nella sessione dell'utente.
+nella sessione dell'utente. Calibrazione: `--cpu-method all` per 5 min non basta, fft a 16 thread
+ha bloccato il sistema a −37 (limite per core −40) → la passata finale parte dal metodo più
+pesante (`FINAL_HEAVY_SEC`); uno stress-ng che termina in anticipo o con codice ≠ 0 è
+instabilità (`Unstable`), mai una metrica bassa; ogni fase con il CO finale applicato ha il marker
+`in_progress` (`post`) così un crash viene attribuito alla combinazione (+3, finale ripetuta); le
+combinazioni fallite restano in `co_limits.json` (`final_failures`) e non si riprovano. Un blocco
+con riavvio dal pulsante può azzerare i file scritti negli ultimi secondi (btrfs): anche oggetti
+git appena creati.
 
 ## Layout
 

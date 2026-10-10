@@ -148,6 +148,15 @@ per core a ogni livello e quanti mV vale un passo di CO su questa CPU.
 - **Boost**: CO = limite + 3, limiti e FMax ai tetti consentiti (fabbrica, o sblocco), energia
   al massimo; misura il guadagno MT/ST rispetto alla fabbrica.
 
+La **passata finale** (tutti i core al CO proposto) comincia con il metodo stress-ng che consuma
+di più su questa CPU, a pieno carico per 60 s con verifica, poi 100 s pieno / 50 % / 10 %. Se
+fallisce, oppure se in una fase successiva (FMax, ginocchio, benchmark) un carico muore, compare
+un errore MCE o il sistema si blocca e viene riavviato, la combinazione è instabile: +3 su tutti
+i core e passata finale ripetuta (al massimo 3 tentativi). Le combinazioni fallite restano in
+`co_limits.json` e le calibrazioni successive non le riprovano. Esito sul 9800X3D di sviluppo:
+limite per core −40, combinato −37 fallito due volte (una con blocco del sistema sotto fft a
+16 thread), −34 stabile.
+
 **Attenzione**: un CO instabile può riavviare il PC durante la calibrazione (nessun danno,
 lavoro non salvato perso). Lo stato è su disco: al riavvio il passo interrotto viene marcato
 instabile e si riprende. Durata: Eco ~25–40 min, Auto di più.
@@ -171,8 +180,8 @@ dal BIOS.
 - **Crash-guard**: `ryzenctl.service` scrive i marker `dirty` (boot in corso) e `active`
   (stato modificato) *prima* di toccare l'SMU e toglie `dirty` allo spegnimento pulito. Se al
   boot successivo entrambi esistono, il sistema è andato in crash: il profilo CPU **non viene
-  riapplicato**, viene scritto `/var/lib/ryzenctl/crashed`, al login arriva una notifica e si
-  decide (`ryzenctl crashed clear` + `autostart on` per riattivare, o restare sui valori BIOS).
+  riapplicato**, viene scritto `/var/lib/ryzenctl/crashed`, al login arriva una notifica (un
+  clic apre Ryzen Control) e si decide (`ryzenctl crashed clear` + `autostart on` per riattivare, o restare sui valori BIOS).
   L'interruttore "Avvia Ryzen Control al login" (Modalità) aggiunge solo un autostart XDG
   dell'utente (`~/.config/autostart/`): la finestra si apre al login con il prompt pkexec e,
   dopo un crash, mostra l'avviso con Riattiva / Resta su Default. Il riapplicare al boot resta
