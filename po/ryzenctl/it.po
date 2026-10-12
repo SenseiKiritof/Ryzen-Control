@@ -257,8 +257,8 @@ msgid "stress-ng reported no metrics"
 msgstr "stress-ng non ha riportato le metriche"
 
 #: ryzenctl
-msgid "usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
-msgstr "uso: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
+msgid "usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
+msgstr "uso: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
 
 #: ryzenctl
 msgid "usage: autotune estimate eco|auto [key=value…]"

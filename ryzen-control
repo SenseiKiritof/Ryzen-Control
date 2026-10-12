@@ -92,13 +92,16 @@ AT_PARAMS = (("target", _("Fan target Tctl"), "°C", (50, 90), _("Only the Quiet
 FAN_LEVELS = (_("BIOS: fans untouched"), _("Moderate: rise 3 s, fall 2 s, BIOS curve +10 % with 100 % at 100 °C"),
               _("Quiet: rise 10 s, fall 5 s, minimum up to target Tctl −10 °C, 100 % at Tjmax −5 °C"))
 AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays "
-               "stable, then a final pass on all cores; finally, for Auto the performance/watt knee, for Boost the measurement "
+               "stable, then a final pass on all cores and on each core alone; finally, for Auto the performance/watt knee, "
+               "for Boost the measurement "
                "of the gain (MT and ST) over stock, while Eco takes the reduced limits of its preset. The CO limit search is "
                "shared by Eco, Auto and Boost and later calibrations reuse it; Eco also reuses a final pass already passed at "
                "the same CO (for example Auto's) without any load test. "
                "An unstable CO can reboot the PC without warning: save everything before starting. "
                "The machine stays usable but slowed down; the calibration resumes from where it was.")
 AT_PARALLEL_SUB = _("Off: one core at a time, slower (%s) but attributes even a reboot with certainty")
+AT_SINGLE_SUB = _("One thread alone on each core, from idle to the highest boost: catches the CO instability that all-core "
+                  "loads miss. A core that fails is raised alone. Adds %s")
 AT_PHASES = {"co": 0.6, "final": 0.7, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # share of the bar at the end of the phase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 # ryzenctl protocol values shown to the user (fan roles, why a CO level failed) through a translated name;
@@ -309,7 +312,13 @@ def crash_story(st, cores):
     fails = [f for f in (st.get("final_failures") or []) if f.get("why") == "crash"]
     if not crashed and not fails:
         return ""
-    where = _("at CO %s") % span(crashed) if crashed else _("in the final pass at CO %s") % span(fails[-1]["values"])
+    last = fails[-1] if fails else {}
+    if crashed:
+        where = _("at CO %s") % span(crashed)
+    elif last.get("core") is not None:   # the single-core part of the final pass: only that core is raised
+        where = _("in the single-core test of core %d at CO %d") % (last["core"], last["values"][last["core"]])
+    else:
+        where = _("in the final pass at CO %s") % span(last["values"])
     nxt = AutotuneDialog.final_values(st, cores)
     if st.get("phase") == "done":
         return _("The system locked up %s.") % where
@@ -1001,6 +1010,7 @@ class AutotuneDialog(Adw.Window):
         if eta:
             self.header.set_text(_("Started at %s · estimated %s in total") % (st.get("started", "")[-5:], mins(eta.get("total_s"))))
             self.eta.set_text(_("Estimated time remaining: %s") % mins(eta.get("remaining_s")))
+        n = len(self.cells)
         if ph == "co" and st.get("parallel"):
             levels = max(1, (-(p.get("colimit") or -5)) // 5)      # levels of 5 (CO_STEP), like at_estimate in ryzenctl
             self.phase.set_text(_("CO level %d: testing all cores together (still under test: %d cores)…") % (st["value"], len(st.get("active_cores", []))))
@@ -1009,8 +1019,13 @@ class AutotuneDialog(Adw.Window):
             self.phase.set_text(_("Core %d: testing CO %d…") % (st["core"], st["value"]))
             frac = (st["core"] + min(1.0, st["value"] / p["colimit"] if p.get("colimit") else 0)) / max(1, len(self.cells))
         elif ph == "final":
-            self.phase.set_text(_("Final pass on all cores at CO %s (attempt %d/3)") % (self.co_span(self.final_values(st, len(self.cells))), st.get("final_tries", 0) + 1))
-            frac = AT_PHASES["co"] + (AT_PHASES["final"] - AT_PHASES["co"]) * min(1.0, st.get("final_tries", 0) / 3)
+            vals, c = self.final_values(st, n), st.get("single")
+            if c is None:
+                self.phase.set_text(_("Final pass on all cores at CO %s (attempt %d/3)") % (self.co_span(vals), st.get("final_tries", 0) + 1))
+            else:   # the single-core part: one step per core
+                self.phase.set_text(_("Final pass, single-core test: core %d alone at CO %d (%d of %d)…") % (c, vals[c], c + 1, n))
+            part = 0 if c is None else (c + 1) / float(n + 1)
+            frac = AT_PHASES["co"] + (AT_PHASES["final"] - AT_PHASES["co"]) * min(1.0, (st.get("final_tries", 0) + part) / 3)
         elif ph == "bench":                       # Boost: a single step, performance at stock and in boost
             self.phase.set_text(_("Measuring performance at stock and in boost (MT and ST)…") + self.load_text(st))
             frac = (AT_PHASES["final"] + AT_PHASES["bench"]) / 2
@@ -1033,7 +1048,6 @@ class AutotuneDialog(Adw.Window):
         self.queue_draw()                   # full redraw: no fragments of the previous frame
         self.follow()
         res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
-        n = len(self.cells)
         base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * n
         ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * n
         ref_mhz = (st.get("samples", {}).get("0") or {}).get("mhz") or [None] * n
@@ -1061,8 +1075,12 @@ class AutotuneDialog(Adw.Window):
             self.failures.remove(self.failures.get_first_child())
         for f in fails:
             why = f.get("why", "?")
-            self.failures.append(label(_("Final pass failed at CO %s (%s): +3 on every core and a new attempt") % (self.co_span(f.get("values") or [0]), WHY_NAMES.get(why, why)),
-                                       ["warning"], wrap=True))
+            if f.get("core") is not None:   # failed alone in the single-core part: only that core is raised
+                text = _("Core %d failed alone at CO %d (%s): +3 on that core only and a new final pass") % (
+                    f["core"], f["values"][f["core"]], WHY_NAMES.get(why, why))
+            else:
+                text = _("Final pass failed at CO %s (%s): +3 on every core and a new attempt") % (self.co_span(f.get("values") or [0]), WHY_NAMES.get(why, why))
+            self.failures.append(label(text, ["warning"], wrap=True))
         slope = st.get("mv_per_step")          # median of the slopes per level, computed by ryzenctl
         self.slope.set_visible(slope is not None)
         if slope is not None:
@@ -1078,9 +1096,11 @@ class AutotuneDialog(Adw.Window):
 
     @staticmethod
     def final_values(st, cores):
-        """CO of the final pass: measured limit + margin (computed by ryzenctl: mode, failed passes, crash)."""
+        """CO of the final pass: measured limit + margin (computed by ryzenctl: mode, failed passes, crash) + the
+        extra margin of the cores that failed alone in the single-core test (core_margin)."""
         m = st.get("final_margin", st.get("params", {}).get("margin", 0) + 3 * st.get("final_tries", 0))
-        return [min(0, st.get("results", {}).get(str(c), 0) + m) for c in range(cores)]
+        cm = st.get("core_margin") or {}
+        return [min(0, st.get("results", {}).get(str(c), 0) + m + cm.get(str(c), 0)) for c in range(cores)]
 
     @staticmethod
     def co_span(vals):
@@ -1125,6 +1145,10 @@ class AutotuneDialog(Adw.Window):
             if crashed:
                 why.append(_("the search ended with a system lockup (+3)"))
             self.result.append(label(_("The final margin is +%d because %s") % (st.get("final_margin", 0), _(" and ").join(why)), ["warning"], wrap=True))
+        cm = st.get("core_margin") or {}
+        if cm and st.get("final"):   # cores that failed alone in the single-core test of the final pass
+            self.result.append(label(_("Raised alone after failing the single-core test: %s") % ", ".join(
+                _("core %s +%d") % (c, m) for c, m in sorted(cm.items(), key=lambda kv: int(kv[0]))), ["warning"], wrap=True))
         if st.get("final"):   # per core: stock → final CO and measured ΔV (sample at the final level or the closest one)
             n = len(st["final"])
             base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * n
@@ -1361,17 +1385,20 @@ class ModesPage(Gtk.ScrolledWindow):
             group.add(r)
         parallel = Adw.SwitchRow(title=_("Test all cores together (fast, recommended)"), active=bool(est["params"].get("parallel", 1)))
         group.add(parallel)
+        single = Adw.SwitchRow(title=_("Single-core test in the final pass"), active=bool(est["params"].get("single", 1)))
+        group.add(single)
         fans = Adw.ComboRow(title=_("Fans"), use_subtitle=True, model=Gtk.StringList.new(list(FAN_LEVELS)), selected=est["params"].get("fans", 0))
         group.add(fans)
         repeat = Adw.SwitchRow(title=_("Repeat the CO limit search"), active=False, sensitive=bool(est.get("co_reuse")))
         group.add(repeat)
         estimate = label("", ["heading"], margin_top=6)
         params = lambda: dict(((k, int(r.get_value())) for k, r in spins.items()), parallel=int(parallel.get_active()),
-                              reuse=int(not repeat.get_active()), fans=fans.get_selected())
+                              single=int(single.get_active()), reuse=int(not repeat.get_active()), fans=fans.get_selected())
         def show_est(e):
             estimate.set_text(_("Estimated duration: %s") % mins(e["total_s"]) + (
                 _(" (undervolt validated by the final pass of %s: no load test)") % e["eco_from"] if e.get("eco_from") else ""))
             parallel.set_subtitle(AT_PARALLEL_SUB % mins(e["sequential_total_s"]))
+            single.set_subtitle(AT_SINGLE_SUB % mins(e.get("single_s")))
             repeat.set_subtitle(_("Off: reuses the measurement of %s; on: measures the limit again (longer)") % e["co_reuse"] if e.get("co_reuse")
                                 else (_("full search") if repeat.get_active() else _("no usable previous measurement")))
         pending = {"timer": 0, "seq": 0}
@@ -1391,14 +1418,15 @@ class ModesPage(Gtk.ScrolledWindow):
             pending["timer"] = GLib.timeout_add(400, refresh_est)
         for r in spins.values():
             r.connect("notify::value", changed)
-        parallel.connect("notify::active", changed)
-        repeat.connect("notify::active", changed)
+        for sw in (parallel, single, repeat):
+            sw.connect("notify::active", changed)
         show_est(est)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.append(group)
         box.append(estimate)
         d = Adw.AlertDialog(heading=_("%s calibration parameters") % mode.capitalize(), body=AT_WARNING, extra_child=box)
-        d.spins, d.parallel, d.repeat, d.estimate = spins, parallel, repeat, estimate   # reachable from the driven tests
+        d.spins, d.parallel, d.single, d.repeat, d.estimate = spins, parallel, single, repeat, estimate   # reachable from the driven tests
+        d.params = params
         d.add_response("cancel", _("Cancel"))
         d.add_response("start", _("Start"))
         d.set_response_appearance("start", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -1410,6 +1438,7 @@ class ModesPage(Gtk.ScrolledWindow):
                 AutotuneDialog(self.win, mode).start(params())
         d.connect("response", resp)
         d.present(self.win)
+        return d
 
     def regen(self, key):
         def ask(res):
@@ -1871,6 +1900,8 @@ class Window(Adw.ApplicationWindow):
         where = AT_PHASE_NAMES.get(ph, ph)
         if ph == "co":
             where += _(", CO level %s") % at.get("value") if at.get("parallel") else _(", core %s") % at.get("core")
+        elif ph == "final" and at.get("single") is not None:
+            where += _(", single-core test of core %s") % at["single"]
         story = crash_story(at, self.status.get("cores", 0)) or _("The step interrupted by the reboot has already been recorded as unstable.")
         d = Adw.AlertDialog(heading=_("Calibration interrupted"),
                             body=_("A %s calibration started on %s was left halfway (%s). %s Resume it from where it was, or "
@@ -2134,10 +2165,18 @@ class App(Adw.Application):
                 win.h.call("autotune", "abort")
                 dlg.closable = True
                 dlg.close()
+            if win.status.get("co") is not None:
+                # the parameters: the single-core test of the final pass is on by default and sent to ryzenctl
+                d = modes.calibrate_params("eco", win.h.call("autotune", "estimate", "eco"))
+                assert d.single.get_active() and d.params()["single"] == 1 and d.single.get_subtitle(), "single-core switch"
+                d.force_close()
             win.ask_resume({"mode": "auto", "phase": "ppt", "started": "today"})
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
                             "results": {str(c): -35 for c in range(win.status["cores"])}, "unstable": {"0": {"value": -40, "why": "crash"}}})
+            win.ask_resume({"mode": "auto", "phase": "final", "single": 1, "started": "today", "params": {"margin": 3}, "final_margin": 3,
+                            "core_margin": {"1": 3}, "results": {str(c): -35 for c in range(win.status["cores"])}, "unstable": {},
+                            "final_failures": [{"values": [-32] * win.status["cores"], "why": "crash", "core": 1}]})
             fans = next(p for p in win.pages if isinstance(p, FansPage))
             chans = [{"canale": 8, "rpm": 0, "pwm": 255, "modo": 0, "role": "non-controllabile"},
                      {"canale": 9, "rpm": 0, "pwm": 0, "modo": 5}]   # no role = unknown

@@ -413,12 +413,15 @@ class Fake:
 
     def load_ok(self, args):
         """Simulated load: fails if a tested core is below its stability threshold;
-        with `combined_stricter` the load on all cores needs 3 more steps of margin."""
+        with `combined_stricter` the load on all cores needs 3 more steps of margin; one thread alone on a
+        core (`--cpu 1`) also needs its `single_limits` (CoreCycler: what only a lone thread at full boost shows)."""
+        limit = lambda key, c: self.s.get(key, {}).get(str(c), -100)
         if "--taskset" in args:
-            cores, extra = [int(args[args.index("--taskset") + 1].split(",")[0])], 0
-        else:
-            cores, extra = range(CORES), self.s.get("combined_stricter", 0)
-        return all(self.s["co"][c] >= self.s.get("co_limits", {}).get(str(c), -100) + extra for c in cores)
+            c = int(args[args.index("--taskset") + 1].split(",")[0])
+            alone = "--cpu" in args and args[args.index("--cpu") + 1] == "1"
+            return self.s["co"][c] >= max(limit("co_limits", c), limit("single_limits", c) if alone else -100)
+        extra = self.s.get("combined_stricter", 0)
+        return all(self.s["co"][c] >= limit("co_limits", c) + extra for c in range(CORES))
 
     def bench(self, threads):
         """Simulated (bogo-ops/s, W): multi-thread saturates with the PPT, single-thread follows FMax."""
@@ -1221,9 +1224,10 @@ AT_PATH = STATE + "/autotune.json"
 # passes (final_failures: never retried; final_passed: Eco reuses them without load tests). Every
 # mode applies the same margin +3: Eco = Auto's undervolt with the quiet limits. reuse=1 reuses the
 # previous measurement; `target` only places the quiet fan curve (fans=2: minimum up to target−10 °C).
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1},
-               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1}}   # no target: the fans use eco's
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2, "single": 1},
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1, "single": 1},
+               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1, "single": 1}}   # no target: the fans use eco's
+# single=1: the final pass ends with each core tested alone (see SINGLE_SEC)
 # fans: 0 = BIOS (baseline steps and curves); 1 = moderate: rise 3 s / fall 2 s and the BIOS curve raised
 # by 10 % with 100 % at 100 °C (the BIOS curves reach 100 % only at 125 °C, so under load the fans hardly
 # react; this is the curve tuned by hand on the 9800X3D); 2 = quiet: 10 s / 5 s, BIOS minimum up to
@@ -1238,6 +1242,10 @@ AT_PPT_TESTS_EST, AT_FKNEE_TESTS_EST = 5, 6   # for the duration estimates
 PPT_SWEEP_STEP, PPT_SWEEP_MIN, BENCH_SEC, FMAX_KNEE_SPAN = 0.10, 0.50, 15, 800   # Auto: performance/W knee
 CO_STEP, FINAL_SEC, FINAL_RETRIES = 5, 300, 3
 FINAL_HEAVY_SEC = 60   # final pass: first the heaviest method at full load (fft on 16 threads locked up the 9800X3D at −37)
+# Final pass, single-core part (CoreCycler: all-core loads miss the CO instability that one thread alone at the highest
+# boost shows): per core one worker on one hardware thread, busy slices with short idle gaps, then SINGLE_GAP s idle
+SINGLE_SEC, SINGLE_GAP = 45, 2
+CORE_RAISE = 3   # a core that failed alone (single-core test): +3 on that core only, like a failed final pass on all
 FMAX_STEP = 100   # Auto: FMax knee sweep
 
 
@@ -1363,6 +1371,20 @@ def co_test_final(method, seconds):
     return co_test(list(range(CORES)), seconds)
 
 
+def single_sec():
+    """Duration of the single-core test of every core (final pass)."""
+    return CORES * (SINGLE_SEC + SINGLE_GAP)
+
+
+def co_test_single(c):
+    """Core c alone, from idle: one worker on one hardware thread (the highest single-core boost), all methods with
+    result verification, in busy slices of random length up to 0.5 s each followed by an idle gap of 1/9 of it
+    (--cpu-load 90 --cpu-load-slice 0): many idle↔load transitions. run_load checks the exit code and the MCEs."""
+    pause(SINGLE_GAP)
+    return run_load(["--cpu", "1", "--taskset", first_cpu(c), "--cpu-method", "all", "--verify",
+                     "--cpu-load", "90", "--cpu-load-slice", "0"], SINGLE_SEC)
+
+
 def co_test_sampled(cores, seconds, method="all"):
     """One core at a time: heaviest method at full load (sampling voltage and MHz halfway through:
     it is the measurement of "what a CO step corresponds to"), then mixed methods at full load, 50 %, 10 %.
@@ -1443,6 +1465,7 @@ def at_total_estimate(mode, p):
     levels = max(1, (-p["colimit"]) // CO_STEP)
     t = (0 if reused else levels * p["step"] * (1 if p.get("parallel", 1) else CORES))
     t += len(BENCH_METHODS) * 6 + FINAL_HEAVY_SEC + FINAL_SEC       # method probe + final pass
+    t += single_sec() if p.get("single", 1) else 0                  # its single-core part
     if mode == "auto":
         t += AT_PPT_TESTS_EST * (5 + BENCH_SEC) + AT_FKNEE_TESTS_EST * (3 + BENCH_SEC)
     elif mode == "boost":
@@ -1461,8 +1484,11 @@ def at_estimate(st):
             rem += (levels - level_idx) * p["step"]
         else:
             rem += ((CORES - st["core"] - 1) * levels + (levels - level_idx)) * p["step"]
-    if ph in ("co", "final"):
+    if ph == "final" and st.get("single") is not None:     # single-core part: the cores still to test
+        rem += (CORES - st["single"]) * (SINGLE_SEC + SINGLE_GAP)
+    elif ph in ("co", "final"):
         rem += FINAL_SEC + FINAL_HEAVY_SEC + (0 if st.get("method") else len(BENCH_METHODS) * 6)
+        rem += single_sec() if p.get("single", 1) else 0
     if st["mode"] == "boost" and ph in ("co", "final", "bench"):
         rem += BOOST_BENCHES * (5 + BENCH_SEC)
     if st["mode"] == "auto" and ph in ("co", "final", "ppt", "fmax_knee"):
@@ -1525,6 +1551,7 @@ def at_params(mode, kvs):
         check_range("target", params["target"], 50, 90, " °C")
     check_range("parallel", params["parallel"], 0, 1)
     check_range("reuse", params["reuse"], 0, 1)
+    check_range("single", params["single"], 0, 1)
     check_range("fans", params["fans"], 0, 2)
     if "loss" in params:
         check_range("loss", params["loss"], 1, 50, " %")
@@ -1719,9 +1746,28 @@ def at_done(ctx, st, lines):
 
 
 def at_known_bad(st, vals):
-    """Has this CO combination already proved unstable (or is it more aggressive than an
-    unstable one on every core)?"""
-    return any(all(v <= f for v, f in zip(vals, ff["values"])) for ff in st.get("final_failures", []))
+    """The recorded failure that already rules this CO combination out, or None: a failed combination rules out
+    every combination at least as aggressive on every core; a core that failed alone (single-core test, "core")
+    every combination at least as aggressive on that core."""
+    for ff in st.get("final_failures", []):
+        c = ff.get("core")
+        if all(v <= f for v, f in zip(vals, ff["values"])) if c is None else vals[c] <= ff["values"][c]:
+            return ff
+    return None
+
+
+def at_raise(st, core=None):
+    """+3 after a failed final pass: on every core, or only on `core` when it failed alone."""
+    if core is None:
+        st["final_tries"] += 1
+    else:
+        cm = st.setdefault("core_margin", {})
+        cm[str(core)] = cm.get(str(core), 0) + CORE_RAISE
+
+
+def at_spent(st):
+    """Every +3 used: FINAL_RETRIES failed passes on all cores, or as many failures of one core alone."""
+    return st["final_tries"] >= FINAL_RETRIES or any(m >= CORE_RAISE * FINAL_RETRIES for m in st.get("core_margin", {}).values())
 
 
 CRASH_MARGIN = 3   # the search ended with a system lock-up: the "stable" level below was one step from the crash
@@ -1735,25 +1781,30 @@ def at_margin(st):
 
 
 def at_final_values(st):
-    m = at_margin(st)
-    return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
+    m, cm = at_margin(st), st.get("core_margin", {})   # core_margin: cores raised alone (single-core test)
+    return [min(0, st["results"].get(str(c), 0) + m + cm.get(str(c), 0)) for c in range(CORES)]
 
 
 def at_reused(mode, params):
     """Fields of a calibration that reuses the saved CO limit ({} if not reusable): final pass from
     the first margin not failed yet; for Eco also `eco_from`, the date of a recorded final pass at
-    least as negative on every core (and not contradicted by a failure): already validated."""
+    least as negative on every core (and not contradicted by a failure): already validated — with
+    single=1 only a pass that included the single-core test."""
     saved = co_limits_reusable(params)
     if not saved:
         return {}
     st = {"params": params, "phase": "final", "results": saved["results"], "unstable": saved["unstable"],
           "samples": saved.get("samples") or {}, "co_reused": saved["time"], "active_cores": [], "final_tries": 0,
-          "final_failures": list(saved.get("final_failures", []))}
-    while st["final_tries"] < FINAL_RETRIES and at_known_bad(st, at_final_values(st)):   # already failed (even with a crash): +3
-        st["final_tries"] += 1
+          "core_margin": {}, "final_failures": list(saved.get("final_failures", []))}
+    while not at_spent(st):                    # already failed (even with a crash): +3, on the core that failed alone
+        ff = at_known_bad(st, at_final_values(st))
+        if not ff:
+            break
+        at_raise(st, ff.get("core"))
     vals = at_final_values(st)
     for ps in saved.get("final_passed", []) if mode == "eco" else []:
-        if all(v <= e for v, e in zip(ps["values"], vals)) and not at_known_bad(st, ps["values"]):
+        if all(v <= e for v, e in zip(ps["values"], vals)) and not at_known_bad(st, ps["values"]) \
+                and (ps.get("single") or not params.get("single", 1)):
             st["eco_from"] = ps["time"]
     return st
 
@@ -1788,7 +1839,7 @@ def cmd_autotune(ctx, args):
 
 def _autotune(ctx, args):
     if not args:
-        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
+        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
     if args[0] == "status":
         return at_load() or {"phase": None}
     if args[0] == "estimate":
@@ -1799,7 +1850,7 @@ def _autotune(ctx, args):
         return {"total_s": at_total_estimate(args[1], p),
                 "parallel_total_s": at_total_estimate(args[1], dict(p, parallel=1)),
                 "sequential_total_s": at_total_estimate(args[1], dict(p, parallel=0)), "params": p,
-                "co_reuse": reused.get("co_reused"), "eco_from": reused.get("eco_from")}
+                "single_s": single_sec(), "co_reuse": reused.get("co_reused"), "eco_from": reused.get("eco_from")}
     if args[0] == "abort":
         st = at_load()
         if st:
@@ -1844,7 +1895,7 @@ def _autotune(ctx, args):
         if st.get("eco_from"):                      # Eco: these values already passed a final pass, no load test
             st["final"] = at_final_values(st)
             at_finish_eco(ctx, st, base)
-        elif st["final_tries"] >= FINAL_RETRIES:
+        elif at_spent(st):
             raise Err(_("the combined CO already proved unstable up to margin +%d: raise margin or repeat the search with reuse=0")
                       % (params["margin"] + 3 * (FINAL_RETRIES - 1)))
         else:
@@ -1895,8 +1946,8 @@ def at_attribute_crash(st):
         st["active_cores"] = []
         st["phase"] = "final"
         co_limits_save(st)
-    elif ip["kind"] == "final":
-        at_final_failed(st, "crash")
+    elif ip["kind"] == "final":                        # with "core": the single-core test of that core alone
+        at_final_failed(st, "crash", ip.get("core"))
     else:                                              # post: final CO applied, unstable combination
         at_post_failed(st, "crash")
     return True
@@ -1956,21 +2007,33 @@ def at_step(ctx, st, base):
         at_save(st)
         return st
     if st["phase"] == "final":
-        vals = at_final_values(st)
+        # one step for the all-core part, then (single=1) one step per core alone: st["single"] = the next core
+        vals, c = at_final_values(st), st.get("single")
         st["in_progress"] = {"kind": "final", "boot_id": boot_id()}
+        if c is not None:
+            st["in_progress"]["core"] = c            # a crash here raises only this core
         at_save(st)
         run(["co"] + [str(v) for v in vals], ctx)
         try:
-            if "method" not in st:          # probed with the final CO applied: it is already part of the test
-                st["method"] = heaviest_method()
-            ok = co_test_final(st["method"], FINAL_SEC)
+            if c is not None:
+                ok = co_test_single(c)
+            else:
+                if "method" not in st:          # probed with the final CO applied: it is already part of the test
+                    st["method"] = heaviest_method()
+                ok = co_test_final(st["method"], FINAL_SEC)
         except Unstable as e:
             LAST_FAIL["why"] = str(e)
             ok = False
         st["in_progress"] = None
-        if ok:
+        if not ok:
+            at_final_failed(st, core=c)
+        elif st["params"].get("single", 1) and (c is None or c + 1 < CORES):
+            st["single"] = 0 if c is None else c + 1
+        else:
+            st.pop("single", None)
             st["final"] = vals
-            co_limits_note(st, "final_passed", {"values": vals, "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"]})
+            co_limits_note(st, "final_passed", {"values": vals, "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"],
+                                                "single": st["params"].get("single", 1)})
             if st["mode"] == "eco":
                 at_finish_eco(ctx, st, base)
             elif st["mode"] == "boost":
@@ -1979,8 +2042,6 @@ def at_step(ctx, st, base):
                 st["phase"] = "ppt"
                 st["knee"] = {"method": st["method"], "ppt": {"current": base["ppt"], "tests": [], "chosen": None},
                               "fmax": {"current": None, "tests": [], "chosen": None}}
-        else:
-            at_final_failed(st)
         at_save(st)
         return st
     if st["phase"] in ("ppt", "fmax_knee", "bench"):
@@ -2024,14 +2085,17 @@ def at_next_core(st, base):
         co_limits_save(st)
 
 
-def at_final_failed(st, why=None):
-    """The combined pass failed: it is recorded and retried with +3 on all cores
-    (the measured per-core limits stay unchanged)."""
+def at_final_failed(st, why=None, core=None):
+    """The combined pass failed: it is recorded and the final pass starts over with +3 on all cores, or only
+    on `core` when it failed alone in the single-core test (the measured per-core limits stay unchanged)."""
     entry = {"values": at_final_values(st), "why": why or LAST_FAIL["why"] or "crash"}
+    if core is not None:
+        entry["core"] = core
     st.setdefault("final_failures", []).append(entry)
     co_limits_note(st, "final_failures", entry)
-    st["final_tries"] += 1
-    if st["final_tries"] >= FINAL_RETRIES:
+    st.pop("single", None)
+    at_raise(st, core)
+    if at_spent(st):
         st["phase"] = "done"
         st["error"] = _("final pass unstable even with the increased margin: CO left at baseline")
         run(["apply", "baseline", "cpu"], {})
@@ -3059,29 +3123,45 @@ def selftest():
     run(["profile", "delete", "boost"])
 
     # ---- autotune eco: Auto's CO (fresh install: search from scratch + final pass), eco preset values ----
+    def final_pass():
+        """One final pass: the all-core step, then (single=1) one step per core alone; the state after it."""
+        st = run(["autotune", "step"])
+        while st["phase"] == "final" and st.get("single") is not None:
+            st = run(["autotune", "step"])
+        return st
+    S = single_sec()                                   # the single-core part of the final pass: 8 × (45 + 2) s
+    assert S == 8 * 47
     expect_err(["autotune", "step"], "no calibration")
     expect_err(["autotune", "start", "eco", "colimit=5"], "out of range")
     est = run(["autotune", "estimate", "eco"])
-    assert est["parallel_total_s"] == 8 * 90 + 24 + 60 + 300 and est["sequential_total_s"] == 8 * 8 * 90 + 24 + 60 + 300, est
-    assert est["co_reuse"] is None and est["eco_from"] is None, est
+    assert est["parallel_total_s"] == 8 * 90 + 24 + 60 + 300 + S and est["sequential_total_s"] == 8 * 8 * 90 + 24 + 60 + 300 + S, est
+    assert est["co_reuse"] is None and est["eco_from"] is None and est["single_s"] == S, est
+    assert run(["autotune", "estimate", "eco", "single=0"])["total_s"] == est["total_s"] - S   # the single-core part costs S
     expect_err(["autotune", "estimate", "eco", "parallel=2"], "out of range")
+    expect_err(["autotune", "estimate", "eco", "single=2"], "out of range")
     rm(P(CO_LIMITS_PATH))
     st = run(["autotune", "start", "eco", "step=9"])
     assert st["phase"] == "co" and st["params"]["colimit"] == -40 and st["params"]["margin"] == 3 and st["params"]["step"] == 9 and st["parallel"]
-    assert st["eta"]["remaining_s"] == 8 * 9 + 60 + 300 and st["eta"]["total_s"] == 8 * 9 + 24 + 60 + 300, st["eta"]
-    steps = 0
+    assert st["params"]["single"] == 1
+    assert st["eta"]["remaining_s"] == 8 * 9 + 60 + 300 + S and st["eta"]["total_s"] == 8 * 9 + 24 + 60 + 300 + S, st["eta"]
+    steps, singles = 0, []
     for _i in range(200):
         st = run(["autotune", "step"])
         steps += 1
+        singles.append(st.get("single"))
+        if st["phase"] == "final" and st.get("single") is not None:   # each core alone: only the cores still to test remain
+            assert st["eta"]["remaining_s"] == (8 - st["single"]) * 47, st["eta"]
         if st["phase"] == "done":
             break
-    assert steps == 8 + 1 and st["eta"]["remaining_s"] == 0, steps   # 8 levels in parallel, final pass, nothing else
+    assert steps == 8 + 1 + 8 and st["eta"]["remaining_s"] == 0, steps   # 8 levels in parallel, final pass on all cores, then each alone
+    assert singles[8:16] == list(range(8)) and "single" not in st, singles
     eco_co = "co -37 -37 -37 -22 -37 -37 -37 -12"
     eco_lines = [eco_co] + [l for l in preset_lines("eco", load_baseline()) if l.split()[0] not in ("co", "fan")] + [
         "fan 1 step 10000 5000", "fan 1 curve 60:77 75:255"]   # eco preset with the CO and the quiet fans (curve from target −10)
     assert st["profile_lines"] == eco_lines and "fmax 4825" in eco_lines and "ppt 89" in eco_lines, st["profile_lines"]
     passed = json.loads(read_text(CO_LIMITS_PATH))["final_passed"]       # the successful final pass is remembered
     assert len(passed) == 1 and passed[0]["values"] == st["final"] and passed[0]["mode"] == "eco" and passed[0]["time"], passed
+    assert passed[0]["single"] == 1, passed                              # …with its single-core part
     assert st["samples"]["0"]["volt"][0] == 1.25 and st["samples"]["-20"]["volt"][0] == 1.19, st["samples"]   # −20 ≈ −60 mV in the fake
     assert st["samples"]["-25"]["volt"][7] is None and st["samples"]["-25"]["volt"][0] == 1.175   # core 7 out of the test at −25
     assert run(["telemetry"])["cores"][0]["volt"] is not None
@@ -3104,10 +3184,10 @@ def selftest():
     # limits measured but no recorded pass (measurement from an older version): final pass only, then remembered
     write_atomic(P(CO_LIMITS_PATH), json.dumps(dict(json.loads(read_text(CO_LIMITS_PATH)), final_passed=[])))
     est = run(["autotune", "estimate", "eco"])
-    assert est["co_reuse"] and est["eco_from"] is None and est["parallel_total_s"] == 24 + 60 + 300, est
+    assert est["co_reuse"] and est["eco_from"] is None and est["parallel_total_s"] == 24 + 60 + 300 + S, est
     st = run(["autotune", "start", "eco", "step=9"])
-    assert st["phase"] == "final" and st["co_reused"] and st["eta"]["total_s"] == 24 + 60 + 300, st
-    st = run(["autotune", "step"])
+    assert st["phase"] == "final" and st["co_reused"] and st["eta"]["total_s"] == 24 + 60 + 300 + S, st
+    st = final_pass()
     assert st["phase"] == "done" and st["profile_lines"] == eco_lines, st
     assert json.loads(read_text(CO_LIMITS_PATH))["final_passed"][0]["values"] == st["final"]
     run(["autotune", "abort"])
@@ -3122,7 +3202,7 @@ def selftest():
     run(["autotune", "abort"])
     # resume after a crash (core by core): the step in progress becomes unstable, move on to the next core
     st = run(["autotune", "start", "auto", "step=9", "parallel=0", "reuse=0"])
-    assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 60 + 300 + 5 * 20 + 6 * 18, st["eta"]
+    assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 60 + 300 + S + 5 * 20 + 6 * 18, st["eta"]
     assert core_cpus(3) == "3,11" and core_load_args(3)[:4] == ["--cpu", "2", "--taskset", "3,11"]
     run(["autotune", "step"])                          # core 0 at -5: ok
     st = run(["autotune", "status"])
@@ -3159,14 +3239,14 @@ def selftest():
     FAKE.save()
     run(["unlock", "on"])                                       # Boost only with unlock
     st = run(["autotune", "start", "boost", "step=3"])          # reuses the eco limits
-    assert st["phase"] == "final" and st["eta"]["total_s"] == 300 + 60 + 4 * 6 + 4 * 20
-    for _i in range(20):
+    assert st["phase"] == "final" and st["eta"]["total_s"] == 300 + 60 + 4 * 6 + S + 4 * 20
+    for _i in range(40):
         st = run(["autotune", "step"])
         if st["phase"] == "done":
             break
     assert st["final_tries"] == 1 and st["final_failures"][0]["why"] == "simulato", st
     assert st["results"]["0"] == -40 and st["final"][0] == -34 and st["final"][7] == -9, (st["results"], st["final"])
-    assert st["eta"]["total_s"] == 300 + 60 + 4 * 6 + 4 * 20     # total fixed at start
+    assert st["eta"]["total_s"] == 300 + 60 + 4 * 6 + S + 4 * 20     # total fixed at start
     run(["autotune", "abort"])                                   # discards the proposal: no profile written
     assert "boost" not in run(["profile", "list"])["profiles"]
     run(["unlock", "off"])
@@ -3177,7 +3257,7 @@ def selftest():
     assert saved["results"]["7"] == -15 and saved["colimit"] == -40 and saved["method"] == "matrixprod", saved
     assert run(["autotune", "estimate", "auto", "colimit=-45"])["co_reuse"] is None   # shallower than requested: new search
     est = run(["autotune", "estimate", "auto"])
-    assert est["co_reuse"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + 5 * 20 + 6 * 18, est
+    assert est["co_reuse"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + S + 5 * 20 + 6 * 18, est
     st = run(["autotune", "start", "auto", "step=3"])
     assert st["phase"] == "final" and st["co_reused"] and st["results"]["7"] == -15
     # the combination failed by boost (margin 3) is remembered: auto already starts from +6
@@ -3217,7 +3297,7 @@ def selftest():
     run(["profile", "delete", "auto"])
     # ---- autotune boost: pushed CO + limits/FMax at the caps + measured gain ----
     est = run(["autotune", "estimate", "boost"])
-    assert "target" not in est["params"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + 4 * 20 and est["co_reuse"], est
+    assert "target" not in est["params"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + S + 4 * 20 and est["co_reuse"], est
     run(["unlock", "on"])                                   # Boost only with unlock: limits and FMax at the unlock ceilings
     st = run(["autotune", "start", "boost", "step=3"])      # reuses the limit measured by auto (−40 → −37)
     assert st["phase"] == "final" and st["co_reused"]
@@ -3238,7 +3318,7 @@ def selftest():
     # ---- instability after the final pass: crash or dead benchmark → unstable combination, final pass repeated with +3 ----
     st = run(["autotune", "start", "auto", "step=3"])          # reuses −40: starts from the final pass at −37
     assert st["phase"] == "final" and st["final_tries"] == 0
-    st = run(["autotune", "step"])                            # final pass ok → knee
+    st = final_pass()                                         # final pass ok → knee
     assert st["phase"] == "ppt" and st["final"] == [-37] * CORES and st["method"] == "matrixprod" and st["knee"]["method"] == "matrixprod"
     st["in_progress"] = {"kind": "post", "boot_id": "other-boot"}   # crash during the sweep
     at_save(st)
@@ -3246,7 +3326,7 @@ def selftest():
     assert st["resumed_after_crash"] and st["phase"] == "final" and st["final_tries"] == 1 and "knee" not in st, st
     assert st["final_failures"][-1] == {"values": [-37] * CORES, "why": "crash"}
     assert json.loads(open(P(CO_LIMITS_PATH)).read())["final_failures"][-1]["values"] == [-37] * CORES   # remembered
-    st = run(["autotune", "step"])                            # final pass at −34 ok → knee
+    st = final_pass()                                         # final pass at −34 ok → knee
     assert st["phase"] == "ppt" and st["final"] == [-34] * CORES
     FAKE.s["bench_fail"] = True                               # stress-ng dies with the final CO applied
     FAKE.save()
@@ -3273,7 +3353,7 @@ def selftest():
     saved["final_failures"] = saved["final_failures"][:2]        # two failures again for the `boot` test
     write_atomic(P(CO_LIMITS_PATH), json.dumps(saved))
     st = run(["autotune", "start", "auto", "step=3"])
-    st = run(["autotune", "step"])                            # final pass at −31 ok → knee
+    st = final_pass()                                         # final pass at −31 ok → knee
     assert st["phase"] == "ppt"
     st["in_progress"] = {"kind": "post", "boot_id": "other-boot"}
     at_save(st)
@@ -3293,6 +3373,52 @@ def selftest():
     assert run(["autotune", "status"])["phase"] is None
     rm(P(CO_LIMITS_PATH))
     FAKE.s["co_limits"] = {"7": -15, "3": -25}
+    FAKE.save()
+
+    # ---- single-core test in the final pass (CoreCycler): a core stable with all cores loaded fails alone ----
+    FAKE.s["single_limits"] = {"5": -33}          # core 5: −37 holds with all cores loaded, alone it needs −33
+    FAKE.save()
+    eco_final = [-37, -37, -37, -22, -37, -37, -37, -12]
+    st = run(["autotune", "start", "eco", "step=3", "reuse=0", "single=0"])   # without the single-core part: as before
+    for _i in range(100):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["final"] == eco_final and "core_margin" not in st and st["final_tries"] == 0, st
+    assert json.loads(read_text(CO_LIMITS_PATH))["final_passed"][-1]["single"] == 0
+    run(["autotune", "abort"])
+    # a pass without the single-core part (or from an older version) does not validate Eco when single=1
+    assert run(["autotune", "estimate", "eco"])["eco_from"] is None and run(["autotune", "estimate", "eco", "single=0"])["eco_from"]
+    st = run(["autotune", "start", "eco", "step=3"])          # reuses the limits: final pass, now with each core alone
+    assert st["phase"] == "final" and not st.get("eco_from")
+    st = final_pass()                                         # all cores together ok, core 5 alone at −37: failed
+    assert st["phase"] == "final" and st["core_margin"] == {"5": CORE_RAISE} and st["final_tries"] == 0, st
+    assert st["final_failures"][-1] == {"values": eco_final, "why": "simulato", "core": 5}, st["final_failures"]
+    assert at_final_values(st) == [-37, -37, -37, -22, -37, -34, -37, -12] and st["final_margin"] == 3   # only core 5 raised
+    assert at_known_bad(st, [0] * 4 + [-50, -37, 0, 0]) and not at_known_bad(st, [-50] * 5 + [-34, -50, -50])   # that core only
+    # a crash while a core runs alone: only that core is raised, the final pass starts over
+    st = run(["autotune", "step"])                            # all cores together at the new values: ok
+    assert st["single"] == 0, st
+    st["in_progress"] = {"kind": "final", "core": 2, "boot_id": "other-boot"}
+    at_save(st)
+    st = run(["autotune", "step"])
+    assert st["resumed_after_crash"] and st["core_margin"] == {"5": 3, "2": 3} and st["final_tries"] == 0 and "single" not in st, st
+    assert st["final_failures"][-1] == {"values": [-37, -37, -37, -22, -37, -34, -37, -12], "why": "crash", "core": 2}
+    for _i in range(100):                                     # core 5 alone fails again at −34 (+6), then −31 holds
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["final"] == [-37, -37, -34, -22, -37, -31, -37, -12] and st["core_margin"] == {"5": 6, "2": 3} and "error" not in st, st
+    run(["autotune", "abort"])
+    # the cores that failed alone are remembered: the next calibration starts with only those raised
+    st = run(["autotune", "start", "auto", "step=3"])
+    assert at_final_values(st) == [-37, -37, -34, -22, -37, -31, -37, -12] and st["final_tries"] == 0, st
+    assert st["core_margin"] == {"5": 6, "2": 3}
+    run(["autotune", "abort"])
+    st = run(["autotune", "start", "eco", "step=3"])          # Eco: that final pass (with each core alone) validates it
+    assert st["phase"] == "done" and st["eco_from"] and st["final"] == [-37, -37, -34, -22, -37, -31, -37, -12], st
+    run(["autotune", "abort"])
+    FAKE.s["single_limits"] = {}
     FAKE.save()
 
     # ---- telemetry and caps ----
