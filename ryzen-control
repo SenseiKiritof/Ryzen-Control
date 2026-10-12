@@ -102,6 +102,8 @@ AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimiz
 AT_PARALLEL_SUB = _("Off: one core at a time, slower (%s) but attributes even a reboot with certainty")
 AT_SINGLE_SUB = _("One thread alone on each core, from idle to the highest boost: catches the CO instability that all-core "
                   "loads miss. A core that fails is raised alone. Adds %s")
+WD_TIP = _("During a calibration ryzenctl keeps the motherboard watchdog armed: if the PC freezes, it restarts by itself "
+           "after the timeout and the calibration resumes from where it was, with that step recorded as unstable.")
 AT_PHASES = {"co": 0.6, "final": 0.7, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # share of the bar at the end of the phase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 # ryzenctl protocol values shown to the user (fan roles, why a CO level failed) through a translated name;
@@ -890,6 +892,8 @@ class AutotuneDialog(Adw.Window):
         self.connect("close-request", self.on_close_request)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         self.header = label("", ["dim-label"], wrap=True)
+        # one line, allocated from the start (constant height): the hardware watchdog state reported by ryzenctl serve
+        self.watchdog = label(" ", ["dim-label", "caption"], ellipsize=Pango.EllipsizeMode.END, single_line_mode=True, tooltip_text=WD_TIP)
         self.reuse = label("", ["dim-label"], wrap=True, visible=False)
         # constant heights: every height change moves the table and the compositor leaves fragments
         self.phase = label(_("Starting…"), ["title-3"], hexpand=True, ellipsize=Pango.EllipsizeMode.END, single_line_mode=True)
@@ -901,7 +905,7 @@ class AutotuneDialog(Adw.Window):
         self.note = label("", ["warning"], wrap=True, visible=False)
         # progress (start, phase, time left, bar) pinned above the scrolled area: visible while scrolling the results
         pinned = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=6, margin_bottom=10, margin_start=12, margin_end=12)
-        for w in (self.header, top, self.progress):
+        for w in (self.header, self.watchdog, top, self.progress):
             pinned.append(w)
         for w in (self.reuse, self.note, label(_("CO (Curve Optimizer) per core"), ["heading"], tooltip_text=CO_TIP)):
             body.append(w)
@@ -999,6 +1003,8 @@ class AutotuneDialog(Adw.Window):
             self.note.set_text(_("The system rebooted during a test: that step has been marked unstable. If the final CO was already "
                                  "applied, the combination is unstable and the final pass is repeated with +3 on every core."))
             self.note.set_visible(True)
+        if st.get("watchdog"):
+            self.watchdog.set_text(_("Hardware watchdog: %s") % st["watchdog"])
         if st.get("co_reused"):   # search skipped: table already populated, the CO phase counts as complete in the bar
             if st.get("eco_from"):   # Eco: final pass skipped too
                 text = _("Undervolt validated by the final pass of %s, reused without load tests. %s") % (st["eco_from"], crash_story(st, len(self.cells)))
@@ -2155,6 +2161,8 @@ class App(Adw.Application):
                 dlg = AutotuneDialog(win, mode)
                 st = win.h.call("autotune", "start", mode, "step=3", "reuse=%d" % (i > 0))
                 dlg.show(st)
+                # serve arms the (fake) hardware watchdog for the run and the window says so; done at once: nothing to arm
+                assert st["phase"] == "done" or (st.get("watchdog") and dlg.watchdog.get_text().strip()), "watchdog state not shown"
                 for _i in range(300):
                     if st["phase"] == "done":
                         break

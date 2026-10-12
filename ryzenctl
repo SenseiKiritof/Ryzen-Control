@@ -423,6 +423,43 @@ class Fake:
         extra = self.s.get("combined_stricter", 0)
         return all(self.s["co"][c] >= limit("co_limits", c) + extra for c in range(CORES))
 
+    # Simulated hardware watchdog (an SP5100 TCO with timeout 60): sysfs attributes and device as regular files under
+    # ROOT; the device file is the transcript of what was written ("\0" keepalive, "V" magic) with a "C" at each close.
+    # wd_busy: held by another program (EBUSY); wd_no_magic: driver without magic close; wd_deaf: never stops.
+    WD_SYS, WD_DEV = "/sys/class/watchdog/watchdog0", "/dev/watchdog0"
+
+    def wd_files(self):
+        if not os.path.exists(P(self.WD_SYS + "/state")):
+            os.makedirs(P(self.WD_SYS), exist_ok=True)
+            os.makedirs(P("/dev"), exist_ok=True)
+            for name, v in (("identity", "SP5100 TCO timer"), ("state", "inactive"), ("timeout", "60"), ("nowayout", "0")):
+                with open(P(self.WD_SYS + "/" + name), "w") as fh:
+                    fh.write(v + "\n")
+            open(P(self.WD_DEV), "wb").close()
+
+    def wd_open(self, dev):
+        """open(2): EBUSY while another program holds the device, otherwise the timer starts."""
+        import errno
+        if self.s.get("wd_busy"):
+            raise OSError(errno.EBUSY, os.strerror(errno.EBUSY))
+        with open(P(self.WD_SYS + "/state"), "w") as fh:
+            fh.write("active\n")
+        return os.open(P(dev), os.O_WRONLY | os.O_APPEND)
+
+    def wd_options(self):
+        """WDIOC_GETSUPPORT options."""
+        return 0x8080 if self.s.get("wd_no_magic") else 0x8180
+
+    def wd_close(self, fd):
+        """close(2): the kernel stops the timer after a "V" (magic close), or at any close without magic close."""
+        os.close(fd)
+        with open(P(self.WD_DEV), "rb+") as f:
+            stops = (f.read().endswith(b"V") or self.s.get("wd_no_magic")) and not self.s.get("wd_deaf")
+            f.write(b"C")
+        if stops:
+            with open(P(self.WD_SYS + "/state"), "w") as fh:
+                fh.write("inactive\n")
+
     def bench(self, threads):
         """Simulated (bogo-ops/s, W): multi-thread saturates with the PPT, single-thread follows FMax."""
         import math
@@ -1224,10 +1261,11 @@ AT_PATH = STATE + "/autotune.json"
 # passes (final_failures: never retried; final_passed: Eco reuses them without load tests). Every
 # mode applies the same margin +3: Eco = Auto's undervolt with the quiet limits. reuse=1 reuses the
 # previous measurement; `target` only places the quiet fan curve (fans=2: minimum up to target−10 °C).
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2, "single": 1},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1, "single": 1},
-               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1, "single": 1}}   # no target: the fans use eco's
-# single=1: the final pass ends with each core tested alone (see SINGLE_SEC)
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2, "single": 1, "watchdog": 1},
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1},
+               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1}}   # no target: the fans use eco's
+# single=1: the final pass ends with each core tested alone (see SINGLE_SEC); watchdog=1: under `serve` the hardware
+# watchdog stays armed for the whole calibration (Watchdog)
 # fans: 0 = BIOS (baseline steps and curves); 1 = moderate: rise 3 s / fall 2 s and the BIOS curve raised
 # by 10 % with 100 % at 100 °C (the BIOS curves reach 100 % only at 125 °C, so under load the fans hardly
 # react; this is the curve tuned by hand on the 9800X3D); 2 = quiet: 10 s / 5 s, BIOS minimum up to
@@ -1552,6 +1590,7 @@ def at_params(mode, kvs):
     check_range("parallel", params["parallel"], 0, 1)
     check_range("reuse", params["reuse"], 0, 1)
     check_range("single", params["single"], 0, 1)
+    check_range("watchdog", params["watchdog"], 0, 1)
     check_range("fans", params["fans"], 0, 2)
     if "loss" in params:
         check_range("loss", params["loss"], 1, 50, " %")
@@ -1828,18 +1867,30 @@ def at_mv_per_step(st):
 
 
 def cmd_autotune(ctx, args):
-    """autotune start eco|auto|boost [key=value…] | step | status | abort | save [apply] | estimate eco|auto|boost [key=value…]"""
-    st = _autotune(ctx, args)
+    """autotune start eco|auto|boost [key=value…] | step | status | abort | save [apply] | estimate eco|auto|boost
+    [key=value…]. Under `serve` the hardware watchdog follows the run."""
+    if WD and args[:1] == ["step"]:
+        WD.follow(at_load())                   # (re)armed before the step: a resumed run is protected too
+    try:
+        st = _autotune(ctx, args)
+    except Exception:
+        if WD and args[:1] in (["start"], ["step"]):
+            WD.disarm()                        # the run stops here (the GUI shows the error and discards it)
+        raise
     if isinstance(st, dict) and st.get("phase"):
         st["eta"] = at_estimate(st)
         st["mv_per_step"] = at_mv_per_step(st)
         st["final_margin"] = at_margin(st)
+    if WD and isinstance(st, dict) and "phase" in st:
+        WD.follow(st, arm=args[0] == "start")
+        if WD.status:
+            st["watchdog"] = WD.status
     return st
 
 
 def _autotune(ctx, args):
     if not args:
-        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
+        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1 watchdog=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
     if args[0] == "status":
         return at_load() or {"phase": None}
     if args[0] == "estimate":
@@ -2708,6 +2759,150 @@ def fmt_hwtest(r):
     return "\n".join("%-9s %s" % (k, v) for k, v in r.items())
 
 
+# ---- Hardware watchdog during a calibration (serve only) ----------------------------------
+# On Ryzen 9000 a too negative CO can freeze the machine instead of resetting it. While a calibration runs
+# under `serve` (the GUI), the first /sys/class/watchdog device stays armed and kept alive: a freeze becomes a
+# reset after its timeout, then the crash-guard and the resume of the calibration take over. The CLI (one
+# process per step) never arms it. Residual risk: if `serve` is killed with SIGKILL mid-calibration nothing
+# sends the magic close, the machine resets after the timeout and the next boot treats it as a crash
+# (conservative: the step in progress is recorded as unstable).
+WD_CLASS = "/sys/class/watchdog"
+WD_PET_SEC = 10                   # keepalive interval; arming needs a timeout of at least twice as much
+WDIOC_GETSUPPORT = 0x80285700     # _IOR('W', 0, struct watchdog_info {u32 options, firmware_version; u8 identity[32]})
+WDIOF_MAGICCLOSE = 0x0100
+WD = None                         # the Watchdog of this `serve` process; None under the CLI
+
+
+class Watchdog:
+    """Armed = the device is open (opening starts the timer) and a daemon thread writes a keepalive every
+    WD_PET_SEC; disarmed only by the magic close ("V", then close) checked on the sysfs state. `status` is
+    the text that `autotune …` reports under serve."""
+
+    def __init__(self):
+        import threading
+        self.lock = threading.Lock()
+        self.fd = self.stop = self.sys = self.dev = self.status = None
+        self.timeout, self.closed = 0, False     # closed: serve is exiting, never armed again
+
+    def follow(self, st, arm=True):
+        """Armed while a run is in progress (unless watchdog=0), disarmed as soon as it is done, aborted or gone."""
+        if not st or st.get("phase") in (None, "done"):
+            self.disarm()
+        elif not st["params"].get("watchdog", 1):
+            self.status = _("unavailable: %s") % _("disabled (watchdog=0)")
+        elif arm:
+            self.arm()
+
+    def why_not(self):
+        """Why the first watchdog must not be armed (fail closed: whatever could not surely be stopped), or None."""
+        if FAKE:
+            FAKE.wd_files()
+        base = P(WD_CLASS)
+        names = sorted((n for n in (os.listdir(base) if os.path.isdir(base) else []) if re.fullmatch(r"watchdog\d+", n)),
+                       key=lambda n: int(n[8:]))
+        if not names:
+            return _("no hardware watchdog (%s)") % WD_CLASS
+        self.sys, self.dev = WD_CLASS + "/" + names[0], "/dev/" + names[0]
+        try:
+            nowayout, state = read_text(self.sys + "/nowayout"), read_text(self.sys + "/state")
+            self.timeout = int(read_text(self.sys + "/timeout"))
+        except (OSError, ValueError):
+            return _("%s does not report nowayout, state and timeout") % names[0]
+        try:
+            param = read_text(self.sys + "/device/driver/module/parameters/nowayout")   # most drivers hide it
+        except OSError:
+            param = "N"
+        if nowayout != "0" or param in ("Y", "1"):
+            return _("nowayout is set: once armed it could never be stopped")
+        if state != "inactive":
+            return _("already active (used by the system or by another program)")
+        if self.timeout < 2 * WD_PET_SEC:
+            return _("timeout of %d s shorter than twice the keepalive interval (%d s)") % (self.timeout, WD_PET_SEC)
+        return None
+
+    def open(self):
+        return FAKE.wd_open(self.dev) if FAKE else os.open(P(self.dev), os.O_WRONLY)
+
+    def arm(self):
+        import errno
+        with self.lock:
+            if self.fd is not None or self.closed:
+                return
+            why = self.why_not()
+            if not why:
+                try:
+                    self.fd = self.open()
+                except OSError as e:
+                    why = _("in use by another program (systemd RuntimeWatchdogSec?)") if e.errno == errno.EBUSY else e.strerror
+            if why:
+                self.status = _("unavailable: %s") % why
+                return
+            try:   # open = running: from here on only a verified magic close stops it
+                opts = FAKE.wd_options() if FAKE else struct.unpack_from("I", fcntl.ioctl(self.fd, WDIOC_GETSUPPORT, bytes(40)))[0]
+            except OSError:
+                opts = 0
+            if not opts & WDIOF_MAGICCLOSE:
+                if self.release():   # without magic close any close stops it
+                    self.status = _("unavailable: %s") % _("the driver has no magic close")
+                return
+            self.keepalive()
+            self.status = _("armed (%d s)") % self.timeout
+
+    def keepalive(self):
+        """Daemon thread writing a keepalive every WD_PET_SEC (lock held by the caller)."""
+        import threading
+        stop = self.stop = threading.Event()
+
+        def pet():
+            while not stop.wait(WD_PET_SEC):
+                with self.lock:
+                    if stop.is_set():
+                        return                     # the magic "V" must be the last write before the close
+                    try:
+                        os.write(self.fd, b"\0")
+                    except OSError as e:
+                        self.status = _("ERROR: keepalive failed (%s): the PC resets within %d s") % (e.strerror, self.timeout)
+        threading.Thread(target=pet, daemon=True).start()
+
+    def release(self):
+        """Magic close, then the sysfs state must say inactive (lock held). If the timer still runs it is reopened
+        and kept alive, never left armed without a keepalive. True if stopped."""
+        if self.stop:
+            self.stop.set()
+        fd, self.fd = self.fd, None
+        try:
+            os.write(fd, b"V")
+        except OSError:
+            pass
+        if FAKE:
+            FAKE.wd_close(fd)
+        else:
+            os.close(fd)
+        try:
+            if read_text(self.sys + "/state") == "inactive":
+                return True
+        except OSError:
+            pass
+        try:
+            self.fd = self.open()
+            self.keepalive()
+            self.status = _("ERROR: still running after the magic close, kept alive: the PC resets %d s after Ryzen Control closes") % self.timeout
+        except OSError as e:
+            self.status = _("ERROR: still running after the magic close and not reopened (%s): the PC resets within %d s") % (e.strerror, self.timeout)
+        return False
+
+    def disarm(self, final=False):
+        """Magic close if armed; final (serve exiting): never armed again. False if the timer still runs (kept alive)."""
+        with self.lock:
+            self.closed = self.closed or final
+            if self.fd is None:
+                return True
+            stopped = self.release()
+            if stopped:
+                self.status = _("disarmed")
+            return stopped
+
+
 # ---- serve: protocol for the GUI (one JSON line per request and per reply) ---------
 SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}   # autotune step is allowed: the GUI drives it
 
@@ -2728,9 +2923,13 @@ def serve_one(line):
 
 def cmd_serve(ctx, args):
     """Requests run in order on a single thread (serialized SMU); the reader stays
-    free so that `autotune abort` interrupts a long step at once (flag + stress-ng terminated)."""
+    free so that `autotune abort` interrupts a long step at once (flag + stress-ng terminated).
+    A calibration keeps the hardware watchdog armed (Watchdog): magic close on every way out."""
     import queue
+    import signal
     import threading
+    global WD
+    WD = Watchdog()
     q = queue.Queue()
 
     def worker():
@@ -2740,20 +2939,35 @@ def cmd_serve(ctx, args):
                 return
             sys.stdout.write(json.dumps(serve_one(line), ensure_ascii=False) + "\n")
             sys.stdout.flush()
+
+    def on_signal(signum, _frame):   # logout, shutdown, Ctrl-C: the magic close first, then out at once
+        WD.disarm(final=True)
+        os._exit(128 + signum)
+    sigs = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    old = {s: signal.signal(s, on_signal) for s in sigs}
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            if json.loads(line) == ["autotune", "abort"]:
-                at_request_abort()
-        except ValueError:
-            pass
-        q.put(line)
-    q.put(None)
-    t.join()
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if json.loads(line) == ["autotune", "abort"]:
+                    at_request_abort()
+            except ValueError:
+                pass
+            q.put(line)
+        q.put(None)
+        t.join()                         # the step in progress ends first (armed meanwhile)
+    finally:   # end of input (GUI closed) or an exception: no signal handler may interrupt this magic close
+        for s in sigs:
+            signal.signal(s, signal.SIG_IGN)
+        while not WD.disarm(final=True):   # the timer still runs after the magic close: kept alive, retried
+            time.sleep(WD_PET_SEC)
+        for s, h in old.items():
+            signal.signal(s, signal.SIG_DFL if h is None else h)   # None: a handler installed outside Python
+        WD = None
 
 
 # ---- Dispatcher ------------------------------------------------------------------------
@@ -3139,10 +3353,11 @@ def selftest():
     assert run(["autotune", "estimate", "eco", "single=0"])["total_s"] == est["total_s"] - S   # the single-core part costs S
     expect_err(["autotune", "estimate", "eco", "parallel=2"], "out of range")
     expect_err(["autotune", "estimate", "eco", "single=2"], "out of range")
+    expect_err(["autotune", "estimate", "eco", "watchdog=-1"], "out of range")
     rm(P(CO_LIMITS_PATH))
     st = run(["autotune", "start", "eco", "step=9"])
     assert st["phase"] == "co" and st["params"]["colimit"] == -40 and st["params"]["margin"] == 3 and st["params"]["step"] == 9 and st["parallel"]
-    assert st["params"]["single"] == 1
+    assert st["params"]["single"] == 1 and st["params"]["watchdog"] == 1 and "watchdog" not in st   # the CLI never arms it
     assert st["eta"]["remaining_s"] == 8 * 9 + 60 + 300 + S and st["eta"]["total_s"] == 8 * 9 + 24 + 60 + 300 + S, st["eta"]
     steps, singles = 0, []
     for _i in range(200):
@@ -3460,8 +3675,117 @@ def selftest():
     assert not replies[2]["ok"] and "serve" in replies[2]["error"]
     assert not replies[3]["ok"]
     assert replies[4]["ok"] and replies[4]["data"]["co"][7] == -3
+    selftest_watchdog()
     selftest_variants()
     print("selftest ok (%s)" % ROOT)
+
+
+def selftest_watchdog():
+    """The hardware watchdog on the fake device (never a real one): armed only while a run goes on under serve,
+    keepalives, magic close and check at done/abort/end of input/SIGTERM, never armed when it could not be stopped."""
+    global WD_PET_SEC
+    import io
+    import signal
+    transcript = lambda: open(P(Fake.WD_DEV), "rb").read()      # "\0" keepalive, "V" magic, "C" close
+    state = lambda: read_text(Fake.WD_SYS + "/state")
+    FAKE.wd_files()
+
+    def setting(key, value):
+        FAKE.s[key] = value
+        FAKE.save()
+
+    def serve(requests):
+        open(P(Fake.WD_DEV), "wb").close()
+        stdin, stdout = sys.stdin, sys.stdout
+        sys.stdin, sys.stdout = io.StringIO("".join(json.dumps(r) + "\n" for r in requests)), io.StringIO()
+        try:
+            run(["serve"])
+            return [(json.loads(l).get("data") or {}).get("watchdog") for l in sys.stdout.getvalue().splitlines()]
+        finally:
+            sys.stdin, sys.stdout = stdin, stdout
+    # direct: armed, keepalives from the thread, magic close, then nothing more
+    pet, WD_PET_SEC = WD_PET_SEC, 0.01
+    try:
+        wd = Watchdog()
+        wd.arm()
+        assert wd.status == "armed (60 s)" and state() == "active", wd.status
+        for _i in range(300):
+            if b"\0" in transcript():
+                break
+            time.sleep(0.01)
+        assert b"\0" in transcript(), "no keepalive"
+        assert wd.disarm() and transcript().endswith(b"VC") and state() == "inactive" and wd.status == "disarmed"
+        n = len(transcript())
+        time.sleep(0.05)
+        assert len(transcript()) == n, "keepalive after the magic close"
+        # a driver that keeps running after the magic close: reopened and kept alive, never left without keepalive
+        wd.arm()
+        setting("wd_deaf", True)
+        assert not wd.disarm() and state() == "active" and wd.status.startswith("ERROR") and wd.fd is not None, wd.status
+        n = len(transcript())
+        for _i in range(300):
+            if len(transcript()) > n:
+                break
+            time.sleep(0.01)
+        assert transcript()[n:] and transcript()[n:].strip(b"\0") == b"", transcript()   # keepalives go on
+        setting("wd_deaf", False)
+        assert wd.disarm(final=True) and state() == "inactive"
+        wd.arm()                                                    # serve exiting: never armed again
+        assert wd.fd is None and state() == "inactive"
+    finally:
+        WD_PET_SEC = pet
+    # never armed when it could not be stopped for sure, or when it is not ours
+    for key, value, why in (("nowayout", "1", "nowayout"), ("state", "active", "already active"), ("timeout", "15", "shorter")):
+        with open(P(Fake.WD_SYS + "/" + key), "w") as fh:
+            fh.write(value + "\n")
+        open(P(Fake.WD_DEV), "wb").close()
+        wd = Watchdog()
+        wd.arm()
+        assert wd.fd is None and why in wd.status and transcript() == b"", (key, wd.status)
+        with open(P(Fake.WD_SYS + "/" + key), "w") as fh:
+            fh.write({"nowayout": "0", "state": "inactive", "timeout": "60"}[key] + "\n")
+    setting("wd_busy", True)
+    wd = Watchdog()
+    wd.arm()
+    assert wd.fd is None and "in use" in wd.status and state() == "inactive", wd.status
+    setting("wd_busy", False)
+    setting("wd_no_magic", True)                                    # opened (= started), then closed: it stops
+    open(P(Fake.WD_DEV), "wb").close()
+    wd = Watchdog()
+    wd.arm()
+    assert wd.fd is None and "no magic close" in wd.status and state() == "inactive" and transcript() == b"VC", wd.status
+    setting("wd_no_magic", False)
+    # under serve: armed after start and at every step, disarmed at done; refused steps do not arm it again
+    marks = serve([["autotune", "start", "eco", "step=3", "reuse=0"]] + [["autotune", "step"]] * 25)
+    done = len([m for m in marks if m == "armed (60 s)"])
+    assert done == 1 + 8 + 1 + 7 and marks[done] == "disarmed" and marks[done + 1:] == [None] * (25 - done), marks
+    assert transcript().replace(b"\0", b"") == b"VC" and state() == "inactive" and run(["autotune", "status"])["phase"] == "done"
+    run(["autotune", "abort"])
+    # abort, end of input (GUI closed), watchdog=0
+    assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
+        "armed (60 s)", "armed (60 s)", "disarmed"] and transcript() == b"VC"
+    assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"]]) == ["armed (60 s)"] * 2
+    assert transcript() == b"VC" and state() == "inactive"
+    run(["autotune", "abort"])
+    assert serve([["autotune", "start", "eco", "step=3", "reuse=0", "watchdog=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
+        "unavailable: disabled (watchdog=0)"] * 3 and transcript() == b""
+    # SIGTERM (logout, shutdown) to a real `serve` process on the fake root: magic close, then out
+    open(P(Fake.WD_DEV), "wb").close()
+    pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          env=dict(os.environ, RYZENCTL_ROOT=ROOT, RYZENCTL_FAKE_FAMILY="granite", LANGUAGE="C", LC_ALL="C.UTF-8"),
+                          text=True)
+    try:
+        pr.stdin.write(json.dumps(["autotune", "start", "eco", "step=3", "reuse=0"]) + "\n")
+        pr.stdin.flush()
+        assert json.loads(pr.stdout.readline())["data"]["watchdog"] == "armed (60 s)" and state() == "active"
+        pr.send_signal(signal.SIGTERM)
+        assert pr.wait(20) == 128 + signal.SIGTERM
+    finally:
+        if pr.poll() is None:
+            pr.kill()
+    assert transcript() == b"VC" and state() == "inactive", transcript()
+    FAKE.s = json.loads(open(FAKE.path).read())                   # the child changed the fake state on file
+    run(["autotune", "abort"])
 
 
 def selftest_variants():
