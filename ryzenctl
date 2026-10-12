@@ -941,7 +941,7 @@ def cmd_unlock(ctx, args):
     if args not in (["on"], ["off"]):
         raise Err(_("usage: unlock on|off"))
     s = load_settings()
-    if args == ["off"] and s["profile"] == "boost":   # it would stay applied (and reapplied at boot) without unlock
+    if args == ["off"] and is_boost(s["profile"], s):   # it would stay applied (and reapplied at boot) without unlock
         raise Err(_("Boost is the selected mode and requires unlock: switch to another mode first"))
     s["unlock"] = args == ["on"]
     save_settings(s)
@@ -951,10 +951,16 @@ def cmd_unlock(ctx, args):
     return _("limits back to the factory caps")
 
 
+def is_boost(name, s):
+    """Boost, or a custom calibration based on it."""
+    return name == "boost" or s.get("calibrated", {}).get(name, {}).get("base") == "boost"
+
+
 def check_boost(name):
     """Boost puts limits and FMax at the unlock ceilings by design: creating, calibrating, selecting
     or applying it (also at boot) is refused while unlock is off."""
-    if name == "boost" and not load_settings()["unlock"]:
+    s = load_settings()
+    if is_boost(name, s) and not s["unlock"]:
         raise Err(_("Boost requires unlock (ryzenctl unlock on; in the GUI: Preferences, \"Allow beyond the stock values\")"))
 
 
@@ -1029,7 +1035,7 @@ def cmd_status(ctx, args):
         "power": power_get(), "boost": boost_get(),
         "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
         "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
-        "trusted": trust_user() in trust_users(),
+        "trusted": trust_user() in trust_users(), "calibrated": s.get("calibrated", {}),
         "crashed": crashed_info(), "caps": caps(base, s["unlock"]) if base else None,
         "active": os.path.exists(marker("active")),
     }
@@ -1223,9 +1229,10 @@ def cmd_profile(ctx, args):
         if args[1] == "baseline" or not os.path.exists(path):
             raise Err(_("profile '%s' does not exist or is reserved") % args[1])
         os.remove(path)
+        s.get("calibrated", {}).pop(args[1], None)
         if s["profile"] == args[1]:
             s["profile"] = None
-            save_settings(s)
+        save_settings(s)
         return {"deleted": args[1]}
     raise Err(_("usage: profile list | show <name> | save <name> <line>… | delete <name>"))
 
@@ -1601,6 +1608,8 @@ def co_limits_reusable(params):
 
 
 def co_limits_save(st):
+    if st.get("save_as"):   # custom calibration: its search stays in its own state, Eco/Auto/Boost keep the shared one
+        return
     write_atomic(P(CO_LIMITS_PATH), json.dumps({"results": st["results"], "unstable": st["unstable"],
                                                 "colimit": st["params"]["colimit"], "samples": st.get("samples", {}),
                                                 "method": st.get("method"), "cores": CORES,
@@ -1926,15 +1935,20 @@ def _autotune(ctx, args):
             raise Err(_("no completed calibration to save"))
         if args[1:] not in ([], ["apply"]):
             raise Err(_("usage: autotune save [apply]"))
-        cmd_profile(ctx, ["save", st["mode"]] + st["profile_lines"])
+        name = st.get("save_as") or st["mode"]
+        cmd_profile(ctx, ["save", name] + st["profile_lines"])
+        if st.get("save_as"):   # custom calibration: remembered with its base mode (GUI list, Boost's unlock rule)
+            s = load_settings()
+            s.setdefault("calibrated", {})[name] = {"base": st["mode"], "time": time.strftime("%Y-%m-%d %H:%M")}
+            save_settings(s)
         if args[1:]:
-            run(["apply", st["mode"]], ctx)
-            run(["use", st["mode"]], ctx)
+            run(["apply", name], ctx)
+            run(["use", name], ctx)
         rm(P(AT_PATH))
-        return {"phase": None, "saved": st["mode"], "applied": bool(args[1:])}
+        return {"phase": None, "saved": name, "applied": bool(args[1:])}
     if args[0] == "start":
         if len(args) < 2 or args[1] not in AT_DEFAULTS:
-            raise Err(_("usage: autotune start eco|auto [key=value…]"))
+            raise Err(_("usage: autotune start eco|auto|boost [name=<profile>] [key=value…]"))
         check_boost(args[1])
         check_cpu()
         why = co_support()
@@ -1945,13 +1959,19 @@ def _autotune(ctx, args):
             raise Err(_("Auto needs the power limits of the PM table, not readable on this CPU: use Eco or Boost"))
         if args[1] == "auto" and board_limits(base):   # the knee would sweep the motherboard's limits
             raise Err(board_limits(base))
-        params = at_params(args[1], args[2:])
+        name = next((a[5:] for a in args[2:] if a.startswith("name=")), None)   # custom: saved under its own name
+        if name is not None:
+            profile_path(name)                          # valid characters
+            if name in PRESETS or name in ("baseline", "default", "custom"):
+                raise Err(_("'%s' is a mode of its own: a custom calibration needs another name") % name)
+        params = at_params(args[1], [a for a in args[2:] if not a.startswith("name=")])
         rm(P(AT_ABORT_FLAG))
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
               "parallel": bool(params["parallel"]), "active_cores": list(range(CORES)),
               "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
               "started": time.strftime("%Y-%m-%d %H:%M"), "resumed_after_crash": False,
-              "eta_total": at_total_estimate(args[1], params)}   # fixed at start (afterwards the reuse would lower it)
+              "eta_total": at_total_estimate(args[1], params),   # fixed at start (afterwards the reuse would lower it)
+              "save_as": name}
         st.update(at_reused(args[1], params))       # limit already measured: only the final pass with this mode's margin
         if st.get("eco_from"):                      # Eco: these values already passed a final pass, no load test
             st["final"] = at_final_values(st)
@@ -3666,6 +3686,42 @@ def selftest_variants():
     assert "ppt 88" in pl and "tdc 75" in pl and "edc 150" in pl, pl
     expect_err(["preset", "auto", "show"], "motherboard limits")
     expect_err(["autotune", "start", "auto", "step=3"], "motherboard limits")
+    # ---- custom calibration: from a base mode, saved under its own name; the mode's profile and the shared
+    # CO measurement stay as they are (the user keeps the Auto that works while trying other parameters) ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-custom-")
+    FAKE = Fake("granite")
+    init_cpu()
+    run(["boot"])
+
+    def calibrate(*argv):
+        st = run(["autotune", "start"] + list(argv))
+        for _i in range(300):
+            if st["phase"] == "done":
+                return st
+            st = run(["autotune", "step"])
+        raise AssertionError(st)
+    calibrate("auto", "step=3", "reuse=0")
+    run(["autotune", "save"])
+    auto_before, shared = open(profile_path("auto")).read(), json.loads(open(P(CO_LIMITS_PATH)).read())
+    expect_err(["autotune", "start", "auto", "name=auto"], "mode of its own")
+    expect_err(["autotune", "start", "auto", "name=Bad!"], "invalid profile name")
+    st = calibrate("auto", "name=auto-2", "step=3", "reuse=0", "colimit=-20", "margin=6")
+    assert st["save_as"] == "auto-2" and st["results"] != shared["results"], st["results"]
+    assert run(["autotune", "save", "apply"])["saved"] == "auto-2"
+    after = json.loads(open(P(CO_LIMITS_PATH)).read())
+    assert open(profile_path("auto")).read() == auto_before and (after["results"], after["colimit"]) == (shared["results"], shared["colimit"])
+    st = run(["status"])
+    assert st["calibrated"]["auto-2"]["base"] == "auto" and st["profile"] == "auto-2"
+    run(["profile", "delete", "auto-2"])
+    assert "auto-2" not in run(["status"])["calibrated"]
+    # a custom Boost follows Boost's unlock rule
+    run(["unlock", "on"])
+    calibrate("boost", "name=boost-2", "step=3")
+    run(["autotune", "save", "apply"])
+    expect_err(["unlock", "off"], "requires unlock")
+    run(["default"])
+    run(["unlock", "off"])
+    expect_err(["apply", "boost-2"], "requires unlock")
 
 
 def main():

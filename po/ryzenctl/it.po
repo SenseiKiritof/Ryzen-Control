@@ -291,8 +291,11 @@ msgid "usage: autotune save [apply]"
 msgstr "uso: autotune save [apply]"
 
 #: ryzenctl
-msgid "usage: autotune start eco|auto [key=value…]"
-msgstr "uso: autotune start eco|auto [chiave=valore…]"
+msgid "usage: autotune start eco|auto|boost [name=<profile>] [key=value…]"
+msgstr "uso: autotune start eco|auto|boost [name=<profilo>] [chiave=valore…]"
+
+msgid "'%s' is a mode of its own: a custom calibration needs another name"
+msgstr "'%s' è una modalità a sé: una calibrazione personalizzata ha bisogno di un altro nome"
 
 #: ryzenctl
 #, python-format
