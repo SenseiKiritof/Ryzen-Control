@@ -173,7 +173,8 @@ def fused_core_map(groups):
         if present == 0xFFFFFFFF:
             return None
         ccd_down = ((present >> 30) & 3) | ((down & 0x3F) << 2)
-        physical = [b for b in range(2) if ((present >> 22) & 3) & ~ccd_down >> b & 1]   # CCD0/1 present, not down
+        enabled = ((present >> 22) & 3) & ~ccd_down        # CCD0/1 present and not down
+        physical = [b for b in range(2) if enabled >> b & 1]
         if len(physical) != len(groups):
             return None
         result = [None] * CORES
@@ -278,6 +279,8 @@ class Fake:
     VARIANTS = {"granite": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0x620105},      # 9800X3D
                 "granite16": {"codename": 23, "cores": 16, "ccds": 2, "pm_version": 0x620205},   # 9950X: 2 CCDs
                 "nopm": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0},               # no PM table
+                "granite6": {"codename": 23, "cores": 6, "ccds": 1, "pm_version": 0x620105,     # 9600X: 1 CCD × 6
+                             "disabled": [[2, 5]]},
                 "granite12": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205,   # 9900X: 2 CCDs × 6
                               "disabled": [[2, 5], [0, 7]]},   # disabled slots of each CCD (core fuses)
                 "fusebad": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205,    # fuses that contradict
@@ -438,8 +441,11 @@ class Fake:
         t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
         t[PM["edc_limit"]] = s["edc"]
         layout = fam["pm_cores"].get(s["pm_version"])
-        for c in range(len(self.cids) if layout else 0):   # per-core temperatures, a few degrees apart like a real idle CPU
-            t[layout["temp"] + c] = s["tctl"] - 6.0 + c % 3
+        for c, (ccd, slot) in enumerate(self.slots if layout else []):   # by physical slot, like the real arrays
+            i = 8 * ccd + slot
+            t[layout["temp"] + i] = s["tctl"] - 6.0 + slot % 3      # a few degrees apart, like a real idle CPU
+            t[layout["volt"] + i] = round(1.25 + s["co"][c] * 0.003, 3)   # a negative CO lowers the voltage
+            t[layout["mhz"] + i] = s["fmax"] - 50
         return s["pm_version"], t
 
 
@@ -448,7 +454,8 @@ FAKE = Fake() if ROOT else None
 
 def read_topology():
     """Physical cores in order: [(core_id, "cpu,cpu")] from sysfs, both SMT threads of each core.
-    On Zen the core_id carries the CCD (core_id // 8) and leaves gaps for fused-off cores."""
+    On Zen the core_id carries the CCD (core_id // 8); inside a CCD it does not tell the physical slot
+    of a core when some are disabled (see core_map)."""
     cores = {}
     base = P("/sys/devices/system/cpu")
     for name in os.listdir(base) if os.path.isdir(base) else []:
@@ -950,25 +957,25 @@ def caps(base, unlock):
 
 
 def pm_cores(version, t):
-    """Per-core offsets of the PM table for this version, only for a verified layout that has room
-    for every core; otherwise None."""
+    """Per-core indices of the PM table for this version, {"volt": [index of each core], ...}, only for a
+    verified layout; otherwise None. The arrays are by physical slot (8 per CCD, disabled slots included),
+    so on CPUs with disabled cores the core map decides which entry is which core."""
     layout = family()["pm_cores"].get(version) if t is not None else None
-    return layout if layout and len(t) > max(layout.values()) + CORES else None
+    phys = core_map() if layout else None
+    if not phys:
+        return None
+    idx = {k: [base + 8 * ccd + slot for ccd, slot in phys] for k, base in layout.items()}
+    return idx if max(max(v) for v in idx.values()) < len(t) else None
 
 
 def sample_cores():
     """Voltage (V) and frequency (MHz) per core from the PM table (verified layouts only); otherwise None."""
-    if FAKE:   # like a real CPU: voltages only with a verified per-core layout of its PM table
-        fam = FAMILIES.get(FAKE.s["codename"])
-        if not fam or FAKE.s["pm_version"] not in fam["pm_cores"]:
-            return None
-        return {"volt": [round(1.25 + c * 0.003, 3) for c in FAKE.s["co"]], "mhz": [FAKE.s["fmax"] - 50] * CORES}
     version, t = pm_table()
     m = pm_cores(version, t)
     if not m:
         return None
-    return {"volt": [round(t[m["volt"] + c], 3) for c in range(CORES)],
-            "mhz": [int(t[m["mhz"] + c] * 1000) if t[m["mhz"] + c] < 100 else int(t[m["mhz"] + c]) for c in range(CORES)]}
+    return {"volt": [round(t[i], 3) for i in m["volt"]],
+            "mhz": [int(t[i] * 1000) if t[i] < 100 else int(t[i]) for i in m["mhz"]]}
 
 
 def cmd_telemetry(ctx, args):
@@ -983,7 +990,7 @@ def cmd_telemetry(ctx, args):
             mhz = int(read_text("/sys/devices/system/cpu/cpu%s/cpufreq/scaling_cur_freq" % first_cpu(c))) // 1000
         except (OSError, ValueError):
             mhz = 3000 + c * 100 if FAKE else None
-        temp = round(t[m["temp"] + c], 1) if m else None
+        temp = round(t[m["temp"][c]], 1) if m else None
         cores.append({"mhz": mhz, "temp": temp})
     co = read_co()
     sample = sample_cores()
@@ -3386,6 +3393,16 @@ def selftest_variants():
             break
     assert st["phase"] == "done" and "error" not in st and not any(l.startswith("ppt") for l in st["profile_lines"]), st
     run(["autotune", "abort"])
+    # ---- one CCD with 6 cores (9600X): only CCD0 present; slots from the fuses, PM table values by slot ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-6-")
+    FAKE = Fake("granite6")           # slots 2 and 5 disabled
+    init_cpu()
+    assert CORES == 6 and co_support() is None and core_map() == [(0, 0), (0, 1), (0, 3), (0, 4), (0, 6), (0, 7)]
+    run(["boot"])
+    assert run(["co", "2", "-7"])["co"] == [0, 0, -7, 0, 0, 0] and FAKE.s["co"][2] == -7
+    temps = [c["temp"] for c in run(["telemetry"])["cores"]]
+    assert temps == [FAKE.s["tctl"] - 6.0 + s % 3 for _ccd, s in core_map()], temps   # core 2 = slot 3
+    assert sample_cores()["volt"] == [1.25, 1.25, round(1.25 - 7 * 0.003, 3), 1.25, 1.25, 1.25]
     # ---- two CCDs with 6 cores each (9900X): the physical slots come from the core fuses ----
     ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-12-")
     FAKE = Fake("granite12")          # CCD0 slots 2 and 5 disabled, CCD1 slots 0 and 7
