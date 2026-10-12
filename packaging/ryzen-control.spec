@@ -33,7 +33,7 @@ Provides:       ryzen-smu-dkms = %{version}-%{release}
 
 %description
 Ryzen Master-style control for AMD Ryzen desktop processors on Linux
-(Ryzen 9000 verified, Ryzen 7000 expected):
+(Ryzen 9000 verified, Ryzen 1000-7000 expected):
 per-core Curve Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost
 frequency and maximum temperature, power profile and motherboard fans.
 Profiles applied at boot with protection after a crash: the profile is
