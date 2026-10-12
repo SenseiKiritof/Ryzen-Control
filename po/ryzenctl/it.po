@@ -490,9 +490,6 @@ msgstr "%s non è disponibile su questa CPU"
 msgid "no verified Curve Optimizer commands for this CPU family"
 msgstr "nessun comando Curve Optimizer verificato per questa famiglia di CPU"
 
-msgid "CCDs with disabled cores: the physical core slots are unknown and a per-core value could reach another core"
-msgstr "CCD con core disattivati: le posizioni fisiche dei core sono sconosciute e un valore per core potrebbe finire su un altro core"
-
 msgid "Curve Optimizer not available on this CPU: %s"
 msgstr "Curve Optimizer non disponibile su questa CPU: %s"
 
@@ -507,3 +504,9 @@ msgstr "CO      n/d: %s"
 
 msgid "Shaper  n/a on this CPU"
 msgstr "Shaper  n/d su questa CPU"
+
+msgid "the physical position of the cores is unknown (core fuses unreadable or not matching the topology)"
+msgstr "la posizione fisica dei core è sconosciuta (fusibili dei core illeggibili o non coerenti con la topologia)"
+
+msgid "SMN read of 0x%08X not allowed"
+msgstr "lettura SMN di 0x%08X non consentita"

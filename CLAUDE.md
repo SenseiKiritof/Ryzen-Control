@@ -46,9 +46,9 @@ notification; Preferences tab; unknown fan channels in a collapsed section. Tag 
 `FAMILIES` table by codename, `TOPO`/`CORES` from the sysfs topology, CO mask with the CCD
 (`co_mask`), selftest repeated on fake variants (`Fake(variant)`, `RYZENCTL_FAKE_FAMILY`: 16 cores on
 2 CCDs, no PM table, 2×6 cores, Raphael). Step 19: Raphael (Zen 4, `verified: False`: CO and FMax,
-no PM map → limits refused); per-core CO refused on CCDs with disabled cores (`co_support`: the
-physical slots come from the fuses, which we do not read); Vermeer/Matisse left out for lack of
-reliable IDs/maps. Next: phase 5 steps 20–21, phase 6 tray icon
+no PM map → limits refused); CCDs with disabled cores: the physical slots come from the core fuses
+(SMN reads, ZenStates-Core addresses; `core_map`), refused only if unreadable or inconsistent;
+Vermeer/Matisse left out for lack of reliable IDs/maps. Next: phase 5 steps 20–21, phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
 
@@ -187,6 +187,7 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
 
 ## Hardware invariants (non-negotiable)
 
+- SMN: reads only, only the family's fuse addresses (`smn_read`); no SMN write, ever.
 - Strict SMU allowlist per family (`FAMILIES[codename]["cmd"]` at the top of `ryzenctl`; `smu()` never
   sends a name missing from the entry). Granite Ridge: CO MP1 0x35, PPT/TDC/EDC MP1
   0x3E/0x3C/0x3D, FMax RSMU 0x70/0x6E, Tjmax RSMU 0x59, Shaper RSMU 0xA6/0x84, CO get RSMU
@@ -195,8 +196,11 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   PBO scalar (0x5B), `smn` writes, FCLK/memory.
 - Gate: the driver's `codename` must be a key of `FAMILIES` (23 Granite Ridge verified, 20 Raphael
   not verified), otherwise total refusal (`family()`); no readable CPU topology → refusal too.
-- Per-core CO only where the physical core slot is certain: every CCD with all 8 cores enabled
-  (`co_support`); otherwise CO, calibrations and the CO step of `hwtest` are refused/skipped.
+- Per-core CO only where the physical core slot is certain (`core_map`/`co_support`): complete CCDs
+  (8 cores) map in order with no register read; CCDs with disabled cores take the enabled slots from
+  the core fuses, read through the driver's `smn` file (4-byte write = read; **never** the 8-byte
+  write) only at the fuse addresses of the family entry, and only if they match the sysfs topology;
+  otherwise CO, calibrations and the CO step of `hwtest` are refused/skipped.
 - Every SMU transaction under `flock(/run/ryzenctl/lock)` (the driver's `smu_args` is global).
 - Every write is followed by a readback; mismatch → one retry → restore of the baseline value →
   error. No automatic fallback to other IDs.
