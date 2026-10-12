@@ -486,3 +486,24 @@ msgstr "topologia della CPU non leggibile (/sys/devices/system/cpu)"
 
 msgid "%s is not available on this CPU"
 msgstr "%s non è disponibile su questa CPU"
+
+msgid "no verified Curve Optimizer commands for this CPU family"
+msgstr "nessun comando Curve Optimizer verificato per questa famiglia di CPU"
+
+msgid "CCDs with disabled cores: the physical core slots are unknown and a per-core value could reach another core"
+msgstr "CCD con core disattivati: le posizioni fisiche dei core sono sconosciute e un valore per core potrebbe finire su un altro core"
+
+msgid "Curve Optimizer not available on this CPU: %s"
+msgstr "Curve Optimizer non disponibile su questa CPU: %s"
+
+msgid "skipped: %s"
+msgstr "saltato: %s"
+
+msgid "  (family not verified on hardware yet: run hwtest)"
+msgstr "  (famiglia non ancora verificata sull'hardware: esegui hwtest)"
+
+msgid "CO      n/a: %s"
+msgstr "CO      n/d: %s"
+
+msgid "Shaper  n/a on this CPU"
+msgstr "Shaper  n/d su questa CPU"

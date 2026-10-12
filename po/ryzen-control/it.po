@@ -939,3 +939,6 @@ msgstr "Silenziose: salita 10 s, discesa 5 s, minimo fino a Tctl obiettivo −10
 
 msgid "Also in automatic mode: how much the mode touches the fans (only the channels recognised as fans)"
 msgstr "Anche in automatico: quanto la modalità tocca le ventole (solo i canali riconosciuti come ventola)"
+
+msgid "Curve Optimizer not available on this CPU: %s"
+msgstr "Curve Optimizer non disponibile su questa CPU: %s"

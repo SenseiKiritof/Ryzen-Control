@@ -93,8 +93,21 @@ FAMILIES = {
                 "thm_limit": 10, "tctl": 11, "edc_limit": 63},   # float indices in the PM table
          # per-core arrays (first index of core 0), only for versions with a verified layout
          "pm_cores": {0x620105: {"volt": 309, "temp": 317, "mhz": 325}},   # gnr-smu, CONFIRMED
-         "tjmax_max": 95},
+         "tjmax_max": 95, "verified": True},
+    20: {"name": "Raphael",           # Ryzen 7000 (Zen 4): not verified on hardware yet
+         # ZenStates-Core Zen4Settings: the same IDs that Zen5Settings inherits and that are verified on
+         # Granite Ridge above; no Curve Shaper (Zen 5 only)
+         "cmd": {"co_set": (MP1, 0x35), "co_get": (RSMU, 0xD5),
+                 "ppt_set": (MP1, 0x3E), "tdc_set": (MP1, 0x3C), "edc_set": (MP1, 0x3D),
+                 "fmax_set": (RSMU, 0x70), "fmax_get": (RSMU, 0x6E), "tjmax_set": (RSMU, 0x59)},
+         # no verified map of the limits in its PM table (0x54xxxx; ZenStates-Core has only clocks and
+         # voltages): PPT/TDC/EDC/Tjmax have no readback, so they are refused (fail closed)
+         "pm_prefix": None, "pm": None, "pm_cores": {},
+         "tjmax_max": 95, "verified": False},
 }
+# Not in the table, from the same sources: Vermeer (Ryzen 5000, codename 12) has no reliable CO
+# readback ID (Zen2Settings marks GetDldoPsmMargin 0x7C "Not sure") and no FMax set command;
+# Matisse (Ryzen 3000, 4) has no Curve Optimizer. Both need a verified PM table map for the limits.
 SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
               0xFD: "REJECTED_PREREQ", 0xFC: "BUSY", 0xFB: "TIMEOUT", 0xFA: "INVALID_ARG",
               0xF9: "UNSUPPORTED_PLATFORM", 0xF8: "BUFFER", 0xF7: "MMAP", 0xF6: "PCI"}
@@ -190,7 +203,9 @@ class Fake:
 
     VARIANTS = {"granite": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0x620105},      # 9800X3D
                 "granite16": {"codename": 23, "cores": 16, "ccds": 2, "pm_version": 0x620205},   # 9950X: 2 CCDs
-                "nopm": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0}}               # no PM table
+                "nopm": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0},               # no PM table
+                "granite12": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205},  # 9900X: 2 CCDs × 6
+                "raphael": {"codename": 20, "cores": 8, "ccds": 1, "pm_version": 0x540104}}     # 7700X
     FAN_DIR = HWMON + "/hwmon0"
 
     def __init__(self, variant=None):
@@ -324,6 +339,8 @@ class Fake:
         fam = FAMILIES.get(s["codename"])
         if not s["pm_version"] or not fam:
             return None, None
+        if not fam["pm"]:   # a table this program cannot read: only its version
+            return s["pm_version"], [0.0] * 457
         PM = fam["pm"]
         t = [0.0] * 457
         t[PM["ppt_limit"]], t[PM["ppt"]] = s["ppt"], 61.0
@@ -396,13 +413,27 @@ def pm_table():
     except Err:
         return None, None
     version, t = FAKE.pm() if FAKE else pm_raw()
-    if version is None or (version >> 16) != prefix:
+    if version is None or prefix is None or (version >> 16) != prefix:
         return None, None
     return version, t
 
 
 def check_cpu():
     return family()
+
+
+def co_support():
+    """None if the per-core Curve Optimizer can be used on this CPU, otherwise the reason."""
+    if not {"co_set", "co_get"} <= set(family()["cmd"]):
+        return _("no verified Curve Optimizer commands for this CPU family")
+    per_ccd = {}
+    for cid, _cpus in TOPO:
+        per_ccd[cid // 8] = per_ccd.get(cid // 8, 0) + 1
+    # ponytail: the SMU addresses the physical core slot of the CCD, which ZenStates-Core reads from the
+    # fuses (SMN); Linux numbers only the enabled cores, so with a disabled core the slots are unknown
+    if any(n != 8 for n in per_ccd.values()):
+        return _("CCDs with disabled cores: the physical core slots are unknown and a per-core value could reach another core")
+    return None
 
 
 def tctl():
@@ -511,6 +542,9 @@ def values_from_lines(lines):
 
 # ---- CPU state reads -----------------------------------------------------------------
 def read_co():
+    """CO per core, or None where it cannot be used safely (co_support)."""
+    if co_support():
+        return None
     return [s16(smu("co_get", co_mask(core))[0]) for core in range(CORES)]
 
 
@@ -519,6 +553,8 @@ def read_fmax():
 
 
 def read_shaper():
+    if "shaper_get" not in family()["cmd"]:
+        return None
     return [shaper_decode(w) for w in smu("shaper_get")[:5]]
 
 
@@ -533,7 +569,8 @@ def read_limits():
 def capture_lines():
     """Current state in profile format (the baseline is a profile like any other)."""
     lim = read_limits()
-    lines = ["co " + " ".join(str(v) for v in read_co()), "fmax %d" % read_fmax()]
+    co = read_co()
+    lines = (["co " + " ".join(str(v) for v in co)] if co is not None else []) + ["fmax %d" % read_fmax()]
     for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
         if pm_key in lim:
             lines.append("%s %d" % (key, round(lim[pm_key])))
@@ -658,6 +695,9 @@ def cmd_co(ctx, args):
     for v in wanted.values():
         check_range("co", v, CO_MIN, CO_MAX)
     check_cpu()
+    why = co_support()
+    if why:
+        raise Err(_("Curve Optimizer not available on this CPU: %s") % why)
     base = load_baseline()
     for core, v in wanted.items():
         write_verify(ctx, "co core %d" % core, v, lambda x, c=core: smu("co_set", co_arg(c, x)),
@@ -798,6 +838,7 @@ def cmd_status(ctx, args):
         base = None
     return {
         "cpu": fam["name"], "cores": CORES, "ccds": len({cid // 8 for cid, _cpus in TOPO}),
+        "verified": fam["verified"], "co_unavailable": co_support(),
         "smu_version": _("fake") if FAKE else read_text(SMU_DIR + "/version"),
         "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
         "co": read_co(), "fmax": read_fmax(), "shaper": read_shaper(),
@@ -858,7 +899,7 @@ def cmd_telemetry(ctx, args):
     co = read_co()
     sample = sample_cores()
     for c in range(CORES):
-        cores[c]["co"] = co[c]
+        cores[c]["co"] = co[c] if co else None
         cores[c]["volt"] = sample["volt"][c] if sample else None
     tccd = None
     if FAKE:
@@ -889,9 +930,12 @@ def fmt_status(st):
     b = st["baseline"] or {}
     bl = lambda k, u="": (" (base %s)" % f(b.get(k), u)) if k in b else ""
     lines = [
-        _("CPU %s, %d cores, SMU %s, PM table %s") % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"]),
-        "CO      " + " ".join("%+d" % v for v in st["co"]) + ("  (base %s)" % " ".join("%+d" % v for v in b["co"]) if "co" in b else ""),
-        "Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + _("  (experimental, not verified)"),
+        _("CPU %s, %d cores, SMU %s, PM table %s") % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"])
+        + ("" if st["verified"] else _("  (family not verified on hardware yet: run hwtest)")),
+        ("CO      " + " ".join("%+d" % v for v in st["co"]) + ("  (base %s)" % " ".join("%+d" % v for v in b["co"]) if "co" in b else ""))
+        if st["co"] is not None else _("CO      n/a: %s") % st["co_unavailable"],
+        ("Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + _("  (experimental, not verified)"))
+        if st["shaper"] is not None else _("Shaper  n/a on this CPU"),
         "FMax    %s MHz%s" % (f(st["fmax"]), bl("fmax", " MHz")),
         _("Limits  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s") % (
             f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
@@ -1041,7 +1085,7 @@ PRESETS = {
 
 def preset_lines(name, base):
     pr = PRESETS[name]
-    lines = ["co " + " ".join(str(v) for v in base.get("co", [0] * CORES))]   # presets do not touch the CO
+    lines = ["co " + " ".join(str(v) for v in base["co"])] if "co" in base else []   # presets do not touch the CO
     for key, floor in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
         if key in base:
             lines.append("%s %d" % (key, max(floor, round(base[key] * pr[key]))))
@@ -1687,6 +1731,9 @@ def _autotune(ctx, args):
             raise Err(_("usage: autotune start eco|auto [key=value…]"))
         check_boost(args[1])
         check_cpu()
+        why = co_support()
+        if why:   # every calibration measures the CO
+            raise Err(_("Curve Optimizer not available on this CPU: %s") % why)
         base = load_baseline()
         params = at_params(args[1], args[2:])
         rm(P(AT_ABORT_FLAG))
@@ -2463,17 +2510,19 @@ def cmd_hwtest(ctx, args):
     check_cpu()
     base = load_baseline()
     last = CORES - 1   # the last core (7 on 8 cores)
-    steps = [("co", [str(last), str(max(CO_MIN, base["co"][last] - 3))], [str(last), str(base["co"][last])]),
+    no_co = co_support()
+    steps = [("co", [str(last), str(max(CO_MIN, base["co"][last] - 3))], [str(last), str(base["co"][last])]) if not no_co
+             else ("co", None, _("skipped: %s") % no_co),
              ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])])]
     for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
         if key in base:
             steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
         else:
-            steps.append((key, None, None))
+            steps.append((key, None, _("skipped: no baseline (PM table missing)")))
     results, failed = {}, False
     for key, test, restore in steps:
         if test is None:
-            results[key] = _("skipped: no baseline (PM table missing)")
+            results[key] = restore   # the reason of the skip
             continue
         try:
             run([key] + test, ctx)
@@ -3237,6 +3286,37 @@ def selftest_variants():
         expect_err(argv, "PM table")
     assert run(["co", "0", "-5"])["co"][0] == -5 and run(["fmax", "5000"])["fmax"] == 5000
     assert run(["telemetry"])["cores"][0]["temp"] is None and run(["status"])["limits"]["ppt"] is None
+    # ---- two CCDs with 6 cores each (9900X): the physical core slots are unknown, no per-core CO ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-12-")
+    FAKE = Fake("granite12")
+    init_cpu()
+    assert CORES == 12 and TOPO[6][0] == 8 and co_support() and "disabled cores" in co_support()
+    st = run(["status"])
+    assert st["co"] is None and st["co_unavailable"] and "CO      n/a" in fmt_status(st)
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert "co" not in base and base["fmax"] == 5225 and base["ppt"] == 162, base
+    expect_err(["co", "0", "-5"], "disabled cores")
+    expect_err(["co", "all", "-5"], "disabled cores")
+    expect_err(["autotune", "start", "auto", "step=3"], "disabled cores")
+    assert not any(l.startswith("co ") for l in run(["preset", "quiet", "show"])["lines"])
+    assert run(["fmax", "5000"])["fmax"] == 5000 and run(["ppt", "150"])["ppt"] == 150.0
+    r = run(["hwtest"])
+    assert r["co"].startswith("skipped") and r["fmax"].startswith("ok") and r["esito"] == "ok", r
+    assert all(c["co"] is None for c in run(["telemetry"])["cores"])
+    # ---- Raphael (Ryzen 7000): IDs of ZenStates-Core, not verified, no readable map of the limits ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-raphael-")
+    FAKE = Fake("raphael")
+    init_cpu()
+    st = run(["status"])
+    assert st["cpu"] == "Raphael" and not st["verified"] and st["shaper"] is None and "not verified" in fmt_status(st)
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert base["co"] == [0] * 8 and not any(k in base for k in ("ppt", "tdc", "edc", "tjmax")), base
+    assert run(["co", "3", "-7"])["co"][3] == -7 and run(["fmax", "5000"])["fmax"] == 5000
+    for argv in (["ppt", "100"], ["tjmax", "80"]):
+        expect_err(argv, "PM table")
+    expect_err(["shaper", "raw"], "not available")
 
 
 def main():

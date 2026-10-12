@@ -1557,6 +1557,8 @@ class CurvePage(Page):
     def __init__(self, win):
         super().__init__(win, CO_HELP)
         self.loading = False
+        self.missing = label("", ["warning"], wrap=True, visible=False)   # why the CO cannot be used on this CPU
+        self.body.append(self.missing)
         self.all = Param(_("All"), "", tooltip=CO_TIP)
         self.all.adj.connect("value-changed", self.on_all)
         self.body.append(self.all)
@@ -1568,9 +1570,12 @@ class CurvePage(Page):
 
     def refresh(self, st):
         caps = st.get("caps")
-        self.bar.set_sensitive(bool(caps))
-        self.set_sensitive(bool(caps))
-        if not caps:
+        why = st.get("co_unavailable") if st.get("co") is None else None
+        self.missing.set_text(_("Curve Optimizer not available on this CPU: %s") % why if why else "")
+        self.missing.set_visible(bool(why))
+        for w in [self.all, self.bar] + self.cores:
+            w.set_sensitive(bool(caps) and not why)
+        if not caps or why:
             return
         self.loading = True
         lo, hi = caps["co"]
