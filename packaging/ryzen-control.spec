@@ -2,8 +2,8 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.4.5
-Release:        3%{?dist}
+Version:        0.5.0
+Release:        1%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -123,6 +123,11 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-1
+- Other Ryzen CPUs: per-family SMU allowlist (Granite Ridge verified, other Ryzen 9000 and
+  Raphael expected), cores from the system topology, core fuses for CCDs with disabled cores;
+  README table of the processors and the hwtest procedure to verify a new one
+
 * Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.4.5-3
 - Per-core Curve Optimizer also on CPUs with disabled cores (physical positions from the core
   fuses, read-only); the GUI shows and uses only the active cores and the CPU family
