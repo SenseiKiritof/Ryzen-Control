@@ -2,7 +2,7 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.4.4
+Version:        0.4.5
 Release:        1%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
@@ -122,6 +122,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.4.5-1
+- Groundwork for other Ryzen CPUs: per-family SMU allowlist and PM table, cores from the system
+  topology, Curve Optimizer mask with the CCD; nothing changes on the 9800X3D
+
 * Sun Oct 11 2026 senseikiritof <tonifede98@gmail.com> - 0.4.4-1
 - Eco reuses the undervolt validated by Auto/Boost with the Eco preset (instant when a recorded
   final pass covers it); Boost only with "Allow beyond the stock values"; unknown fan channels in

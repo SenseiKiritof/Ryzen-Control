@@ -31,8 +31,8 @@ msgstr "driver ryzen_smu non caricato (%s)"
 
 #: ryzenctl
 #, python-format
-msgid "unsupported CPU (codename %d, expected Granite Ridge %d)"
-msgstr "CPU non supportata (codename %d, atteso Granite Ridge %d)"
+msgid "unsupported CPU (codename %d; supported: %s)"
+msgstr "CPU non supportata (codename %d; supportate: %s)"
 
 #: ryzenctl
 msgid "usage: baseline [show]"
@@ -480,3 +480,9 @@ msgstr "interno: %r"
 #, python-format
 msgid "unknown command: %s (available: %s)"
 msgstr "comando sconosciuto: %s (disponibili: %s)"
+
+msgid "CPU topology not readable (/sys/devices/system/cpu)"
+msgstr "topologia della CPU non leggibile (/sys/devices/system/cpu)"
+
+msgid "%s is not available on this CPU"
+msgstr "%s non è disponibile su questa CPU"

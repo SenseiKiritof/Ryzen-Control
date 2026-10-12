@@ -40,9 +40,12 @@ hardware (fft search: per-core limit −35, final pass −29 stable, PPT 114 W, 
 mV/step); Eco reuses Auto's validated CO with the Eco preset (instant when a recorded final pass
 covers it); Boost only with unlock (unlock ceilings); pump with cap or fixed speed; choice at the
 end of the calibration (Cancel / Save / Save and apply); `trust`, start at login, clickable
-notification; Preferences tab; unknown fan channels in a collapsed section. VERSION 0.4.4 (last
-tag `v0.4.3`), DKMS module `DRV_VERSION` 0.4.1. Next: phase 5 support for all
-Ryzen CPUs (`FAMILIES` table by codename, dynamic `CORES`, fail-closed gate), phase 6 tray icon
+notification; Preferences tab; unknown fan channels in a collapsed section. Tag `v0.4.5` (VERSION
+0.4.5), DKMS module `DRV_VERSION` 0.4.1. **Phase 5** (all Ryzen CPUs) in progress: step 18 committed
+(multi-variant selftest and read-only check on the real sysfs; `hwtest` on the 9800X3D pending) —
+`FAMILIES` table by codename (only Granite Ridge so far), `TOPO`/`CORES` from the sysfs topology,
+CO mask with the CCD (`co_mask`), selftest repeated on a fake 16-core/2-CCD CPU and on one without
+a PM table (`Fake(variant)`, `RYZENCTL_FAKE_FAMILY`). Next: phase 5 steps 19–21, phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
 
@@ -181,21 +184,23 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
 
 ## Hardware invariants (non-negotiable)
 
-- Strict SMU allowlist (`CMD` at the top of `ryzenctl`): CO MP1 0x35, PPT/TDC/EDC MP1
+- Strict SMU allowlist per family (`FAMILIES[codename]["cmd"]` at the top of `ryzenctl`; `smu()` never
+  sends a name missing from the entry). Granite Ridge: CO MP1 0x35, PPT/TDC/EDC MP1
   0x3E/0x3C/0x3D, FMax RSMU 0x70/0x6E, Tjmax RSMU 0x59, Shaper RSMU 0xA6/0x84, CO get RSMU
   0xD5. No other ID is sent. Never MP1 0x58–0x6F (freezes the SMU on the 9800X3D) nor MP1
   0x10 (turns off the display). Never voltage commands, OC mode (RSMU 0x5D), fixed VID (0x61),
   PBO scalar (0x5B), `smn` writes, FCLK/memory.
-- Gate: `codename` must be 23 (Granite Ridge), otherwise total refusal. (phase 5: codename in
-  `FAMILIES`, each family with its own allowlist; outside the table total refusal)
+- Gate: the driver's `codename` must be a key of `FAMILIES` (today only 23, Granite Ridge),
+  otherwise total refusal (`family()`); no readable CPU topology → refusal too.
 - Every SMU transaction under `flock(/run/ryzenctl/lock)` (the driver's `smu_args` is global).
 - Every write is followed by a readback; mismatch → one retry → restore of the baseline value →
   error. No automatic fallback to other IDs.
 - Floors: PPT ≥ 45 W, TDC ≥ 30 A, EDC ≥ 45 A (PPT 0 locks the CPU at 606 MHz). CO/Shaper −50..+30,
   FMax 3000..baseline(+200 unlocked), Tjmax 60..min(baseline, 95). The constants live at the top
   of `ryzenctl` and are calibration knobs, not to be scattered around.
-- PM table values read only if `pm_table_version>>16 == 0x62`; PM table absent →
-  PPT/TDC/EDC/Tjmax refused (fail closed), CO/FMax/Shaper ok.
+- PM table values read only if `pm_table_version>>16` is the family's `pm_prefix` (0x62), per-core
+  arrays only for a version in its `pm_cores` (0x620105); PM table absent → PPT/TDC/EDC/Tjmax
+  refused (fail closed), CO/FMax/Shaper ok.
 - Profile names only `[a-z0-9_-]{1,32}`, `baseline` reserved. State files written atomically
   (`write_atomic`).
 
