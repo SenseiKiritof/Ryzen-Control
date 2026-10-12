@@ -29,15 +29,11 @@ def _(s):
 
 
 # ---- Calibration knobs (all here, do not scatter them) ------------------------------
-CORES = 8                      # 9800X3D: 1 CCD, 8 cores, no fused-off core
-GRANITE_RIDGE = 23             # codename index of the ryzen_smu driver
-PM_FAMILY = 0x62               # pm_table_version >> 16 — ponytail: family heuristic,
-                               # map measured only on 0x620105 (gnr-smu)
-PM = {"ppt_limit": 2, "ppt": 3, "tdc_limit": 8, "tdc": 9,
-      "thm_limit": 10, "tctl": 11, "edc_limit": 63}   # float indices in the PM table
+# What depends on the processor (SMU IDs, PM table, maximum Tjmax) is in FAMILIES below; the core
+# count comes from the sysfs topology (TOPO, CORES).
 CO_MIN, CO_MAX = -50, 30       # Curve Optimizer and Curve Shaper
 FMAX_MIN, FMAX_UNLOCK_EXTRA = 3000, 200
-TJMAX_MIN, TJMAX_ABS_MAX = 60, 95
+TJMAX_MIN, TJMAX_ABS_MAX = 60, 95   # TJMAX_ABS_MAX: never above it, whatever the family says
 PPT_MIN, TDC_MIN, EDC_MIN = 45, 30, 45           # W, A, A — never 0: PPT 0 locks the CPU at 606 MHz
 UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC = 230, 160, 230
 READBACK_TOL = 0.6             # W/A: the limits come back as floats from the PM table
@@ -71,19 +67,33 @@ def P(path):
     return ROOT + path
 
 
-# ---- SMU allowlist: nothing else is ever sent ----------------------------------------
+# ---- CPU families: one strict SMU allowlist per family, nothing else is ever sent -----
+# Indexed by the codename of the ryzen_smu driver; a codename that is not here is refused in full
+# (fail closed). A family without a key does not have that function (the command is refused, its
+# ID is never sent). Entries come from ZenStates-Core/ryzen_smu and count as supported only after
+# a `hwtest` on real hardware (phase 5).
 MP1, RSMU = "mp1_smu_cmd", "rsmu_cmd"
-CMD = {
-    "co_set": (MP1, 0x35),      # SetDldoPsmMargin: core<<20 | margin&0xFFFF
-    "ppt_set": (MP1, 0x3E),     # mW
-    "tdc_set": (MP1, 0x3C),     # mA
-    "edc_set": (MP1, 0x3D),     # mA
-    "co_get": (RSMU, 0xD5),     # GetDldoPsmMargin: arg0 = core<<20
-    "fmax_set": (RSMU, 0x70),   # SetBoostLimitFrequencyAllCores, MHz
-    "fmax_get": (RSMU, 0x6E),   # GetBoostLimitFrequency
-    "tjmax_set": (RSMU, 0x59),  # SetTctlMax, °C
-    "shaper_set": (RSMU, 0xA6),  # hi<<24 | med<<16 | lo<<8 | 0x80 | tier
-    "shaper_get": (RSMU, 0x84),  # 5 words, one per tier
+FAMILIES = {
+    23: {"name": "Granite Ridge",     # Ryzen 9000 (Zen 5): hwtest ok on the 9800X3D, SMU 98.81.0
+         "cmd": {
+             "co_set": (MP1, 0x35),      # SetDldoPsmMargin: core mask (co_mask) | margin&0xFFFF
+             "ppt_set": (MP1, 0x3E),     # mW
+             "tdc_set": (MP1, 0x3C),     # mA
+             "edc_set": (MP1, 0x3D),     # mA
+             "co_get": (RSMU, 0xD5),     # GetDldoPsmMargin: arg0 = core mask
+             "fmax_set": (RSMU, 0x70),   # SetBoostLimitFrequencyAllCores, MHz
+             "fmax_get": (RSMU, 0x6E),   # GetBoostLimitFrequency
+             "tjmax_set": (RSMU, 0x59),  # SetTctlMax, °C
+             "shaper_set": (RSMU, 0xA6),  # hi<<24 | med<<16 | lo<<8 | 0x80 | tier
+             "shaper_get": (RSMU, 0x84),  # 5 words, one per tier
+         },
+         # pm_table_version >> 16 — ponytail: family heuristic, map measured only on 0x620105 (gnr-smu)
+         "pm_prefix": 0x62,
+         "pm": {"ppt_limit": 2, "ppt": 3, "tdc_limit": 8, "tdc": 9,
+                "thm_limit": 10, "tctl": 11, "edc_limit": 63},   # float indices in the PM table
+         # per-core arrays (first index of core 0), only for versions with a verified layout
+         "pm_cores": {0x620105: {"volt": 309, "temp": 317, "mhz": 325}},   # gnr-smu, CONFIRMED
+         "tjmax_max": 95},
 }
 SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
               0xFD: "REJECTED_PREREQ", 0xFC: "BUSY", 0xFB: "TIMEOUT", 0xFA: "INVALID_ARG",
@@ -103,8 +113,17 @@ def s16(v):
     return v - 0x10000 if v & 0x8000 else v
 
 
+def co_mask(core):
+    """SMU mask of physical core `core` (index in TOPO): ((ccd << 8) | (ccx << 4) | core in the CCX) << 20,
+    as ZenStates-Core builds it. ponytail: CCD = sysfs core_id // 8 and one CCX per CCD (Zen 3 and
+    later); only 1 CCD is verified on hardware, more CCDs rely on the 0xD5 readback (a wrong mask is
+    answered OK and does nothing, so the readback fails and the value is restored)."""
+    cid = TOPO[core][0]
+    return ((cid // 8) << 8 | cid % 8) << 20
+
+
 def co_arg(core, margin):
-    return (core << 20) | (margin & 0xFFFF)
+    return co_mask(core) | (margin & 0xFFFF)
 
 
 def shaper_arg(tier, lo, med, hi):
@@ -164,26 +183,47 @@ def pm_raw():
 
 # ---- Fake backend (selftest, RYZENCTL_ROOT, GUI --mock) ------------------------------
 class Fake:
-    """Simulates the SMU, PM table, k10temp and power profile of a 9800X3D. State on file
-    so that several CLI invocations share it. `drop` = next writes accepted but
-    ignored (readback test). `log` records the markers present at each write."""
+    """Simulates the SMU, PM table, topology, k10temp and power profile of a CPU of the variant
+    in RYZENCTL_FAKE_FAMILY (default: a 9800X3D). State on file so that several CLI invocations
+    share it. `drop` = next writes accepted but ignored (readback test). `log` records the
+    markers present at each write."""
 
-    DEFAULT = {"codename": GRANITE_RIDGE, "co": [0] * CORES, "fmax": 5225,
-               "ppt": 162.0, "tdc": 120.0, "edc": 180.0, "thm": 95.0,
-               "shaper": [0x80 | t for t in range(5)], "tctl": 52.0, "power": "performance",
-               "pm_version": 0x620105, "drop": 0, "log": [], "tctl_base": 52.0, "cmdline": "quiet",
-               # simulated fans: 1 radiator fan, 2 AIO pump, 3 3-pin fan (does not respond to the PWM)
-               "fans": {"1": {"kind": "fan", "rpm": 1200}, "2": {"kind": "pump", "rpm": 2800},
-                        "3": {"kind": "uncontrollable", "rpm": 900}},
-               # simulated autotune: below these CO values the core is unstable; boot_id changes at each reboot()
-               "co_limits": {"7": -15, "3": -25}, "boot_id": "boot-1"}
+    VARIANTS = {"granite": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0x620105},      # 9800X3D
+                "granite16": {"codename": 23, "cores": 16, "ccds": 2, "pm_version": 0x620205},   # 9950X: 2 CCDs
+                "nopm": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0}}               # no PM table
     FAN_DIR = HWMON + "/hwmon0"
 
-    def __init__(self):
+    def __init__(self, variant=None):
+        v = self.VARIANTS[variant or os.environ.get("RYZENCTL_FAKE_FAMILY") or "granite"]
+        per = v["cores"] // v["ccds"]
+        self.cids = [(c // per) * 8 + c % per for c in range(v["cores"])]   # sysfs core_id: CCD n starts at 8n
+        self.default = {"codename": v["codename"], "co": [0] * v["cores"], "fmax": 5225,
+                        "ppt": 162.0, "tdc": 120.0, "edc": 180.0, "thm": 95.0,
+                        "shaper": [0x80 | t for t in range(5)], "tctl": 52.0, "power": "performance",
+                        "pm_version": v["pm_version"], "drop": 0, "log": [], "tctl_base": 52.0, "cmdline": "quiet",
+                        # simulated fans: 1 radiator fan, 2 AIO pump, 3 3-pin fan (does not respond to the PWM)
+                        "fans": {"1": {"kind": "fan", "rpm": 1200}, "2": {"kind": "pump", "rpm": 2800},
+                                 "3": {"kind": "uncontrollable", "rpm": 900}},
+                        # simulated autotune: below these CO values the core is unstable; boot_id changes at each reboot()
+                        "co_limits": {"7": -15, "3": -25}, "boot_id": "boot-1"}
         self.path = P("/fake_smu.json")
-        self.s = json.loads(open(self.path).read() if os.path.exists(self.path) else json.dumps(self.DEFAULT))
+        self.s = json.loads(open(self.path).read() if os.path.exists(self.path) else json.dumps(self.default))
         if not os.path.exists(P(self.FAN_DIR + "/name")):
             self._make_hwmon()
+        if not os.path.exists(P("/sys/devices/system/cpu/cpu0")):
+            for c, cid in enumerate(self.cids):   # both SMT threads: cpuN and cpuN+cores
+                for cpu in (c, c + len(self.cids)):
+                    d = P("/sys/devices/system/cpu/cpu%d/topology" % cpu)
+                    os.makedirs(d, exist_ok=True)
+                    with open(d + "/core_id", "w") as fh:
+                        fh.write(str(cid))
+
+    def core(self, mask):
+        """Core index addressed by an SMU core mask, or None: a wrong mask (e.g. 8 << 20 on two CCDs)
+        is answered OK by a real SMU and does nothing."""
+        ccd, ccx, core = (mask >> 28) & 0xF, (mask >> 24) & 0xF, (mask >> 20) & 0xF
+        cid = ccd * 8 + core
+        return self.cids.index(cid) if ccx == 0 and core < 8 and cid in self.cids else None
 
     def _make_hwmon(self):
         d = P(self.FAN_DIR)
@@ -239,13 +279,16 @@ class Fake:
     def smu(self, mailbox, cmd, args):
         a = args[0] if args else 0
         s = self.s
+        CMD = FAMILIES[s["codename"]]["cmd"]
         if (mailbox, cmd) == CMD["co_set"]:
-            self._write(lambda: s["co"].__setitem__((a >> 20) & 0xF, s16(a)))
+            c = self.core(a)
+            self._write(lambda: c is not None and s["co"].__setitem__(c, s16(a)))
         elif (mailbox, cmd) in (CMD["ppt_set"], CMD["tdc_set"], CMD["edc_set"]):
             key = {CMD["ppt_set"]: "ppt", CMD["tdc_set"]: "tdc", CMD["edc_set"]: "edc"}[(mailbox, cmd)]
             self._write(lambda: s.__setitem__(key, a / 1000.0))
         elif (mailbox, cmd) == CMD["co_get"]:
-            return 1, [s["co"][(a >> 20) & 0xF] & 0xFFFFFFFF, 0, 0, 0, 0, 0]
+            c = self.core(a)
+            return 1, [(s["co"][c] if c is not None else 0) & 0xFFFFFFFF, 0, 0, 0, 0, 0]
         elif (mailbox, cmd) == CMD["fmax_set"]:
             self._write(lambda: s.__setitem__("fmax", a & 0xFFFFF))
         elif (mailbox, cmd) == CMD["fmax_get"]:
@@ -278,23 +321,68 @@ class Fake:
 
     def pm(self):
         s = self.s
-        if not s["pm_version"]:
+        fam = FAMILIES.get(s["codename"])
+        if not s["pm_version"] or not fam:
             return None, None
+        PM = fam["pm"]
         t = [0.0] * 457
         t[PM["ppt_limit"]], t[PM["ppt"]] = s["ppt"], 61.0
         t[PM["tdc_limit"]], t[PM["tdc"]] = s["tdc"], 23.0
         t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
         t[PM["edc_limit"]] = s["edc"]
-        for c in range(CORES):   # per-core temperatures (0x620105): a few degrees apart, like a real idle CPU
-            t[PM_CORE_TEMP + c] = s["tctl"] - 6.0 + c % 3
+        layout = fam["pm_cores"].get(s["pm_version"])
+        for c in range(len(self.cids) if layout else 0):   # per-core temperatures, a few degrees apart like a real idle CPU
+            t[layout["temp"] + c] = s["tctl"] - 6.0 + c % 3
         return s["pm_version"], t
 
 
 FAKE = Fake() if ROOT else None
 
 
+def read_topology():
+    """Physical cores in order: [(core_id, "cpu,cpu")] from sysfs, both SMT threads of each core.
+    On Zen the core_id carries the CCD (core_id // 8) and leaves gaps for fused-off cores."""
+    cores = {}
+    base = P("/sys/devices/system/cpu")
+    for name in os.listdir(base) if os.path.isdir(base) else []:
+        m = re.fullmatch(r"cpu(\d+)", name)
+        try:
+            cid = int(read_text("/sys/devices/system/cpu/%s/topology/core_id" % name)) if m else None
+        except (OSError, ValueError):   # offline CPU: no topology
+            cid = None
+        if cid is not None:
+            cores.setdefault(cid, []).append(int(m.group(1)))
+    return [(cid, ",".join(str(c) for c in sorted(cpus))) for cid, cpus in sorted(cores.items())]
+
+
+def init_cpu():
+    global TOPO, CORES
+    TOPO = read_topology()
+    CORES = len(TOPO)
+
+
+init_cpu()
+
+
+def family():
+    """FAMILIES entry of this CPU; any other codename is refused in full (fail closed)."""
+    try:
+        code = int(FAKE.s["codename"]) if FAKE else int(read_text(SMU_DIR + "/codename"))
+    except (OSError, ValueError):
+        raise Err(_("ryzen_smu driver not loaded (%s)") % P(SMU_DIR))
+    if code not in FAMILIES:
+        raise Err(_("unsupported CPU (codename %d; supported: %s)") % (
+            code, ", ".join("%s %d" % (f["name"], c) for c, f in sorted(FAMILIES.items()))))
+    if not CORES:
+        raise Err(_("CPU topology not readable (/sys/devices/system/cpu)"))
+    return FAMILIES[code]
+
+
 def smu(name, *args):
-    mailbox, cmd = CMD[name]
+    try:
+        mailbox, cmd = family()["cmd"][name]
+    except KeyError:   # not in this family's allowlist: never sent
+        raise Err(_("%s is not available on this CPU") % name)
     status, out = FAKE.smu(mailbox, cmd, args) if FAKE else smu_raw(mailbox, cmd, args)
     if status != 1:
         hint = _(" (PBO disabled in the BIOS? set it to Advanced/Motherboard)") if status == 0xFD else ""
@@ -303,19 +391,18 @@ def smu(name, *args):
 
 
 def pm_table():
+    try:
+        prefix = family()["pm_prefix"]
+    except Err:
+        return None, None
     version, t = FAKE.pm() if FAKE else pm_raw()
-    if version is None or (version >> 16) != PM_FAMILY:
+    if version is None or (version >> 16) != prefix:
         return None, None
     return version, t
 
 
 def check_cpu():
-    try:
-        code = int(FAKE.s["codename"]) if FAKE else int(read_text(SMU_DIR + "/codename"))
-    except (OSError, ValueError):
-        raise Err(_("ryzen_smu driver not loaded (%s)") % P(SMU_DIR))
-    if code != GRANITE_RIDGE:
-        raise Err(_("unsupported CPU (codename %d, expected Granite Ridge %d)") % (code, GRANITE_RIDGE))
+    return family()
 
 
 def tctl():
@@ -424,7 +511,7 @@ def values_from_lines(lines):
 
 # ---- CPU state reads -----------------------------------------------------------------
 def read_co():
-    return [s16(smu("co_get", core << 20)[0]) for core in range(CORES)]
+    return [s16(smu("co_get", co_mask(core))[0]) for core in range(CORES)]
 
 
 def read_fmax():
@@ -440,7 +527,7 @@ def read_limits():
     version, t = pm_table()
     if t is None:
         return {}
-    return {k: round(t[i], 1) for k, i in PM.items()}
+    return {k: round(t[i], 1) for k, i in family()["pm"].items()}
 
 
 def capture_lines():
@@ -491,7 +578,7 @@ def cap_of(base, key, unlock):
     if key not in base:
         raise Err(_("no baseline for %s (PM table missing?): write refused") % key)
     if key == "tjmax":
-        return min(base[key], TJMAX_ABS_MAX)
+        return min(base[key], family().get("tjmax_max", TJMAX_ABS_MAX), TJMAX_ABS_MAX)
     if key == "fmax":
         return base[key] + (FMAX_UNLOCK_EXTRA if unlock else 0)
     hard = {"ppt": UNLOCK_PPT, "tdc": UNLOCK_TDC, "edc": UNLOCK_EDC}[key]
@@ -702,7 +789,7 @@ def cmd_trust(ctx, args):
 
 # ---- Status ------------------------------------------------------------------------------
 def cmd_status(ctx, args):
-    check_cpu()
+    fam = check_cpu()
     lim = read_limits()
     s = load_settings()
     try:
@@ -710,7 +797,7 @@ def cmd_status(ctx, args):
     except Err:
         base = None
     return {
-        "cpu": "Granite Ridge", "cores": CORES,
+        "cpu": fam["name"], "cores": CORES, "ccds": len({cid // 8 for cid, _cpus in TOPO}),
         "smu_version": _("fake") if FAKE else read_text(SMU_DIR + "/version"),
         "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
         "co": read_co(), "fmax": read_fmax(), "shaper": read_shaper(),
@@ -735,34 +822,38 @@ def caps(base, unlock):
     return out
 
 
-PM_CORE_TEMP = 317   # 0x620105: per-core temperatures d[317..324] (gnr-smu, CONFIRMED)
-PM_CORE_VOLT = 309   # 0x620105: per-core voltage d[309..316] (gnr-smu, CONFIRMED)
-PM_CORE_MHZ = 325    # 0x620105: per-core frequency d[325..332] (gnr-smu, CONFIRMED)
+def pm_cores(version, t):
+    """Per-core offsets of the PM table for this version, only for a verified layout that has room
+    for every core; otherwise None."""
+    layout = family()["pm_cores"].get(version) if t is not None else None
+    return layout if layout and len(t) > max(layout.values()) + CORES else None
 
 
 def sample_cores():
-    """Voltage (V) and frequency (MHz) per core from the PM table, only 0x620105; otherwise None."""
+    """Voltage (V) and frequency (MHz) per core from the PM table (verified layouts only); otherwise None."""
     if FAKE:
         return {"volt": [round(1.25 + c * 0.003, 3) for c in FAKE.s["co"]], "mhz": [FAKE.s["fmax"] - 50] * CORES}
     version, t = pm_table()
-    if t is None or version != 0x620105 or len(t) <= PM_CORE_MHZ + CORES:
+    m = pm_cores(version, t)
+    if not m:
         return None
-    return {"volt": [round(t[PM_CORE_VOLT + c], 3) for c in range(CORES)],
-            "mhz": [int(t[PM_CORE_MHZ + c] * 1000) if t[PM_CORE_MHZ + c] < 100 else int(t[PM_CORE_MHZ + c]) for c in range(CORES)]}
+    return {"volt": [round(t[m["volt"] + c], 3) for c in range(CORES)],
+            "mhz": [int(t[m["mhz"] + c] * 1000) if t[m["mhz"] + c] < 100 else int(t[m["mhz"] + c]) for c in range(CORES)]}
 
 
 def cmd_telemetry(ctx, args):
     """Quick reads for the GUI monitor (1 Hz): no writes."""
     check_cpu()
     version, t = pm_table()
+    m = pm_cores(version, t)
     lim = read_limits()
     cores = []
     for c in range(CORES):
         try:
-            mhz = int(read_text("/sys/devices/system/cpu/cpu%d/cpufreq/scaling_cur_freq" % c)) // 1000
+            mhz = int(read_text("/sys/devices/system/cpu/cpu%s/cpufreq/scaling_cur_freq" % first_cpu(c))) // 1000
         except (OSError, ValueError):
             mhz = 3000 + c * 100 if FAKE else None
-        temp = round(t[PM_CORE_TEMP + c], 1) if t is not None and version == 0x620105 and len(t) > PM_CORE_TEMP + c else None
+        temp = round(t[m["temp"] + c], 1) if m else None
         cores.append({"mhz": mhz, "temp": temp})
     co = read_co()
     sample = sample_cores()
@@ -1101,12 +1192,11 @@ def run_load(args, seconds):
 
 def core_cpus(c):
     """Logical CPUs of physical core c (both SMT threads), e.g. "3,11"."""
-    if FAKE:
-        return "%d,%d" % (c, c + CORES)
-    try:
-        return read_text("/sys/devices/system/cpu/cpu%d/topology/thread_siblings_list" % c)
-    except OSError:
-        return str(c)
+    return TOPO[c][1]
+
+
+def first_cpu(c):
+    return TOPO[c][1].split(",")[0]
 
 
 def core_load_args(c, extra=(), method="all"):
@@ -1173,8 +1263,8 @@ def mce_cores_since(ts, cores):
     cpus = re.findall(r"CPU[ :]+(\d+)", r.stdout)
     if not cpus:
         return set(cores)
-    # ponytail: logical cpu → physical core = cpu % CORES (on this topology cpuN and cpuN+8 are core N)
-    return {int(c) % CORES for c in cpus} & set(cores)
+    core_of = {int(cpu): i for i, (_cid, threads) in enumerate(TOPO) for cpu in threads.split(",")}
+    return {core_of[int(c)] for c in cpus if int(c) in core_of} & set(cores)
 
 
 def co_test_parallel(cores, seconds, method="all"):
@@ -1257,7 +1347,8 @@ def co_limits_reusable(params):
     saved = co_limits_load()
     if not saved or not params.get("reuse", 1):
         return None
-    if saved.get("colimit", 0) > params["colimit"] or any(str(c) not in saved.get("results", {}) for c in range(CORES)):
+    if saved.get("colimit", 0) > params["colimit"] or len(saved.get("results", {})) != CORES \
+            or saved.get("cores", 8) != CORES:   # another CPU (files before 0.5 are all from 8-core CPUs)
         return None
     if not saved.get("method"):          # measurement from a version without the heavy method in the search: not valid
         return None
@@ -1267,7 +1358,7 @@ def co_limits_reusable(params):
 def co_limits_save(st):
     write_atomic(P(CO_LIMITS_PATH), json.dumps({"results": st["results"], "unstable": st["unstable"],
                                                 "colimit": st["params"]["colimit"], "samples": st.get("samples", {}),
-                                                "method": st.get("method"),
+                                                "method": st.get("method"), "cores": CORES,
                                                 "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"]}, indent=1))
 
 
@@ -1373,7 +1464,7 @@ def best_core():
     best, rank = 0, -1
     for c in range(CORES):
         try:
-            r = int(read_text("/sys/devices/system/cpu/cpu%d/cpufreq/amd_pstate_prefcore_ranking" % c))
+            r = int(read_text("/sys/devices/system/cpu/cpu%s/cpufreq/amd_pstate_prefcore_ranking" % first_cpu(c)))
         except (OSError, ValueError):
             r = 0
         if r > rank:
@@ -2371,7 +2462,8 @@ def cmd_hwtest(ctx, args):
     value. Continues even if a step fails; at the end reapplies the baseline."""
     check_cpu()
     base = load_baseline()
-    steps = [("co", ["7", str(max(CO_MIN, base["co"][7] - 3))], ["7", str(base["co"][7])]),
+    last = CORES - 1   # the last core (7 on 8 cores)
+    steps = [("co", [str(last), str(max(CO_MIN, base["co"][last] - 3))], [str(last), str(base["co"][last])]),
              ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])])]
     for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
         if key in base:
@@ -2489,8 +2581,10 @@ def selftest():
     global ROOT, FAKE, _T
     _T = gettext.NullTranslations()
     ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-")
-    FAKE = Fake()
-    # encodings
+    FAKE = Fake("granite")
+    init_cpu()
+    # topology and encodings: 8 cores of one CCD, core c = cpus c and c+8, mask = core << 20 (as before phase 5)
+    assert TOPO[3] == (3, "3,11") and CORES == 8
     assert co_arg(7, -30) == (7 << 20) | 0xFFE2
     assert s16(0xFFFFFFE2) == -30 and s16(0x0005) == 5
     assert shaper_arg(2, -10, -5, 3) == (3 << 24) | (0xFB << 16) | (0xF6 << 8) | 0x80 | 2
@@ -2499,7 +2593,7 @@ def selftest():
     FAKE.s["codename"] = 24
     FAKE.save()
     expect_err(["status"], "unsupported")
-    FAKE.s["codename"] = GRANITE_RIDGE
+    FAKE.s["codename"] = 23
     FAKE.save()
     # status
     st = run(["status"])
@@ -2607,9 +2701,9 @@ def selftest():
         """Simulated reboot: /run emptied, SMU back to the BIOS values."""
         for f in os.listdir(P(RUN)):
             os.remove(P(RUN + "/" + f))
-        FAKE.s.update({k: Fake.DEFAULT[k] for k in ("co", "fmax", "ppt", "tdc", "edc", "thm", "shaper")})
-        FAKE.s["co"] = list(Fake.DEFAULT["co"])
-        FAKE.s["shaper"] = list(Fake.DEFAULT["shaper"])
+        FAKE.s.update({k: FAKE.default[k] for k in ("co", "fmax", "ppt", "tdc", "edc", "thm", "shaper")})
+        FAKE.s["co"] = list(FAKE.default["co"])
+        FAKE.s["shaper"] = list(FAKE.default["shaper"])
         FAKE.save()
         FAKE._make_hwmon()                             # the BIOS reprograms the SmartFan at each boot
         FAKE.s["boot_id"] = "boot-%d" % (int(FAKE.s["boot_id"].split("-")[1]) + 1)
@@ -2706,7 +2800,7 @@ def selftest():
     reboot()
     out = run(["boot"])
     assert "baseline_error" in out
-    FAKE.s["codename"] = GRANITE_RIDGE
+    FAKE.s["codename"] = 23
     FAKE.save()
     reboot()
     run(["boot"])
@@ -3093,7 +3187,56 @@ def selftest():
     assert not replies[2]["ok"] and "serve" in replies[2]["error"]
     assert not replies[3]["ok"]
     assert replies[4]["ok"] and replies[4]["data"]["co"][7] == -3
+    selftest_variants()
     print("selftest ok (%s)" % ROOT)
+
+
+def selftest_variants():
+    """Phase 5: the same ryzenctl on a 16-core CPU with two CCDs and on a CPU whose PM table cannot be
+    read (PPT/TDC/EDC/Tjmax refused, CO/FMax fine)."""
+    global ROOT, FAKE
+    # ---- 16 cores on two CCDs (9950X) ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-16-")
+    FAKE = Fake("granite16")
+    init_cpu()
+    assert CORES == 16 and TOPO[8] == (8, "8,24") and TOPO[15] == (15, "15,31")
+    assert co_mask(7) == 7 << 20 and co_mask(8) == (1 << 8) << 20 and co_mask(15) == ((1 << 8) | 7) << 20
+    st = run(["status"])
+    assert st["cores"] == 16 and st["ccds"] == 2 and st["co"] == [0] * 16 and st["cpu"] == "Granite Ridge"
+    run(["boot"])
+    assert run(["baseline", "show"])["co"] == [0] * 16
+    assert run(["co", "15", "-10"])["co"][15] == -10           # second CCD: (1 << 8 | 7) << 20, read back
+    assert run(["co", "all", "-5"])["co"] == [-5] * 16
+    FAKE.smu(MP1, 0x35, [(8 << 20) | (-20 & 0xFFFF)])          # single-CCD mask for core 8: answered OK, does nothing
+    FAKE.save()
+    assert run(["status"])["co"][8] == -5
+    expect_err(["co", "16", "0"], "out of range")
+    run(["profile", "save", "p16", "co " + " ".join(["-3"] * 16), "ppt 150"])
+    run(["apply", "p16"])
+    assert run(["status"])["co"] == [-3] * 16 and run(["status"])["limits"]["ppt"] == 150.0
+    assert "co" not in values_from_lines([["co"] + ["0"] * 8])  # the CO line of another CPU (8 values) is ignored
+    tele = run(["telemetry"])
+    assert len(tele["cores"]) == 16 and tele["cores"][15]["temp"] is None   # no verified per-core layout for 0x620205
+    run(["default"])
+    st = run(["autotune", "start", "auto", "step=3", "reuse=0"])
+    for _i in range(300):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and len(st["final"]) == 16 and st["final"][8] == -37 and st["final"][7] == -12, st["final"]
+    assert json.loads(open(P(CO_LIMITS_PATH)).read())["cores"] == 16
+    run(["autotune", "abort"])
+    # ---- a PM table that cannot be read: fail closed for the limits ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-nopm-")
+    FAKE = Fake("nopm")
+    init_cpu()
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert base["co"] == [0] * 8 and not any(k in base for k in ("ppt", "tdc", "edc", "tjmax")), base
+    for argv in (["ppt", "100"], ["tdc", "60"], ["edc", "100"], ["tjmax", "80"]):
+        expect_err(argv, "PM table")
+    assert run(["co", "0", "-5"])["co"][0] == -5 and run(["fmax", "5000"])["fmax"] == 5000
+    assert run(["telemetry"])["cores"][0]["temp"] is None and run(["status"])["limits"]["ppt"] is None
 
 
 def main():
