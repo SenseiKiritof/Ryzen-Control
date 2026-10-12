@@ -1,20 +1,62 @@
 # Ryzen Control
 
-Ryzen Master-style control for AMD Ryzen 9000 (Granite Ridge) on Linux: per-core Curve
-Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost frequency (FMax), maximum temperature
-(Tjmax), power profile and motherboard fans. Profiles applied at boot with protection after a
-crash.
+Ryzen Master-style control for AMD Ryzen desktop processors on Linux (Ryzen 9000 verified,
+Ryzen 7000 expected: see [Processors](#processors)): per-core Curve Optimizer and Curve Shaper,
+PPT/TDC/EDC limits, boost frequency (FMax), maximum temperature (Tjmax), power profile and
+motherboard fans. Profiles applied at boot with protection after a crash.
 
 > **Warning.** Experimental software that talks directly to the processor's SMU.
 > Developed and tested on a single system: Ryzen 7 9800X3D, ASUS ROG STRIX X870E-H, Fedora 44.
-> Any other CPU is refused. A Curve Optimizer that is too negative can reboot the system (no
-> damage, but unsaved work is lost): read "Safety" before using it.
+> Processors outside the [table](#processors) are refused. A Curve Optimizer that is too
+> negative can reboot the system (no damage, but unsaved work is lost): read "Safety" before
+> using it.
 
-Status: phases 1–4 done on the development system — `ryzenctl` helper/CLI, systemd services,
-driver via DKMS, RPM package, fans, GTK4 GUI and calibrations. Next: other Ryzen CPUs, tray icon,
-deb/Arch packages (see `docs/plans/`).
+Status: phases 1–5 done on the development system — `ryzenctl` helper/CLI, systemd services,
+driver via DKMS, RPM package, fans, GTK4 GUI, calibrations, per-family support for other Ryzen
+CPUs. Next: tray icon, deb/Arch packages (see `docs/plans/`).
 
 ![Modes page: presets on the left, calibrated modes on the right](docs/screenshots/modes.png)
+
+## Processors
+
+Every family has its own SMU allowlist (`FAMILIES` at the top of `ryzenctl`, from ZenStates-Core
+and ryzen_smu): a family that is not there is refused in full, and a function the family does not
+have is refused, its command never sent. A family is **verified** once a `hwtest` on real hardware
+has written and read back each of its functions; until then it is **expected**: same guarantees
+(values ≤ the BIOS ones, readback of every write, crash-guard), but nobody has tried it yet, and
+`ryzenctl status` and the Monitor page say so.
+
+| Processors | Family (codename) | Status | Functions |
+|---|---|---|---|
+| Ryzen 9000 desktop: 9800X3D | Granite Ridge (23) | **verified** on 9800X3D, SMU 98.81.0, PM table 0x620105 | Curve Optimizer, FMax, PPT/TDC/EDC, Tjmax, voltage and temperature per core, all calibrations; Curve Shaper experimental (not verifiable) |
+| Ryzen 9000 desktop: 9600X, 9700X, 9900X, 9950X, 9900X3D, 9950X3D | Granite Ridge (23) | expected | as above; the limits are read at the PM table offsets measured on 0x620105, voltage and temperature per core only with that version; the 6-core CCDs (9600X, 9900X, 9900X3D) take the core positions from the fuses |
+| Ryzen 7000 desktop: 7600X … 7950X3D | Raphael (20) | expected | Curve Optimizer, FMax, Eco and Boost calibrations; PPT/TDC/EDC/Tjmax and Auto refused (no verified map of the limits in its PM table) |
+| Ryzen 5000 desktop | Vermeer (12) | not supported | no reliable Curve Optimizer readback, no FMax command |
+| Ryzen 1000–3000 desktop | Summit Ridge, Pinnacle Ridge, Matisse | not supported | no Curve Optimizer |
+| APUs and laptops (Ryzen G, mobile, Ryzen AI) | Raven Ridge … Strix Halo | not supported | other limits (STAPM, fast/slow PPT), often no RSMU mailbox |
+| Threadripper, EPYC | — | not supported | other interface (HSMP), out of scope |
+
+Fans depend on the motherboard (Nuvoton nct67xx chip), not on the processor.
+
+### Adding your processor
+
+If your processor is *expected*, one check on your machine moves it to *verified*. It takes a few
+seconds and restores everything, but save your work first: it lowers the Curve Optimizer of one
+core by 3 steps for a moment.
+
+1. Install (below): the service loads the driver and reads the BIOS values of this boot.
+2. `sudo ryzenctl status` — the first line shows family, cores, SMU and PM table version.
+3. `sudo ryzenctl hwtest` (or Preferences → Hardware check): each command is written slightly
+   away from the BIOS value, read back and brought back; the last line is `esito ok`, or
+   `esito FAILED` with `error:` on the step that failed. Functions the family does not have are
+   `skipped`.
+4. Open an issue with the output of `lscpu | grep 'Model name'`, `sudo ryzenctl status` and
+   `sudo ryzenctl hwtest`.
+
+A family that is not in the table is refused before any SMU command (`unsupported CPU (codename
+N…)`). Adding it needs its command IDs and PM table map from a verified source, a fake variant in
+the selftest (`RYZENCTL_FAKE_FAMILY`) and then the same `hwtest`: open an issue with the codename
+(`cat /sys/kernel/ryzen_smu_drv/codename`) and the PM table version.
 
 ## Installation
 

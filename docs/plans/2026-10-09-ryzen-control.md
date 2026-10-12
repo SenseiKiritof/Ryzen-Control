@@ -533,7 +533,7 @@ and the CO encoding; `PowerTable.cs` for the PM table offsets), ryzen_smu `smu.c
 | 18 | `refactor(ryzenctl): FAMILIES table, dynamic CORES, per-family gate` | selftest on the fake Granite Ridge identical to before + suite repeated on a fake 16-core CPU and on a fake APU without PM table; **you**: `hwtest` on the 9800X3D unchanged, `status` shows family and cores |
 | 19 | `feat(ryzenctl): Raphael/Vermeer/Matisse from ZenStates-Core` — done as rev. 14: Raphael (CO, FMax), per-core CO refused on CCDs with disabled cores, Vermeer/Matisse left out for lack of sources | selftest with the three fake entries (IDs, CO encoding with CCD, PM offsets); `hwtest` on third-party real hardware, one family at a time → goes from "expected" to "verified" |
 | 20 | `feat(gui): dynamic cores, family shown, disabled functions explained` | `--mock` with `RYZENCTL_FAKE_FAMILY` = Granite Ridge / 16 cores / APU: Curves table with 8/16 rows, Shaper disabled with reason, no error |
-| 21 | `docs: processors table in the README` | `make check`; README with the verified/expected/not supported table and the `hwtest` procedure for whoever wants to add their CPU |
+| 21 | `docs: processors table in the README` — done: README "Processors" (verified: Granite Ridge on the 9800X3D; expected: the other Ryzen 9000, Raphael; not supported: Zen 1–3 desktop, APUs/laptops, HEDT) and "Adding your processor" | `make check`; README with the verified/expected/not supported table and the `hwtest` procedure for whoever wants to add their CPU |
 
 ### Phase 6 — system tray icon (bottom right, Telegram style) → `v0.6.0`
 User request (rev. 6). `StatusNotifierItem` icon (KDE Plasma's native protocol, on GNOME the

@@ -4,7 +4,7 @@ Name:           ryzen-control
 %global drv_version 0.4.1
 Version:        0.4.5
 Release:        3%{?dist}
-Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
+Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
 Source0:        %{name}-%{version}.tar.gz
@@ -32,7 +32,8 @@ Provides:       ryzen-smu-dkms = %{version}-%{release}
 %{?systemd_requires}
 
 %description
-Ryzen Master-style control for AMD Ryzen 9000 (Granite Ridge) on Linux:
+Ryzen Master-style control for AMD Ryzen desktop processors on Linux
+(Ryzen 9000 verified, Ryzen 7000 expected):
 per-core Curve Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost
 frequency and maximum temperature, power profile and motherboard fans.
 Profiles applied at boot with protection after a crash: the profile is
