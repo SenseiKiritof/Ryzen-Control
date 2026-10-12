@@ -59,7 +59,13 @@ expected (limits only), Summit/Pinnacle Ridge (no SMU command: boost, power, fan
 everywhere, per-family CO range, `boost on|off` (cpufreq, no SMU), Tdie on the X parts with an
 offset, board-limit guard (motherboard limits in the BIOS: Quiet/Eco on AMD's Eco mode values, Auto
 refused); calibration ideas from CoreCycler: single-core phase in the final pass (user choice,
-default on), hardware watchdog during a calibration, `autotune verify`. Tag `v0.5.0` after these.
+default on), hardware watchdog during a calibration, `autotune verify` — done by an agent and merged:
+`single` (SINGLE_SEC per core, one thread, a core that fails alone is raised alone, `core_margin`),
+`Watchdog` in `serve` only, `autotune verify <profile> [minutes=]` / `finish`. Rev. 17 (user request):
+custom calibrations, `autotune start <mode> name=<profile>`: saved under their own name, never over
+eco/auto/boost, and their CO search never written over the shared `co_limits.json`; listed in
+`settings.calibrated` (status `calibrated`) with the base mode; GUI "Custom" row in the Calibrated
+column. Tag `v0.5.0` after the hardware checks of the watchdog and the single-core phase.
 Next: phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
@@ -220,6 +226,10 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   the core fuses, read through the driver's `smn` file (4-byte write = read; **never** the 8-byte
   write) only at the fuse addresses of the family entry, and only if they match the sysfs topology;
   otherwise CO, calibrations and the CO step of `hwtest` are refused/skipped.
+- Hardware watchdog (`Watchdog`): armed only by `serve` while a calibration/verification runs, never
+  with `nowayout`, when already active, without magic close or with `watchdog=0`; every exit path
+  (done, abort, error, EOF, SIGTERM/SIGHUP/SIGINT) does the magic close and checks the sysfs state; a
+  timer that keeps running is reopened and kept alive, never left armed without a keepalive.
 - Every SMU transaction under `flock(/run/ryzenctl/lock)` (the driver's `smu_args` is global).
 - Every write is followed by a readback; mismatch → one retry → restore of the baseline value →
   error. No automatic fallback to other IDs.

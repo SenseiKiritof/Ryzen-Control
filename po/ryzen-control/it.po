@@ -1089,3 +1089,57 @@ msgstr "Continua la verifica"
 
 msgid "Verification stopped early: no core failed in the tests done"
 msgstr "Verifica fermata prima del termine: nessun core è fallito nelle prove fatte"
+
+msgid "'%s' exists: it is replaced when you save the result"
+msgstr "'%s' esiste: viene sostituito quando salvi il risultato"
+
+msgid "; it is the active mode: the stock values are applied"
+msgstr "; è la modalità attiva: vengono applicati i valori di fabbrica"
+
+msgid "Boost as a base needs \"Allow beyond the stock values\" (Preferences)."
+msgstr "Boost come base richiede «Consenti oltre i valori di fabbrica» (Preferenze)."
+
+msgid "Calibrations from Eco, Auto or Boost with your parameters, each saved as a new profile: the three modes stay as they are"
+msgstr "Calibrazioni da Eco, Auto o Boost con i tuoi parametri, ognuna salvata come nuovo profilo: le tre modalità restano come sono"
+
+msgid "Continue…"
+msgstr "Continua…"
+
+msgid "Custom calibration"
+msgstr "Calibrazione personalizzata"
+
+msgid "Custom calibration '%s' deleted"
+msgstr "Calibrazione personalizzata '%s' eliminata"
+
+msgid "Custom calibration from %s → %s"
+msgstr "Calibrazione personalizzata da %s → %s"
+
+msgid "Delete"
+msgstr "Elimina"
+
+msgid "Delete '%s'?"
+msgstr "Eliminare '%s'?"
+
+msgid "Delete this custom calibration"
+msgstr "Elimina questa calibrazione personalizzata"
+
+msgid "Name of the new profile"
+msgstr "Nome del nuovo profilo"
+
+msgid "Only a-z 0-9 - _, and not the name of a mode"
+msgstr "Solo a-z 0-9 - _, e non il nome di una modalità"
+
+msgid "Pick the base mode and the name of the new profile, then the usual parameters"
+msgstr "Scegli la modalità di partenza e il nome del nuovo profilo, poi i soliti parametri"
+
+msgid "Starting from"
+msgstr "Partendo da"
+
+msgid "The profile of this custom calibration is deleted"
+msgstr "Il profilo di questa calibrazione personalizzata viene eliminato"
+
+msgid "The result is saved as a new profile: Eco, Auto and Boost stay as they are, and a new search of the CO limit does not replace their measurement."
+msgstr "Il risultato viene salvato come nuovo profilo: Eco, Auto e Boost restano come sono, e una nuova ricerca del limite del CO non sostituisce la loro misura."
+
+msgid "from %s, %s"
+msgstr "da %s, %s"

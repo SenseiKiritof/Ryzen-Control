@@ -227,15 +227,29 @@ modes use the same margin (+3), so the same validated undervolt.
 ```sh
 sudo ryzenctl preset quiet|performance|eco|auto|boost   # creates the profile from the factory values (placeholder)
 sudo ryzenctl autotune estimate eco              # estimated duration (0 s when Eco reuses a validated final pass: eco_from)
-sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 fans=0|1|2]
+sudo ryzenctl autotune start eco|auto|boost [name=<profile>] [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 fans=0|1|2 single=1 watchdog=1]
 sudo ryzenctl autotune step                      # one test at a time; repeat until phase == done
+sudo ryzenctl autotune verify auto [minutes=60]  # long stability test of a saved profile; `autotune finish` stops it keeping the result
 sudo ryzenctl autotune status | abort            # abort stops immediately, even a step in progress
 sudo ryzenctl autotune save [apply]              # at phase == done: writes the proposed profile (and applies it); abort discards it
 ```
 
 When the calibration is over the CPU goes back to the factory values and the profile is only
 **proposed**: you choose whether to cancel, save (the profile appears in Modes, not active) or
-save and apply. Without a choice the state stays on disk and the GUI offers it again at the
+save and apply.
+
+**Custom calibrations** (Modes → Calibrated → Custom → "Calibrate…"; CLI `name=<profile>`): pick the
+base mode (Eco, Auto, Boost) and the name of a new profile, then the usual dialog. The result is
+saved under that name and listed in the Custom row (apply, Verify…, delete): the Eco, Auto and Boost
+profiles are never overwritten, and a new search of the CO limit stays in the custom calibration —
+the shared measurement the three modes reuse is untouched. So a working Auto stays as it is while you
+try other parameters. A custom calibration based on Boost follows Boost's unlock rule.
+
+**Verify…** (shield button on a saved calibrated profile; CLI `autotune verify`): hours of load on the
+saved profile without changing anything, like CoreCycler or Ryzen Master's "Validate": each core alone
+with one thread, then all cores together, in iterations for the chosen time (30 min – 8 h). At the
+end either "passed", or a proposal with only the cores that failed raised by 3 (Cancel / Save / Save
+and apply). Stop keeps the partial result. Without a choice the state stays on disk and the GUI offers it again at the
 next start.
 
 From the GUI: Modes → "Calibrate…" on Eco, Auto or Boost, then "Automatic" (default values) or
@@ -273,7 +287,10 @@ The CO search uses as the first phase of every level the heaviest stress-ng meth
 (probed at start with factory CO); measurements from earlier versions, taken without this load,
 are not reused. The **final pass** (all cores at the proposed CO) starts with the stress-ng
 method that draws the most power on this CPU, at full load for 60 s with verify, then 100 s
-full / 50 % / 10 %. If it fails, or if in a later phase (knee, benchmark) a load dies, an
+full / 50 % / 10 %; then, with `single=1` (default, a switch in the GUI), **each core alone** with one
+thread for 45 s and a load that comes and goes: a too-negative CO fails at the highest single-core
+boost, which all-core loads never reach (CoreCycler's lesson); a core that fails alone is raised
+alone (+3) and the final pass repeated. If it fails, or if in a later phase (knee, benchmark) a load dies, an
 MCE error appears or the system freezes and is rebooted, the combination is unstable: +3 on all
 cores and the final pass repeated (3 attempts at most). If the search itself ends with a system
 freeze, the margin gets an extra +3: the "stable" level below the crash one was tested only for
@@ -282,6 +299,15 @@ retry them. After a forced reboot the interrupted step is marked unstable as soo
 `ryzenctl.service` starts, before any choice in the GUI (Resume or Cancel). Result on the
 development 9800X3D: with the heaviest method in the search the per-core limit is −35 (−40 froze
 the system), and the final pass at −29 on all cores is stable; one CO step is worth ≈ 3.4 mV.
+
+**Hardware watchdog**: while a calibration or a verification runs from the GUI, `ryzenctl serve` arms
+the motherboard watchdog (e.g. the SP5100 TCO timer, 60 s) and keeps it alive every 10 s. On Ryzen 9000
+a too-negative CO freezes the PC instead of rebooting it: with the watchdog the board resets by itself
+within the timeout, and the calibration resumes with that step marked unstable. It is never armed if it
+could not be stopped again (`nowayout`), if the system already uses it (systemd `RuntimeWatchdogSec`),
+without "magic close", or with `watchdog=0`; the calibration window shows its state. Every way out
+(end, Stop, window closed, logout) stops it with the magic close and checks that it stopped. If the
+helper is killed with SIGKILL during a calibration, the PC resets after the timeout (handled as a crash).
 
 **Warning**: an unstable CO can reboot the PC during the calibration (no damage, unsaved work
 lost). The state is on disk: at reboot the interrupted step is marked unstable and the

@@ -11,6 +11,7 @@ import gettext
 import json
 import locale
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -890,12 +891,16 @@ class AutotuneDialog(Adw.Window):
     """Calibration progress: one `autotune step` at a time until phase == done.
     Separate, resizable window (Adw.Dialog has fixed dimensions and the table is tall)."""
 
-    def __init__(self, win, mode, verify=False):
-        # verify: `autotune verify` of the saved profile `mode` (same window: progress, per-core table, proposal)
-        super().__init__(title=(_("%s verification") if verify else _("%s calibration")) % mode.capitalize(), transient_for=win,
+    def __init__(self, win, mode, verify=False, name=None):
+        # verify: `autotune verify` of the saved profile `mode` (same window: progress, per-core table, proposal);
+        # name: a custom calibration from the base mode `mode`, saved under its own name (the mode's profile untouched)
+        super().__init__(title=_("%s verification") % mode.capitalize() if verify else
+                         _("Custom calibration from %s → %s") % (mode.capitalize(), name) if name else
+                         _("%s calibration") % mode.capitalize(), transient_for=win,
                          modal=True, destroy_with_parent=True,
                          default_width=max(640, int(win.get_width() * 0.9)), default_height=max(560, int(win.get_height() * 0.9)))
-        self.win, self.mode, self.verify = win, mode, verify
+        self.win, self.mode, self.verify, self.name = win, mode, verify, name
+        self.target = name or mode   # the profile the result is saved as
         self.running = self.aborting = False
         self.closable = False
         self.connect("close-request", self.on_close_request)
@@ -985,7 +990,8 @@ class AutotuneDialog(Adw.Window):
         return False
 
     def start(self, params):
-        argv = ["autotune", "verify" if self.verify else "start", self.mode] + ["%s=%d" % kv for kv in params.items()]
+        argv = (["autotune", "verify" if self.verify else "start", self.mode] + (["name=" + self.name] if self.name else [])
+                + ["%s=%d" % kv for kv in params.items()])
         bg(lambda: self.win.h.call(*argv), self.got, self.fail)
 
     def loop(self):
@@ -1222,7 +1228,7 @@ class AutotuneDialog(Adw.Window):
                 pct(g), ops(bench.get("fabbrica")), ops(bench.get("boost")), pct(bench.get("gain_st_pct"))),
                 ["numeric", "success" if g > 0 else ("error" if g < 0 else "dim-label")], wrap=True))
         if st.get("profile_lines"):
-            self.result.append(label((_("%s profile: stock → proposed") if self.verify else _("%s profile: stock → calibrated")) % self.mode, ["heading"]))
+            self.result.append(label((_("%s profile: stock → proposed") if self.verify else _("%s profile: stock → calibrated")) % self.target, ["heading"]))
             self.result.append(profile_view(st["profile_lines"], self.win.status))
         knee = st.get("knee")
         if knee and knee["ppt"].get("chosen"):
@@ -1269,7 +1275,7 @@ class AutotuneDialog(Adw.Window):
 
     def save(self, apply):
         self.choose(["autotune", "save"] + (["apply"] if apply else []),
-                    _("%s profile saved and applied") % self.mode if apply else _("%s profile saved (not applied)") % self.mode)
+                    _("%s profile saved and applied") % self.target if apply else _("%s profile saved (not applied)") % self.target)
 
     def finished(self, st):
         self.show(st)
@@ -1348,6 +1354,18 @@ class ModesPage(Gtk.ScrolledWindow):
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
             lists["calibrate" if key in CALIBRATED else "preset"].append(row)
+        # custom calibrations: from Eco/Auto/Boost with your parameters, each saved under its own name, so the
+        # three modes (e.g. an Auto that works) are never overwritten while trying something else
+        self.first, self.custom_rows, self.custom_chk = first, [], {}
+        self.custom = Adw.ExpanderRow(title=_("Custom"), expanded=True,
+                                      subtitle=_("Calibrations from Eco, Auto or Boost with your parameters, each saved as a new "
+                                                 "profile: the three modes stay as they are"))
+        self.custom.set_title_lines(1)
+        self.custom.set_subtitle_lines(3)
+        self.custom_cal = button(_("Calibrate…"), self.calibrate_custom)
+        self.custom_cal.set_tooltip_text(_("Pick the base mode and the name of the new profile, then the usual parameters"))
+        self.custom.add_suffix(self.custom_cal)
+        lists["calibrate"].append(self.custom)
         self.lock_calibrated({})   # until the status says that unlock is on
 
     def lock_calibrated(self, st):
@@ -1366,6 +1384,39 @@ class ModesPage(Gtk.ScrolledWindow):
                 w.set_has_tooltip(not why)
             (row.add_css_class if why else row.remove_css_class)("dim-label")
             row.set_tooltip_text(why)
+        self.custom_cal.set_sensitive(not no_co)
+        self.custom.set_tooltip_text(_("Calibrated modes measure the per-core Curve Optimizer, not available on this CPU: %s") % no_co
+                                     if no_co else None)
+
+    def refresh_custom(self, st):
+        """One row per saved custom calibration (radio = apply, Verify…, delete) with its stock → profile table."""
+        for r in self.custom_rows:
+            self.custom.remove(r)
+        self.custom_rows, self.custom_chk = [], {}
+        shown, no_co = st.get("profile_lines", {}), st.get("co_unavailable")
+        for name, meta in sorted(st.get("calibrated", {}).items()):
+            row = Adw.ActionRow(title=name, subtitle=_("from %s, %s") % (meta.get("base", "?").capitalize(), meta.get("time", "?")),
+                                activatable=True)
+            chk = self.custom_chk[name] = Gtk.CheckButton(valign=Gtk.Align.CENTER, group=self.first)
+            row.add_prefix(chk)
+            row.set_activatable_widget(chk)
+            chk.connect("toggled", self.on_mode, name)
+            why = (_("Boost needs \"Allow beyond the stock values\": turn it on in Preferences")
+                   if meta.get("base") == "boost" and not st.get("unlock") else no_co)
+            for icon, tip, cb in (("security-high-symbolic", _("Verify…: long stability test of the saved profile (each core alone, then all together)"), self.verify),
+                                  ("user-trash-symbolic", _("Delete this custom calibration"), self.delete_custom)):
+                b = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tip)
+                b.add_css_class("flat")
+                b.connect("clicked", lambda *_a, n=name, f=cb: f(n))
+                b.set_sensitive(not why or cb == self.delete_custom)
+                row.add_suffix(b)
+            chk.set_sensitive(not why)
+            row.set_tooltip_text(why)
+            self.custom_rows.append(row)
+            if name in shown:
+                self.custom_rows.append(Gtk.ListBoxRow(child=profile_table(shown[name], st), activatable=False, selectable=False))
+        for r in self.custom_rows:
+            self.custom.add_row(r)
 
     def refresh(self, st):
         self.loading = True
@@ -1386,8 +1437,11 @@ class ModesPage(Gtk.ScrolledWindow):
                     self.tables[key] = Gtk.ListBoxRow(child=profile_table(shown[key], st), activatable=False, selectable=False)
                     row.add_row(self.tables[key])
                     row.set_expanded(True)
-        current = prof if prof in PRESETS else ("custom" if prof else "default")
-        self.rows[current][1].set_active(True)
+        self.refresh_custom(st)
+        if prof in self.custom_chk:
+            self.custom_chk[prof].set_active(True)
+        else:
+            self.rows[prof if prof in PRESETS else ("custom" if prof else "default")][1].set_active(True)
         self.loading = False
 
     def on_mode(self, chk, key):
@@ -1410,8 +1464,9 @@ class ModesPage(Gtk.ScrolledWindow):
                                  _("Create and apply"), go, extra=profile_view(res["lines"], self.win.status))
             bg(lambda: self.win.h.call("preset", key, "show"), ask, lambda m: (self.win.toast(m), self.win.reload()))
 
-    def calibrate(self, mode):
-        """First the estimate (`autotune estimate`), then a simple choice: automatic with the ryzenctl defaults, or the parameters by hand."""
+    def calibrate(self, mode, name=None):
+        """First the estimate (`autotune estimate`), then a simple choice: automatic with the ryzenctl defaults, or the parameters by hand.
+        name: a custom calibration from the base `mode`, saved under that name."""
         def ask(est):
             p = est["params"]
             target = _("target Tctl %d °C, ") % p["target"] if "target" in p else ""   # Boost: no thermal target
@@ -1429,7 +1484,8 @@ class ModesPage(Gtk.ScrolledWindow):
                                 tooltip_text=_("Also in automatic mode: how much the mode touches the fans (only the channels recognised as fans)"))
             lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
             lb.append(fans)
-            d = Adw.AlertDialog(heading=_("Calibrate the %s mode?") % mode.capitalize(),
+            d = Adw.AlertDialog(heading=_("Custom calibration from %s → %s") % (mode.capitalize(), name) if name else
+                                _("Calibrate the %s mode?") % mode.capitalize(),
                                 body=_("Automatic (recommended): %s\n\n%s\n\n%s") % (auto, AT_WARNING, CO_TIP), extra_child=lb)
             d.add_response("cancel", _("Cancel"))
             d.add_response("custom", _("Choose the values…"))
@@ -1437,14 +1493,14 @@ class ModesPage(Gtk.ScrolledWindow):
             d.set_response_appearance("auto", Adw.ResponseAppearance.SUGGESTED)
             def resp(_d, r):
                 if r == "auto":
-                    AutotuneDialog(self.win, mode).start(dict(p, parallel=1, fans=fans.get_selected()))
+                    AutotuneDialog(self.win, mode, name=name).start(dict(p, parallel=1, fans=fans.get_selected()))
                 elif r == "custom":
-                    self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected())))
+                    self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected())), name)
             d.connect("response", resp)
             d.present(self.win)
         bg(lambda: self.win.h.call("autotune", "estimate", mode), ask, self.win.toast)
 
-    def calibrate_params(self, mode, est):
+    def calibrate_params(self, mode, est, name=None):
         """Parameters (ranges from AT_PARAMS, defaults from ryzenctl) with an estimate that follows the changes → autotune start → progress."""
         group = Adw.PreferencesGroup()
         spins = {}
@@ -1498,7 +1554,8 @@ class ModesPage(Gtk.ScrolledWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.append(group)
         box.append(estimate)
-        d = Adw.AlertDialog(heading=_("%s calibration parameters") % mode.capitalize(), body=AT_WARNING, extra_child=box)
+        d = Adw.AlertDialog(heading=(_("%s calibration parameters") % mode.capitalize()) + (" → " + name if name else ""),
+                            body=AT_WARNING, extra_child=box)
         d.spins, d.parallel, d.single, d.repeat, d.estimate = spins, parallel, single, repeat, estimate   # reachable from the driven tests
         d.params = params
         d.add_response("cancel", _("Cancel"))
@@ -1509,7 +1566,7 @@ class ModesPage(Gtk.ScrolledWindow):
                 GLib.source_remove(pending["timer"])
                 pending["timer"] = 0
             if r == "start":
-                AutotuneDialog(self.win, mode).start(params())
+                AutotuneDialog(self.win, mode, name=name).start(params())
         d.connect("response", resp)
         d.present(self.win)
         return d
@@ -1530,6 +1587,63 @@ class ModesPage(Gtk.ScrolledWindow):
         d.connect("response", resp)
         d.present(self.win)
         return d
+
+    def calibrate_custom(self):
+        """Custom calibration: the base mode (Boost only with unlock) and the name of the new profile, then the
+        same dialog as the modes. The name never replaces a mode; an existing custom one is replaced at Save."""
+        st = self.win.status
+        bases = [m for m in CALIBRATED if m != "boost" or st.get("unlock")]
+        base = Adw.ComboRow(title=_("Starting from"), model=Gtk.StringList.new([m.capitalize() for m in bases]),
+                            selected=bases.index("auto") if "auto" in bases else 0)
+        entry = Adw.EntryRow(title=_("Name of the new profile"))
+        note = label("", ["dim-label", "caption"], wrap=True, margin_top=6)
+        lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        lb.append(base)
+        lb.append(entry)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(lb)
+        box.append(note)
+        taken = set(st.get("calibrated", {}))
+        d = Adw.AlertDialog(heading=_("Custom calibration"), extra_child=box,
+                            body=_("The result is saved as a new profile: Eco, Auto and Boost stay as they are, and a new "
+                                   "search of the CO limit does not replace their measurement.") +
+                            ("" if st.get("unlock") else "\n\n" + _("Boost as a base needs \"Allow beyond the stock values\" (Preferences).")))
+        d.add_response("cancel", _("Cancel"))
+        d.add_response("next", _("Continue…"))
+        d.set_response_appearance("next", Adw.ResponseAppearance.SUGGESTED)
+
+        def suggest(*_a):   # "<base>-custom", "-2", "-3"… the first name not taken
+            b = bases[base.get_selected()]
+            entry.set_text(next(n for n in ["%s-custom" % b] + ["%s-custom-%d" % (b, i) for i in range(2, 100)] if n not in taken))
+
+        def check(*_a):
+            name = entry.get_text()
+            ok = bool(re.fullmatch(r"[a-z0-9_-]{1,32}", name)) and name not in PRESETS + ("baseline", "default", "custom")
+            d.set_response_enabled("next", ok)
+            note.set_text(_("Only a-z 0-9 - _, and not the name of a mode") if not ok
+                          else _("'%s' exists: it is replaced when you save the result") % name if name in taken else "")
+        base.connect("notify::selected", suggest)
+        entry.connect("changed", check)
+        suggest()
+        d.base, d.entry = base, entry   # reachable from the smoke test
+
+        def resp(_d, r):
+            if r == "next":
+                self.calibrate(bases[base.get_selected()], entry.get_text())
+        d.connect("response", resp)
+        d.present(self.win)
+        return d
+
+    def delete_custom(self, name):
+        active = self.win.status.get("profile") == name
+
+        def go(ok):
+            if ok:   # the active one: the stock values first, so nothing stays applied from a deleted profile
+                self.win.run(([["default"]] if active else []) + [["profile", "delete", name]],
+                             lambda _r: self.win.toast(_("Custom calibration '%s' deleted") % name))
+        self.win.confirm(_("Delete '%s'?") % name, _("The profile of this custom calibration is deleted") +
+                         (_("; it is the active mode: the stock values are applied") if active else "") + ".",
+                         _("Delete"), go, destructive=True)
 
     def regen(self, key):
         def ask(res):
@@ -1969,7 +2083,7 @@ class Window(Adw.ApplicationWindow):
             st = self.h.call("status")
             st["profile_lines"] = {}
             for name in self.h.call("profile", "list")["profiles"]:
-                if name in PRESETS:
+                if name in PRESETS or name in st.get("calibrated", {}):
                     st["profile_lines"][name] = self.h.call("profile", "show", name)["lines"]
             st["autotune"] = self.h.call("autotune", "status")
             try:   # BIOS fan settings captured at boot: the "stock" side of the fan rows in the profile tables
@@ -1995,7 +2109,7 @@ class Window(Adw.ApplicationWindow):
         if at.get("phase") and not getattr(self, "at_asked", False):
             self.at_asked = True   # once per session
             if at["phase"] == "done":   # finished without a choice (GUI closed): discard / save / save and apply is proposed again
-                dlg = AutotuneDialog(self, at.get("mode", "eco"), verify=bool(at.get("verify")))
+                dlg = AutotuneDialog(self, at.get("mode", "eco"), verify=bool(at.get("verify")), name=at.get("save_as"))
                 dlg.show(at)
                 dlg.done(at)
             else:
@@ -2049,7 +2163,7 @@ class Window(Adw.ApplicationWindow):
         d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)
         def resp(_d, r):
             if r == "resume":
-                dlg = AutotuneDialog(self, at.get("mode", "eco"))
+                dlg = AutotuneDialog(self, at.get("mode", "eco"), name=at.get("save_as"))
                 dlg.show(at)
                 dlg.loop()
             else:
@@ -2345,6 +2459,29 @@ class App(Adw.Application):
                 dlg.close()
                 win.ask_resume(dict(failed, phase="verify", core=2, iteration=1, iterations=3))
                 win.h.call("profile", "delete", "eco")
+                # a custom calibration: base and name (never a mode's), saved under its own name and listed in its row
+                d = modes.calibrate_custom()
+                assert d.entry.get_text().endswith("-custom") and d.get_response_enabled("next"), "custom name not proposed"
+                d.entry.set_text("auto")
+                assert not d.get_response_enabled("next"), "a mode's name accepted for a custom calibration"
+                d.force_close()
+                base = "auto" if pm_limits else "eco"
+                dlg = AutotuneDialog(win, base, name="smoke-custom")
+                st = win.h.call("autotune", "start", base, "name=smoke-custom", "step=3")
+                for _i in range(300):
+                    dlg.show(st)
+                    if st["phase"] == "done":
+                        break
+                    st = win.h.call("autotune", "step")
+                dlg.done(st)
+                assert win.h.call("autotune", "save")["saved"] == "smoke-custom"
+                dlg.closable = True
+                dlg.close()
+                cal = win.h.call("status")["calibrated"]
+                modes.refresh(dict(win.status, calibrated=cal, profile=None,
+                                   profile_lines={"smoke-custom": win.h.call("profile", "show", "smoke-custom")["lines"]}))
+                assert "smoke-custom" in modes.custom_chk and len(modes.custom_rows) == 2, "custom calibration not listed"
+                win.h.call("profile", "delete", "smoke-custom")
             win.ask_resume({"mode": "auto", "phase": "ppt", "started": "today"})
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
