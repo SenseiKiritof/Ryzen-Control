@@ -280,6 +280,8 @@ class Fake:
                 "nopm": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0},               # no PM table
                 "granite12": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205,   # 9900X: 2 CCDs × 6
                               "disabled": [[2, 5], [0, 7]]},   # disabled slots of each CCD (core fuses)
+                "fusebad": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205,    # fuses that contradict
+                            "disabled": [[2], [0, 7]]},   # the topology (7 + 6 slots for 6 + 6 cores): no per-core CO
                 "raphael": {"codename": 20, "cores": 8, "ccds": 1, "pm_version": 0x540104}}     # 7700X
     FAN_DIR = HWMON + "/hwmon0"
 
@@ -3399,8 +3401,7 @@ def selftest_variants():
     assert r["co"].startswith("ok") and r["esito"] == "ok", r
     # fuses that do not match the topology (a core more on CCD0 than Linux sees): no per-core CO at all
     ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-12b-")
-    FAKE = Fake("granite12")
-    FAKE.disabled = [[2], [0, 7]]
+    FAKE = Fake("fusebad")
     init_cpu()
     assert core_map() is None and "physical position" in co_support()
     st = run(["status"])
