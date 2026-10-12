@@ -942,3 +942,10 @@ msgstr "Anche in automatico: quanto la modalità tocca le ventole (solo i canali
 
 msgid "Curve Optimizer not available on this CPU: %s"
 msgstr "Curve Optimizer non disponibile su questa CPU: %s"
+
+#, python-format
+msgid "%s · %d cores"
+msgstr "%s · %d core"
+
+msgid "Family not verified on hardware yet: run the Hardware check in Preferences"
+msgstr "Famiglia non ancora verificata sull'hardware: esegui la Verifica hardware nelle Preferenze"
