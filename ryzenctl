@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""ryzenctl — privileged helper of Ryzen Control (Ryzen 7 9800X3D, Granite Ridge).
+"""ryzenctl — privileged helper of Ryzen Control (AMD Ryzen desktop; developed on a Ryzen 7 9800X3D).
 
 The only component that talks to the SMU (ryzen_smu driver) and to the fans. Same command
 grammar for the CLI, the profile files and the `serve` protocol. With RYZENCTL_ROOT set it
@@ -58,6 +58,7 @@ POWER_PROFILES = ("power-saver", "balanced", "performance")
 ROOT = os.environ.get("RYZENCTL_ROOT", "")
 SMU_DIR = "/sys/kernel/ryzen_smu_drv"
 HWMON = "/sys/class/hwmon"
+CPUFREQ = "/sys/devices/system/cpu/cpufreq"
 ETC = "/etc/ryzenctl"
 STATE = "/var/lib/ryzenctl"
 RUN = "/run/ryzenctl"
@@ -71,7 +72,10 @@ def P(path):
 # Indexed by the codename of the ryzen_smu driver; a codename that is not here is refused in full
 # (fail closed). A family without a key does not have that function (the command is refused, its
 # ID is never sent). Entries come from ZenStates-Core/ryzen_smu and count as supported only after
-# a `hwtest` on real hardware (phase 5).
+# a `hwtest` on real hardware (phase 5). PM table: limits read only for a version whose prefix
+# (version >> 16) is `pm_prefix` or that is listed in `pm_versions`. `eco_limits`: AMD's 65 W Eco mode
+# (PPT W, TDC A, EDC A), used by Quiet/Eco when the BIOS reports motherboard limits instead of the
+# CPU's (see board_limits). `co_range`: Curve Optimizer range of the family (default CO_MIN..CO_MAX).
 MP1, RSMU = "mp1_smu_cmd", "rsmu_cmd"
 FAMILIES = {
     23: {"name": "Granite Ridge",     # Ryzen 9000 (Zen 5): hwtest ok on the 9800X3D, SMU 98.81.0
@@ -95,7 +99,7 @@ FAMILIES = {
          "pm_cores": {0x620105: {"volt": 309, "temp": 317, "mhz": 325}},   # gnr-smu, CONFIRMED
          # core fuses (ZenStates-Core GetTopologyFuses), read only on CCDs with disabled cores
          "fuses": {"ccd": (0x5D3BC, 0x5D3C0), "core": 0x304A03DC, "stride": 1 << 25},
-         "tjmax_max": 95, "verified": True},
+         "eco_limits": (88, 75, 150), "tjmax_max": 95, "verified": True},
     20: {"name": "Raphael",           # Ryzen 7000 (Zen 4): not verified on hardware yet
          # ZenStates-Core Zen4Settings: the same IDs that Zen5Settings inherits and that are verified on
          # Granite Ridge above; no Curve Shaper (Zen 5 only)
@@ -106,11 +110,39 @@ FAMILIES = {
          # voltages): PPT/TDC/EDC/Tjmax have no readback, so they are refused (fail closed)
          "pm_prefix": None, "pm": None, "pm_cores": {},
          "fuses": {"ccd": (0x5D3BC, 0x5D3C0), "core": 0x30081CD0, "stride": 1 << 25},
-         "tjmax_max": 95, "verified": False},
+         "eco_limits": (88, 75, 150), "tjmax_max": 95, "verified": False},
+    12: {"name": "Vermeer",           # Ryzen 5000 (Zen 3): not verified on hardware yet
+         # CO: MP1 0x35/0x48 as used on real 5800X3D/5600X by Linux tools (svenlange2 ruv.py,
+         # linux-corecycler), from PBO2 Tuner's author via ZenStates-Core 4678b3a (ZenStates now reads
+         # with RSMU 0x7C, marked "Not sure": not used). Range −30..+30. Limits: RSMU 0x53–0x56 as sent
+         # by Ryzen Master (ryzen_smu docs/rsmu_commands.md, ZenStates-Core): the MP1 numbering differs
+         # from Zen 4/5 (MP1 0x3E is Tjmax here, PPT there). No FMax set command on Zen 3.
+         "cmd": {"co_set": (MP1, 0x35), "co_get": (MP1, 0x48),
+                 "ppt_set": (RSMU, 0x53), "tdc_set": (RSMU, 0x54), "edc_set": (RSMU, 0x55), "tjmax_set": (RSMU, 0x56)},
+         # header of the four tables (ryzen_monitor pm_tables.c; 0x3808xx tested on a 5900X): limits only;
+         # the per-core arrays are by physical slot, their offsets are not verified
+         "pm_prefix": None, "pm_versions": (0x380804, 0x380805, 0x380904, 0x380905),
+         "pm": {"ppt_limit": 0, "ppt": 1, "tdc_limit": 2, "tdc": 3, "thm_limit": 4, "tctl": 5, "edc_limit": 8},
+         "pm_cores": {},
+         # Zen 3 CCD fuses (ZenStates-Core CCD_FUSE_ZEN2, CcdMapFromDown): the enabled CCDs come from the
+         # "down" bits only, and an 8-core part can sit on the second CCD of a two-CCD package, so the
+         # fuses are always read (no shortcut for complete CCDs)
+         "fuses": {"ccd": (0x5D218, 0x5D21C), "core": 0x30081D98, "stride": 1 << 25, "map_from_down": True},
+         "co_range": (-30, 30), "eco_limits": (88, 60, 90), "tjmax_max": 95, "verified": False},
+    4: {"name": "Matisse",            # Ryzen 3000 (Zen 2): no Curve Optimizer, no FMax; limits only
+        "cmd": {"ppt_set": (RSMU, 0x53), "tdc_set": (RSMU, 0x54), "edc_set": (RSMU, 0x55), "tjmax_set": (RSMU, 0x56)},
+        # the two versions with a header map checked on real CPUs (0x240903 leogx9r monitor_cpu on a
+        # 3700X/3800X, 0x240803 ryzen_monitor from 3950X dumps); MP1 is never used on Zen 2 (disputed numbering)
+        "pm_prefix": None, "pm_versions": (0x240803, 0x240903),
+        "pm": {"ppt_limit": 0, "ppt": 1, "tdc_limit": 2, "tdc": 3, "thm_limit": 4, "tctl": 5, "edc_limit": 8},
+        "pm_cores": {}, "eco_limits": (88, 60, 90), "tjmax_max": 95, "verified": False},
+    # Ryzen 1000/2000 (Zen, Zen+): no Curve Optimizer, no FMax, and ryzen_smu has no PM table for them
+    # (no readback of the limits): no SMU command at all, only boost, power profile and fans
+    10: {"name": "Pinnacle Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
+    9: {"name": "Summit Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
 }
-# Not in the table, from the same sources: Vermeer (Ryzen 5000, codename 12) has no reliable CO
-# readback ID (Zen2Settings marks GetDldoPsmMargin 0x7C "Not sure") and no FMax set command;
-# Matisse (Ryzen 3000, 4) has no Curve Optimizer. Both need a verified PM table map for the limits.
+# Never in any entry (sources above): voltage/VID, OC mode, PBO scalar, SMN writes. Dangerous neighbours
+# of the allowed IDs on Zen 2/3: RSMU 0x58 PBO scalar, 0x5A–0x5D OC mode/frequency, 0x61 OC VID.
 SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
               0xFD: "REJECTED_PREREQ", 0xFC: "BUSY", 0xFB: "TIMEOUT", 0xFA: "INVALID_ARG",
               0xF9: "UNSUPPORTED_PLATFORM", 0xF8: "BUFFER", 0xF7: "MMAP", 0xF6: "PCI"}
@@ -152,7 +184,8 @@ def core_map():
     groups = {}
     for i, (cid, _cpus) in enumerate(TOPO):
         groups.setdefault(cid // 8, []).append(i)
-    if all(len(g) == 8 for g in groups.values()) and sorted(groups) == list(range(len(groups))):
+    fz = family().get("fuses") or {}
+    if not fz.get("map_from_down") and all(len(g) == 8 for g in groups.values()) and sorted(groups) == list(range(len(groups))):
         result = [None] * CORES
         for ccd, idxs in groups.items():
             for i in idxs:
@@ -173,8 +206,11 @@ def fused_core_map(groups):
         if present == 0xFFFFFFFF:
             return None
         ccd_down = ((present >> 30) & 3) | ((down & 0x3F) << 2)
-        enabled = ((present >> 22) & 3) & ~ccd_down        # CCD0/1 present and not down
-        physical = [b for b in range(2) if enabled >> b & 1]
+        # Zen 3: enabled = not down (ZenStates CcdMapFromDown); Zen 4/5: present (bits 22–23) and not down
+        enabled = (~ccd_down & 0xFF) if fz.get("map_from_down") else ((present >> 22) & 3) & ~ccd_down
+        physical = [b for b in range(8) if enabled >> b & 1]
+        if physical[-1:] > [1]:   # desktop packages have at most two CCDs: an unexpected layout
+            return None
         if len(physical) != len(groups):
             return None
         result = [None] * CORES
@@ -285,7 +321,13 @@ class Fake:
                               "disabled": [[2, 5], [0, 7]]},   # disabled slots of each CCD (core fuses)
                 "fusebad": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205,    # fuses that contradict
                             "disabled": [[2], [0, 7]]},   # the topology (7 + 6 slots for 6 + 6 cores): no per-core CO
-                "raphael": {"codename": 20, "cores": 8, "ccds": 1, "pm_version": 0x540104}}     # 7700X
+                "raphael": {"codename": 20, "cores": 8, "ccds": 1, "pm_version": 0x540104},     # 7700X
+                "vermeer": {"codename": 12, "cores": 12, "ccds": 2, "pm_version": 0x380805,    # 5900X: 2 CCDs × 6
+                            "disabled": [[1, 6], [0, 3]]},
+                "vermeer8": {"codename": 12, "cores": 8, "ccds": 1, "pm_version": 0x380905,    # 5800X sitting on the
+                             "phys": [1]},                                                 # second CCD of the package
+                "matisse": {"codename": 4, "cores": 8, "ccds": 1, "pm_version": 0x240903},     # 3700X: no CO, no FMax
+                "pinnacle": {"codename": 10, "cores": 8, "ccds": 1, "pm_version": 0}}          # 2700X: no SMU command
     FAN_DIR = HWMON + "/hwmon0"
 
     def __init__(self, variant=None):
@@ -293,8 +335,9 @@ class Fake:
         per = v["cores"] // v["ccds"]
         self.cids = [(c // per) * 8 + c % per for c in range(v["cores"])]   # sysfs core_id: CCD n starts at 8n
         self.disabled = v.get("disabled", [[] for _ccd in range(v["ccds"])])
+        self.phys = v.get("phys", list(range(v["ccds"])))   # physical position of each CCD in the package
         # physical (ccd, slot) of each core: the firmware skips the disabled slots, Linux numbers the rest in order
-        self.slots = [(ccd, s) for ccd in range(v["ccds"]) for s in range(8) if s not in self.disabled[ccd]]
+        self.slots = [(p, s) for p, dis in zip(self.phys, self.disabled) for s in range(8) if s not in dis]
         self.default = {"codename": v["codename"], "co": [0] * v["cores"], "fmax": 5225,
                         "ppt": 162.0, "tdc": 120.0, "edc": 180.0, "thm": 95.0,
                         "shaper": [0x80 | t for t in range(5)], "tctl": 52.0, "power": "performance",
@@ -315,6 +358,9 @@ class Fake:
                     os.makedirs(d, exist_ok=True)
                     with open(d + "/core_id", "w") as fh:
                         fh.write(str(cid))
+            os.makedirs(P(CPUFREQ), exist_ok=True)
+            with open(P(CPUFREQ + "/boost"), "w") as fh:   # the kernel's boost switch (acpi-cpufreq style)
+                fh.write("1")
 
     def core(self, mask):
         """Core index addressed by an SMU core mask, or None: a wrong mask (8 << 20 on two CCDs, the slot
@@ -325,13 +371,13 @@ class Fake:
     def smn(self, addr):
         """The CCD and core fuse registers of the family (ZenStates-Core layout)."""
         fz = FAMILIES[self.s["codename"]]["fuses"]
-        ccds = len(self.disabled)
-        if addr == fz["ccd"][0]:
-            return ((1 << ccds) - 1) << 22          # CCD0/1 present, none down
-        if addr == fz["ccd"][1]:
-            return 0
+        if addr in fz["ccd"]:
+            if fz.get("map_from_down"):   # Zen 3: CCD0/1 down in bits 31:30, CCDs 2–7 down in the second word
+                down = sum(1 << c for c in range(8) if c not in self.phys)
+                return ((down & 3) << 30) | (1 << 22) if addr == fz["ccd"][0] else down >> 2
+            return sum(1 << p for p in self.phys) << 22 if addr == fz["ccd"][0] else 0   # Zen 4/5: present, none down
         ccd = (addr - fz["core"]) // fz["stride"]
-        return sum(1 << s for s in self.disabled[ccd]) if 0 <= ccd < ccds else 0xFFFFFFFF
+        return sum(1 << s for s in self.disabled[self.phys.index(ccd)]) if ccd in self.phys else 0xFFFFFFFF
 
     def _make_hwmon(self):
         d = P(self.FAN_DIR)
@@ -387,25 +433,24 @@ class Fake:
     def smu(self, mailbox, cmd, args):
         a = args[0] if args else 0
         s = self.s
-        CMD = FAMILIES[s["codename"]]["cmd"]
-        if (mailbox, cmd) == CMD["co_set"]:
+        name = {v: k for k, v in FAMILIES[s["codename"]]["cmd"].items()}.get((mailbox, cmd))   # by this family's IDs
+        if name == "co_set":
             c = self.core(a)
             self._write(lambda: c is not None and s["co"].__setitem__(c, s16(a)))
-        elif (mailbox, cmd) in (CMD["ppt_set"], CMD["tdc_set"], CMD["edc_set"]):
-            key = {CMD["ppt_set"]: "ppt", CMD["tdc_set"]: "tdc", CMD["edc_set"]: "edc"}[(mailbox, cmd)]
-            self._write(lambda: s.__setitem__(key, a / 1000.0))
-        elif (mailbox, cmd) == CMD["co_get"]:
+        elif name in ("ppt_set", "tdc_set", "edc_set"):
+            self._write(lambda: s.__setitem__(name[:3], a / 1000.0))
+        elif name == "co_get":
             c = self.core(a)
             return 1, [(s["co"][c] if c is not None else 0) & 0xFFFFFFFF, 0, 0, 0, 0, 0]
-        elif (mailbox, cmd) == CMD["fmax_set"]:
+        elif name == "fmax_set":
             self._write(lambda: s.__setitem__("fmax", a & 0xFFFFF))
-        elif (mailbox, cmd) == CMD["fmax_get"]:
+        elif name == "fmax_get":
             return 1, [s["fmax"], 0, 0, 0, 0, 0]
-        elif (mailbox, cmd) == CMD["tjmax_set"]:
+        elif name == "tjmax_set":
             self._write(lambda: s.__setitem__("thm", float(a)))
-        elif (mailbox, cmd) == CMD["shaper_set"]:
+        elif name == "shaper_set":
             self._write(lambda: s["shaper"].__setitem__(a & 0x7F, a))
-        elif (mailbox, cmd) == CMD["shaper_get"]:
+        elif name == "shaper_get":
             return 1, list(s["shaper"]) + [0]
         else:
             return 0xFE, [0] * 6
@@ -507,17 +552,22 @@ def smu(name, *args):
 
 def pm_table():
     try:
-        prefix = family()["pm_prefix"]
+        fam = family()
     except Err:
         return None, None
     version, t = FAKE.pm() if FAKE else pm_raw()
-    if version is None or prefix is None or (version >> 16) != prefix:
+    prefix = fam.get("pm_prefix")
+    if version is None or not ((prefix is not None and version >> 16 == prefix) or version in fam.get("pm_versions", ())):
         return None, None
     return version, t
 
 
 def check_cpu():
     return family()
+
+
+def co_range():
+    return family().get("co_range", (CO_MIN, CO_MAX))
 
 
 def co_support():
@@ -535,7 +585,9 @@ def tctl():
     for d in sorted(os.listdir(P(HWMON))):
         try:
             if read_text("%s/%s/name" % (HWMON, d)) == "k10temp":
-                return int(read_text("%s/%s/temp1_input" % (HWMON, d))) / 1000.0
+                # 1600X/1700X/1800X/2700X: Tctl carries a +20/+10 °C offset, k10temp adds the real Tdie as temp2
+                t = 2 if os.path.exists(P("%s/%s/temp2_label" % (HWMON, d))) and read_text("%s/%s/temp2_label" % (HWMON, d)) == "Tdie" else 1
+                return int(read_text("%s/%s/temp%d_input" % (HWMON, d, t))) / 1000.0
         except OSError:
             pass
     return None
@@ -573,6 +625,38 @@ def power_set(profile):
         if d.startswith("cpu") and d[3:].isdigit() and os.path.exists(f):
             with open(f, "w") as fh:
                 fh.write(epp)
+
+
+def boost_files():
+    """The kernel's Precision Boost switch: global (acpi-cpufreq, amd-pstate passive/guided) or per policy."""
+    if os.path.exists(P(CPUFREQ + "/boost")):
+        return [CPUFREQ + "/boost"]
+    d = P(CPUFREQ)
+    return ["%s/%s/boost" % (CPUFREQ, n) for n in sorted(os.listdir(d) if os.path.isdir(d) else [])
+            if n.startswith("policy") and os.path.exists("%s/%s/boost" % (d, n))]
+
+
+def boost_get():
+    """Switch state: "on", "off", or None without a switch (or with policies that disagree)."""
+    vals = {read_text(f) for f in boost_files()}
+    return {frozenset({"1"}): "on", frozenset({"0"}): "off"}.get(frozenset(vals))
+
+
+def cmd_boost(ctx, args):
+    """`boost on|off`: Precision Boost through the kernel (cpufreq), no SMU; read back from the same files.
+    The only frequency lever on CPUs without an FMax command (Ryzen 1000–3000)."""
+    if args not in (["on"], ["off"]):
+        raise Err(_("usage: boost on|off"))
+    files = boost_files()
+    if not files:
+        raise Err(_("boost switch not available (no cpufreq boost control)"))
+    if not ctx.get("dry"):
+        for f in files:
+            with open(P(f), "w") as fh:
+                fh.write("1" if args == ["on"] else "0")
+        if boost_get() != args[0]:
+            raise Err(_("boost: wrote %s but read back %s") % (args[0], boost_get()))
+    return {"boost": args[0]}
 
 
 # ---- State files (atomic writes) -----------------------------------------------------
@@ -628,8 +712,8 @@ def values_from_lines(lines):
             v[t[0]] = int(t[1])
         elif t[0] == "shaper" and len(t) == 5:
             v["shaper"][int(t[1])] = [int(x) for x in t[2:]]
-        elif t[0] == "power" and len(t) == 2:
-            v["power"] = t[1]
+        elif t[0] in ("power", "boost") and len(t) == 2:
+            v[t[0]] = t[1]
     return v
 
 
@@ -642,7 +726,8 @@ def read_co():
 
 
 def read_fmax():
-    return smu("fmax_get")[0]
+    """FMax in MHz, or None on families without the command (Zen 3 and older)."""
+    return smu("fmax_get")[0] if "fmax_get" in family()["cmd"] else None
 
 
 def read_shaper():
@@ -662,16 +747,18 @@ def read_limits():
 def capture_lines():
     """Current state in profile format (the baseline is a profile like any other)."""
     lim = read_limits()
-    co = read_co()
-    lines = (["co " + " ".join(str(v) for v in co)] if co is not None else []) + ["fmax %d" % read_fmax()]
+    co, fmax = read_co(), read_fmax()
+    lines = (["co " + " ".join(str(v) for v in co)] if co is not None else []) + (["fmax %d" % fmax] if fmax is not None else [])
     for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
         if pm_key in lim:
             lines.append("%s %d" % (key, round(lim[pm_key])))
     # Curve Shaper excluded: on the 9800X3D (SMU 98.81.0) 0xA6 replies OK but 0x84 does not change,
     # so it cannot be verified; it remains only as an experimental command (`shaper probe`).
-    power = power_get()
+    power, boost = power_get(), boost_get()
     if power:
         lines.append("power " + power)
+    if boost:
+        lines.append("boost " + boost)
     lines += fan_capture_lines()   # only channels already classified "ventola" (fan)
     return lines
 
@@ -785,9 +872,9 @@ def cmd_co(ctx, args):
         wanted = {core: to_int(args[1], "co")}
     else:
         raise Err(_("usage: co <core|all> <value> | co v0 … v%d") % (CORES - 1))
-    for v in wanted.values():
-        check_range("co", v, CO_MIN, CO_MAX)
     check_cpu()
+    for v in wanted.values():
+        check_range("co", v, *co_range())
     why = co_support()
     if why:
         raise Err(_("Curve Optimizer not available on this CPU: %s") % why)
@@ -802,7 +889,8 @@ def cmd_fmax(ctx, args):
     if len(args) != 1:
         raise Err(_("usage: fmax <MHz>"))
     v = to_int(args[0], "fmax")
-    check_cpu()
+    if "fmax_set" not in check_cpu()["cmd"]:
+        raise Err(_("FMax is not available on this CPU (no SMU command for it): use `boost off` to cap the clock"))
     base = load_baseline()
     check_range("fmax", v, FMAX_MIN, cap_of(base, "fmax", load_settings()["unlock"]), " MHz")
     return {"fmax": write_verify(ctx, "fmax", v, lambda x: smu("fmax_set", x & 0xFFFFF), read_fmax, base["fmax"])}
@@ -938,7 +1026,7 @@ def cmd_status(ctx, args):
         "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"),
                    "edc": lim.get("edc_limit"), "tjmax": lim.get("thm_limit")},
         "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
-        "power": power_get(),
+        "power": power_get(), "boost": boost_get(),
         "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
         "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
         "trusted": trust_user() in trust_users(),
@@ -949,7 +1037,7 @@ def cmd_status(ctx, args):
 
 def caps(base, unlock):
     """Allowed ranges (min, max) for the GUI: same logic as cap_of."""
-    out = {"co": [CO_MIN, CO_MAX], "fan_step_ms": [0, FAN_STEP_MAX_MS], "fan_step_tol_ms": FAN_STEP_TOL_MS}
+    out = {"co": list(co_range()), "fan_step_ms": [0, FAN_STEP_MAX_MS], "fan_step_tol_ms": FAN_STEP_TOL_MS}
     for key, lo in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN), ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
         if key in base:
             out[key] = [lo, cap_of(base, key, unlock)]
@@ -1037,7 +1125,7 @@ def fmt_status(st):
             f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
             f(st["limits"]["edc"], " A"), bl("edc", " A"), f(st["limits"]["tjmax"], " °C"), bl("tjmax", " °C")),
         _("Now     PPT %s  TDC %s  Tctl %s") % (f(st["now"]["ppt"], " W"), f(st["now"]["tdc"], " A"), f(st["now"]["tctl"], " °C")),
-        _("Power   %s%s") % (st["power"] or _("n/a"), bl("power")),
+        _("Power   %s%s, boost %s%s") % (st["power"] or _("n/a"), bl("power"), st["boost"] or _("n/a"), bl("boost")),
         _("Baseline %s, unlock %s, autostart %s, profile %s") % (
             _("of this boot") if st["baseline_fresh"] else (_("stale") if b else _("missing")),
             "ON" if st["unlock"] else "off", "ON" if st["autostart"] else "off", st["profile"] or "-"),
@@ -1046,7 +1134,7 @@ def fmt_status(st):
 
 
 # ---- Profiles ----------------------------------------------------------------------------
-PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "fan"}  # shaper: experimental, excluded
+PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "boost", "fan"}  # shaper: experimental, excluded
 FAN_PROFILE_SUBCMDS = ("step", "curve", "pump")   # `fan <N> step …` | `fan <N> curve …` | `fan <N> pump auto|<pct>`
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
@@ -1179,17 +1267,34 @@ PRESETS = {
 }
 
 
+def board_limits(base):
+    """The reason when the BIOS limits are the motherboard's (PBO "Enabled": PPT 1000 W and the like) rather
+    than the CPU's stock ones, otherwise None: ratios of them mean nothing (Quiet would be 550 W, the Auto knee
+    would sweep 1000 → 500 W). No stock desktop Ryzen goes beyond the unlock ceilings."""
+    over = ["%s %d" % (k.upper(), base[k]) for k, cap in (("ppt", UNLOCK_PPT), ("tdc", UNLOCK_TDC), ("edc", UNLOCK_EDC))
+            if base.get(k, 0) > cap]
+    return _("the BIOS reports motherboard limits (%s), not the CPU's stock ones: set PBO to Auto or Disabled in "
+             "the BIOS, or Advanced with your own limits") % ", ".join(over) if over else None
+
+
 def preset_lines(name, base):
     pr = PRESETS[name]
+    over = board_limits(base)
+    if over and name == "auto":   # 88 % of the stock limits: with motherboard limits there is nothing to scale
+        raise Err(over)
+    eco = dict(zip(("ppt", "tdc", "edc"), family().get("eco_limits", ())))   # AMD's Eco mode: Quiet/Eco in that case
     lines = ["co " + " ".join(str(v) for v in base["co"])] if "co" in base else []   # presets do not touch the CO
     for key, floor in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
         if key in base:
-            lines.append("%s %d" % (key, max(floor, round(base[key] * pr[key]))))
+            v = eco[key] if over and pr[key] < 1 and key in eco else max(floor, round(base[key] * pr[key]))
+            lines.append("%s %d" % (key, v))
     if "fmax" in base:
         lines.append("fmax %d" % max(FMAX_MIN, base["fmax"] + pr["fmax"]))
     if "tjmax" in base:
         lines.append("tjmax %d" % (base["tjmax"] if pr["tjmax"] is None else min(base["tjmax"], pr["tjmax"])))
     lines.append("power " + pr["power"])
+    if name == "quiet" and "co_set" not in family()["cmd"] and "boost" in base:
+        lines.append("boost off")   # Ryzen 1000–3000: no CO nor FMax, the kernel's boost switch is the lever
     d = fans_dir()
     if d:
         for n in fan_channels(d):
@@ -1519,6 +1624,7 @@ def at_params(mode, kvs):
             raise Err(_("unknown parameter '%s' (%s)") % (k, ", ".join(params)))
         params[k] = to_int(v, k)
     check_range("colimit", params["colimit"], CO_MIN, 0)
+    params["colimit"] = max(params["colimit"], co_range()[0])   # Zen 3: −30 at most
     check_range("margin", params["margin"], 0, 20)
     check_range("step", params["step"], 3, 3600, " s")
     if "target" in params:
@@ -1647,6 +1753,9 @@ def at_knee_step(ctx, st, base):
         for key in ("ppt", "tdc", "edc"):
             if lim[key] is not None:
                 run([key, str(lim[key])], ctx)
+        if "fmax" not in base:   # no FMax command (Zen 3): the knee is the PPT alone
+            at_finish_auto(ctx, st, base)
+            return
         st["phase"] = "fmax_knee"
         k["fmax"]["current"] = base["fmax"]
         return
@@ -1704,7 +1813,8 @@ def at_finish_auto(ctx, st, base):
     lim = at_scaled_limits(base, k["ppt"]["chosen"])
     co = "co " + " ".join(str(v) for v in st["final"])
     lines = [co] + ["%s %d" % (key, lim[key]) for key in ("ppt", "tdc", "edc") if lim[key] is not None]
-    lines.append("fmax %d" % k["fmax"]["chosen"])
+    if k["fmax"]["chosen"] is not None:
+        lines.append("fmax %d" % k["fmax"]["chosen"])
     lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax", "fan")]
     at_done(ctx, st, lines + at_fan_lines(st, base))
 
@@ -1833,6 +1943,8 @@ def _autotune(ctx, args):
         base = load_baseline()
         if args[1] == "auto" and "ppt" not in base:   # the knee sweeps the PPT, which needs the PM table
             raise Err(_("Auto needs the power limits of the PM table, not readable on this CPU: use Eco or Boost"))
+        if args[1] == "auto" and board_limits(base):   # the knee would sweep the motherboard's limits
+            raise Err(board_limits(base))
         params = at_params(args[1], args[2:])
         rm(P(AT_ABORT_FLAG))
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
@@ -2611,12 +2723,15 @@ def cmd_hwtest(ctx, args):
     no_co = co_support()
     steps = [("co", [str(last), str(max(CO_MIN, base["co"][last] - 3))], [str(last), str(base["co"][last])]) if not no_co
              else ("co", None, _("skipped: %s") % no_co),
-             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])])]
+             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])]) if "fmax" in base
+             else ("fmax", None, _("skipped: not available on this CPU"))]
     for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
         if key in base:
             steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
         else:
             steps.append((key, None, _("skipped: no baseline (PM table missing)")))
+    if "boost" in base:   # the kernel switch (no SMU): the other value, then back
+        steps.append(("boost", ["off" if base["boost"] == "on" else "on"], [base["boost"]]))
     results, failed = {}, False
     for key, test, restore in steps:
         if test is None:
@@ -2699,7 +2814,7 @@ COMMANDS = {
     "tdc": limit_setter("tdc", "tdc_limit", "tdc_set", "A", TDC_MIN),
     "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
     "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
-    "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "unlock": cmd_unlock,
+    "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "boost": cmd_boost, "unlock": cmd_unlock,
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart, "trust": cmd_trust,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
@@ -3461,6 +3576,96 @@ def selftest_variants():
     for argv in (["ppt", "100"], ["tjmax", "80"]):
         expect_err(argv, "PM table")
     expect_err(["shaper", "raw"], "not available")
+    # ---- Ryzen 5000 (Vermeer, a 5900X: 2 CCDs × 6): MP1 CO in −30..+30, RSMU limits read back from the
+    # PM table, no FMax command; the enabled CCDs from the Zen 3 "down" fuses ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-vermeer-")
+    FAKE = Fake("vermeer")            # CCD0 slots 1 and 6 disabled, CCD1 slots 0 and 3
+    init_cpu()
+    st = run(["status"])
+    assert st["cpu"] == "Vermeer" and not st["verified"] and st["fmax"] is None and st["shaper"] is None, st
+    assert core_map() == [(0, 0), (0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (1, 1), (1, 2), (1, 4), (1, 5), (1, 6), (1, 7)]
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert "fmax" not in base and base["ppt"] == 162 and base["co"] == [0] * 12 and base["boost"] == "on", base
+    assert run(["status"])["caps"]["co"] == [-30, 30] and "fmax" not in run(["status"])["caps"]
+    expect_err(["co", "0", "-31"], "out of range")
+    assert run(["co", "7", "-30"])["co"][7] == -30 and FAKE.s["co"][7] == -30      # core 7 = CCD1 slot 2
+    assert run(["ppt", "120"])["ppt"] == 120.0 and FAKE.s["ppt"] == 120.0          # RSMU 0x53, PM table index 0
+    assert run(["tjmax", "85"])["tjmax"] == 85.0
+    expect_err(["fmax", "4500"], "not available")
+    r = run(["hwtest"])
+    assert r["fmax"].startswith("skipped") and r["co"].startswith("ok") and r["ppt"].startswith("ok") and r["esito"] == "ok", r
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "ppt 89" in pl and "boost on" in pl and not any(l.startswith("fmax") for l in pl), pl   # Zen 3 has the CO: boost stays
+    st = run(["autotune", "start", "auto", "step=3", "reuse=0"])
+    assert st["params"]["colimit"] == -30, st["params"]
+    for _i in range(300):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and min(st["final"]) >= -30 and not st["knee"]["fmax"]["tests"], st   # knee: PPT alone
+    assert any(l.startswith("ppt ") for l in st["profile_lines"]) and not any(l.startswith("fmax") for l in st["profile_lines"])
+    run(["autotune", "abort"])
+    FAKE.s["pm_version"] = 0x380705   # a table outside the verified versions: limits refused
+    FAKE.save()
+    assert run(["status"])["limits"]["ppt"] is None
+    expect_err(["ppt", "100"], "PM table")
+    # a 5800X on the second CCD of a two-CCD package: the fuses are read even for a complete CCD
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-vermeer8-")
+    FAKE = Fake("vermeer8")
+    init_cpu()
+    assert core_map() == [(1, s) for s in range(8)] and co_mask(0) == 1 << 28
+    run(["boot"])
+    assert run(["co", "0", "-10"])["co"][0] == -10 and FAKE.s["co"][0] == -10
+    # ---- Ryzen 3000 (Matisse): no CO, no FMax; RSMU limits; Quiet turns the boost off ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-matisse-")
+    FAKE = Fake("matisse")
+    init_cpu()
+    st = run(["status"])
+    assert st["cpu"] == "Matisse" and st["co"] is None and "Curve Optimizer" in st["co_unavailable"] and st["fmax"] is None, st
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert "co" not in base and "fmax" not in base and base["ppt"] == 162 and base["boost"] == "on", base
+    assert run(["ppt", "100"])["ppt"] == 100.0 and run(["edc", "120"])["edc"] == 120.0
+    expect_err(["co", "0", "-5"], "not available")
+    expect_err(["autotune", "start", "eco", "step=3"], "Curve Optimizer")
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "boost off" in pl and "ppt 89" in pl and "tjmax 80" in pl, pl
+    run(["preset", "quiet"])
+    run(["apply", "quiet"])
+    assert boost_get() == "off" and run(["status"])["boost"] == "off"
+    run(["default"])
+    assert boost_get() == "on"
+    r = run(["hwtest"])
+    assert r["co"].startswith("skipped") and r["fmax"].startswith("skipped") and r["boost"].startswith("ok") and r["esito"] == "ok", r
+    # ---- Ryzen 2000 (Pinnacle Ridge): no SMU command at all; boost, power profile and fans ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-pinnacle-")
+    FAKE = Fake("pinnacle")
+    init_cpu()
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert set(base) <= {"shaper", "power", "boost"} and base["boost"] == "on", base
+    for argv, why in ((["ppt", "100"], "baseline"), (["tjmax", "80"], "baseline"), (["fmax", "3000"], "not available"),
+                      (["co", "0", "-5"], "not available")):
+        expect_err(argv, why)
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "boost off" in pl and not any(l.split()[0] in ("co", "ppt", "fmax", "tjmax") for l in pl), pl
+    r = run(["hwtest"])
+    assert r["boost"].startswith("ok") and r["esito"] == "ok", r
+    os.remove(P(CPUFREQ + "/boost"))   # a kernel without the boost switch
+    expect_err(["boost", "off"], "not available")
+    assert run(["status"])["boost"] is None
+    # ---- motherboard limits in the BIOS (PBO "Enabled": PPT 1000 W): Quiet on AMD's Eco mode, Auto refused ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-board-")
+    FAKE = Fake("granite")
+    FAKE.s.update({"ppt": 1000.0, "tdc": 1000.0, "edc": 1000.0})
+    FAKE.save()
+    init_cpu()
+    run(["boot"])
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "ppt 88" in pl and "tdc 75" in pl and "edc 150" in pl, pl
+    expect_err(["preset", "auto", "show"], "motherboard limits")
+    expect_err(["autotune", "start", "auto", "step=3"], "motherboard limits")
 
 
 def main():

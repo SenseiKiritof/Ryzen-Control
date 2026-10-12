@@ -156,8 +156,26 @@ msgstr "Ora     PPT %s  TDC %s  Tctl %s"
 
 #: ryzenctl
 #, python-format
-msgid "Power   %s%s"
-msgstr "Energia %s%s"
+msgid "Power   %s%s, boost %s%s"
+msgstr "Energia %s%s, boost %s%s"
+
+msgid "usage: boost on|off"
+msgstr "uso: boost on|off"
+
+msgid "boost switch not available (no cpufreq boost control)"
+msgstr "interruttore del boost non disponibile (nessun controllo del boost in cpufreq)"
+
+msgid "boost: wrote %s but read back %s"
+msgstr "boost: scritto %s ma riletto %s"
+
+msgid "FMax is not available on this CPU (no SMU command for it): use `boost off` to cap the clock"
+msgstr "FMax non disponibile su questa CPU (nessun comando SMU): usa `boost off` per limitare la frequenza"
+
+msgid "skipped: not available on this CPU"
+msgstr "saltato: non disponibile su questa CPU"
+
+msgid "the BIOS reports motherboard limits (%s), not the CPU's stock ones: set PBO to Auto or Disabled in the BIOS, or Advanced with your own limits"
+msgstr "il BIOS riporta i limiti della scheda madre (%s), non quelli di fabbrica della CPU: nel BIOS imposta PBO su Auto o Disabled, oppure Advanced con limiti tuoi"
 
 #: ryzenctl
 #, python-format

@@ -401,8 +401,8 @@ def values_of(lines, cores):
                     f["curve"] = " ".join(t[3:])
                 elif t[2] == "pump":   # auto | max <pct> | <pct>
                     f["pump"] = "auto" if t[3] == "auto" else ("max", int(t[4])) if t[3] == "max" else int(t[3])
-            elif t[0] == "power":
-                v["power"] = t[1]
+            elif t[0] in ("power", "boost"):
+                v[t[0]] = t[1]
             elif len(t) == 2:
                 v[t[0]] = int(t[1])
         except (ValueError, IndexError):
@@ -420,6 +420,8 @@ def profile_table(lines, st):
     rows = [(title, diff_label(base.get(key), v[key], unit)) for key, title, unit in CPU_PARAMS if key in v]
     if "power" in v:
         rows.append((_("Power mode"), diff_label(base.get("power"), v["power"])))
+    if "boost" in v:
+        rows.append((_("Boost"), diff_label(base.get("boost"), v["boost"])))
     n_flow = len(rows)   # the rows after these (CO, fans) go one per line in the grid, in order
     if "co" in v:   # one line of chips per CCD
         chips = Gtk.Grid(column_spacing=4, row_spacing=4, column_homogeneous=True, halign=Gtk.Align.START)
@@ -1158,8 +1160,9 @@ class AutotuneDialog(Adw.Window):
             self.result.append(profile_view(st["profile_lines"], self.win.status))
         knee = st.get("knee")
         if knee and knee["ppt"].get("chosen"):
-            self.result.append(label(_("Performance/watt knee: PPT %d W, FMax %d MHz (maximum loss %d %%)") % (
-                knee["ppt"]["chosen"], knee["fmax"]["chosen"] or 0, st.get("params", {}).get("loss", 0)), ["numeric"], wrap=True))
+            fmax = (_(", FMax %d MHz") % knee["fmax"]["chosen"]) if knee["fmax"].get("chosen") else ""   # no FMax on Zen 3
+            self.result.append(label(_("Performance/watt knee: PPT %d W%s (maximum loss %d %%)") % (
+                knee["ppt"]["chosen"], fmax, st.get("params", {}).get("loss", 0)), ["numeric"], wrap=True))
         method = self.load_method(st)
         if method:
             self.result.append(label(_("Test load: %s — the one that draws the most power on this CPU") % method, ["dim-label"], wrap=True))
@@ -1221,7 +1224,7 @@ class ModesPage(Gtk.ScrolledWindow):
             cols.append(col)
         content.append(cols)
         self.rows, first = {}, None
-        self.tables = {}
+        self.tables, self.cal = {}, {}
         for key, title, sub in MODES:
             if key in PRESETS:   # expandable: under the row the stock → profile table
                 row = Adw.ExpanderRow(title=title, subtitle=sub, expanded=True)
@@ -1245,7 +1248,7 @@ class ModesPage(Gtk.ScrolledWindow):
                 tag.add_css_class("success" if key in CALIBRATED else "dim-label")
                 row.add_suffix(tag)
                 if key in CALIBRATED:
-                    cal = button(_("Calibrate…"), lambda k=key: self.calibrate(k))
+                    cal = self.cal[key] = button(_("Calibrate…"), lambda k=key: self.calibrate(k))
                     cal.set_tooltip_text(_("Measures on this CPU: per-core undervolt, FMax, limits and fans"))
                     row.add_suffix(cal)
                 regen = Gtk.Button(icon_name="view-refresh-symbolic", valign=Gtk.Align.CENTER,
@@ -1254,26 +1257,29 @@ class ModesPage(Gtk.ScrolledWindow):
                 regen.connect("clicked", lambda *_a, k=key: self.regen(k))
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
-            if key == "boost":
-                self.boost_widgets = (chk, cal, regen)
             lists["calibrate" if key in CALIBRATED else "preset"].append(row)
-        self.lock_boost(True)   # until the status says that unlock is on
+        self.lock_calibrated({})   # until the status says that unlock is on
 
-    def lock_boost(self, locked):
-        """Boost only with unlock (ryzenctl refuses it too): radio and buttons insensitive, row dimmed,
-        the reason in the tooltip of the row, which stays sensitive: GTK 4 hides a tooltip owned by an
-        insensitive widget at the first pointer motion. The buttons' own tooltips are off meanwhile,
-        so they do not cover the row's."""
-        row = self.rows["boost"][0]
-        for w in self.boost_widgets:
-            w.set_sensitive(not locked)
-            w.set_has_tooltip(not locked)
-        (row.add_css_class if locked else row.remove_css_class)("dim-label")
-        row.set_tooltip_text(_("Boost needs \"Allow beyond the stock values\": turn it on in Preferences") if locked else None)
+    def lock_calibrated(self, st):
+        """The calibrated modes measure the per-core CO (none on Ryzen 1000–3000); Boost also needs unlock
+        (ryzenctl refuses both). Radio and buttons insensitive, row dimmed, the reason in the tooltip of the
+        row, which stays sensitive: GTK 4 hides a tooltip owned by an insensitive widget at the first pointer
+        motion. The buttons' own tooltips are off meanwhile, so they do not cover the row's."""
+        no_co = st.get("co_unavailable")
+        for key in CALIBRATED:
+            why = (_("Calibrated modes measure the per-core Curve Optimizer, not available on this CPU: %s") % no_co if no_co
+                   else _("Boost needs \"Allow beyond the stock values\": turn it on in Preferences")
+                   if key == "boost" and not st.get("unlock") else None)
+            row, chk, regen = self.rows[key]
+            for w in (chk, self.cal[key], regen):
+                w.set_sensitive(not why)
+                w.set_has_tooltip(not why)
+            (row.add_css_class if why else row.remove_css_class)("dim-label")
+            row.set_tooltip_text(why)
 
     def refresh(self, st):
         self.loading = True
-        self.lock_boost(not st.get("unlock"))
+        self.lock_calibrated(st)
         prof = st.get("profile")
         shown = st.get("profile_lines", {})
         for key, title, sub in MODES:
@@ -1533,6 +1539,14 @@ class CpuPage(Page):
         row.append(self.power)
         row.append(label(_("system power profile (power-profiles-daemon / EPP)"), ["dim-label"]))
         self.body.append(row)
+        self.boost_row = Gtk.Box(spacing=12)
+        self.boost_row.append(label(_("Boost"), ["heading"], width_chars=9))
+        self.boost = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.boost_row.append(self.boost)
+        self.boost_row.append(label(_("Precision Boost (kernel switch): off keeps the clock at the base frequency, the frequency "
+                                      "lever of CPUs without FMax"), ["dim-label"], wrap=True))
+        self.body.append(self.boost_row)
+        self.read_boost = None
         self.nocaps = label(_("Baseline of this boot missing: no CPU write possible (ryzenctl.service did not capture it, see `ryzenctl status`)."),
                             ["warning"], wrap=True, visible=False)
         self.body.append(self.nocaps)
@@ -1556,18 +1570,25 @@ class CpuPage(Page):
         self.power.set_sensitive(self.read_power in POWER)
         if self.read_power in POWER:
             self.power.set_selected(POWER.index(self.read_power))
+        self.read_boost = st.get("boost")
+        self.boost_row.set_visible(self.read_boost is not None)
+        self.boost.set_active(self.read_boost == "on")
 
     def reset(self):
         for p in self.params.values():
             p.reset()
         if self.read_power in POWER:
             self.power.set_selected(POWER.index(self.read_power))
+        self.boost.set_active(self.read_boost == "on")
 
     def lines(self, only_changed):
         out = ["%s %d" % (key, p.value()) for key, p in self.params.items() if p.get_visible() and (not only_changed or p.changed())]
         pw = POWER[self.power.get_selected()]
         if self.power.get_sensitive() and (not only_changed or pw != self.read_power):
             out.append("power " + pw)
+        b = "on" if self.boost.get_active() else "off"
+        if self.read_boost and (not only_changed or b != self.read_boost):
+            out.append("boost " + b)
         return out
 
 
@@ -2099,10 +2120,13 @@ class App(Adw.Application):
         try:
             win.h.call("autotune", "abort")
             modes = next(p for p in win.pages if isinstance(p, ModesPage))
+            no_co = bool(win.status.get("co_unavailable"))   # Ryzen 1000–3000: every calibrated mode locked, with the reason
             for on in (False, True):   # Boost only with unlock: disabled without it, usable as soon as the status says on
                 modes.refresh(dict(win.status, unlock=on))
                 row, chk, regen = modes.rows["boost"]
-                assert chk.get_sensitive() == regen.get_sensitive() == on and (row.get_tooltip_text() is None) == on
+                ok = on and not no_co
+                assert chk.get_sensitive() == regen.get_sensitive() == ok and (row.get_tooltip_text() is None) == ok
+                assert all(modes.rows[k][1].get_sensitive() != no_co for k in ("eco", "auto"))
             # per-core views follow the active cores, also when the count changes: rows replaced, not added
             mon = next(p for p in win.pages if isinstance(p, MonitorPage))
             curve = next(p for p in win.pages if isinstance(p, CurvePage))

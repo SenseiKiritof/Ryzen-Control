@@ -52,7 +52,15 @@ Vermeer/Matisse left out for lack of reliable IDs/maps. Step 20: the GUI shows a
 active cores (rows from `status.cores`/telemetry), the family and core count on the Monitor, a note
 for families not verified; Auto refused where the PM limits are unknown (its knee needs the PPT). Step 21:
 README "Processors" table (verified / expected / not supported) and the `hwtest` procedure for
-third-party CPUs; tag `v0.5.0` after the `hwtest` on the 9800X3D. Next: phase 6 tray icon
+third-party CPUs; `hwtest` ok on the 9800X3D after the refactor (2026-10-12). Rev. 16, from three
+research agents (Ryzen 5000, older CPUs, Windows tools): Vermeer expected (CO MP1 0x35/0x48 in
+−30..+30, limits RSMU 0x53–0x56, PM tables 0x3808xx/0x3809xx, Zen 3 fuses always read), Matisse
+expected (limits only), Summit/Pinnacle Ridge (no SMU command: boost, power, fans); FMax optional
+everywhere, per-family CO range, `boost on|off` (cpufreq, no SMU), Tdie on the X parts with an
+offset, board-limit guard (motherboard limits in the BIOS: Quiet/Eco on AMD's Eco mode values, Auto
+refused); calibration ideas from CoreCycler: single-core phase in the final pass (user choice,
+default on), hardware watchdog during a calibration, `autotune verify`. Tag `v0.5.0` after these.
+Next: phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
 
@@ -195,25 +203,37 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
 - Strict SMU allowlist per family (`FAMILIES[codename]["cmd"]` at the top of `ryzenctl`; `smu()` never
   sends a name missing from the entry). Granite Ridge: CO MP1 0x35, PPT/TDC/EDC MP1
   0x3E/0x3C/0x3D, FMax RSMU 0x70/0x6E, Tjmax RSMU 0x59, Shaper RSMU 0xA6/0x84, CO get RSMU
-  0xD5. No other ID is sent. Never MP1 0x58–0x6F (freezes the SMU on the 9800X3D) nor MP1
-  0x10 (turns off the display). Never voltage commands, OC mode (RSMU 0x5D), fixed VID (0x61),
+  0xD5. Vermeer: CO MP1 0x35 / get MP1 0x48, PPT/TDC/EDC/Tjmax RSMU 0x53/0x54/0x55/0x56. Matisse:
+  RSMU 0x53–0x56 only (never MP1 on Zen 2). Summit/Pinnacle Ridge: none. No other ID is sent. The
+  same number means different things per family (MP1 0x3E: PPT on Zen 4/5, Tjmax on Zen 3): never
+  by analogy. Never MP1 0x58–0x6F (freezes the SMU on the 9800X3D) nor MP1
+  0x10 (turns off the display); on Zen 2/3 never RSMU 0x58 (PBO scalar), 0x5A–0x5D (OC mode,
+  PROCHOT, OC frequency), 0x61 (OC VID). Never voltage commands, OC mode (RSMU 0x5D), fixed VID (0x61),
   PBO scalar (0x5B), `smn` writes, FCLK/memory.
-- Gate: the driver's `codename` must be a key of `FAMILIES` (23 Granite Ridge verified, 20 Raphael
-  not verified), otherwise total refusal (`family()`); no readable CPU topology → refusal too.
+- Gate: the driver's `codename` must be a key of `FAMILIES` (23 Granite Ridge verified; 20 Raphael,
+  12 Vermeer, 4 Matisse, 10 Pinnacle Ridge, 9 Summit Ridge not verified), otherwise total refusal
+  (`family()`); no readable CPU topology → refusal too. `boost` and `power` are kernel switches
+  (cpufreq/EPP, no SMU) read back from sysfs.
 - Per-core CO only where the physical core slot is certain (`core_map`/`co_support`): complete CCDs
-  (8 cores) map in order with no register read; CCDs with disabled cores take the enabled slots from
+  (8 cores) map in order with no register read (Zen 4/5 only: on Zen 3, `map_from_down`, the fuses
+  are always read, an 8-core part can sit on the second CCD); CCDs with disabled cores take the enabled slots from
   the core fuses, read through the driver's `smn` file (4-byte write = read; **never** the 8-byte
   write) only at the fuse addresses of the family entry, and only if they match the sysfs topology;
   otherwise CO, calibrations and the CO step of `hwtest` are refused/skipped.
 - Every SMU transaction under `flock(/run/ryzenctl/lock)` (the driver's `smu_args` is global).
 - Every write is followed by a readback; mismatch → one retry → restore of the baseline value →
   error. No automatic fallback to other IDs.
-- Floors: PPT ≥ 45 W, TDC ≥ 30 A, EDC ≥ 45 A (PPT 0 locks the CPU at 606 MHz). CO/Shaper −50..+30,
+- Floors: PPT ≥ 45 W, TDC ≥ 30 A, EDC ≥ 45 A (PPT 0 locks the CPU at 606 MHz). CO/Shaper −50..+30
+  (CO per family: `co_range`, −30..+30 on Zen 3),
   FMax 3000..baseline(+200 unlocked), Tjmax 60..min(baseline, 95). The constants live at the top
   of `ryzenctl` and are calibration knobs, not to be scattered around.
-- PM table values read only if `pm_table_version>>16` is the family's `pm_prefix` (0x62), per-core
-  arrays only for a version in its `pm_cores` (0x620105); PM table absent → PPT/TDC/EDC/Tjmax
-  refused (fail closed), CO/FMax/Shaper ok.
+- PM table values read only if `pm_table_version>>16` is the family's `pm_prefix` (0x62) or the
+  version is in its `pm_versions` (Vermeer, Matisse: the versions with a checked map), per-core
+  arrays (by physical slot, through `core_map`) only for a version in its `pm_cores` (0x620105); PM
+  table absent → PPT/TDC/EDC/Tjmax refused (fail closed), CO/FMax/Shaper ok. A family without
+  `fmax_set` (Zen 3 and older) has no FMax anywhere (baseline, presets, Auto knee, hwtest).
+- Baseline limits above the unlock ceilings are the motherboard's (`board_limits`): ratios of them
+  are refused (Auto) or replaced by the family's `eco_limits` (Quiet/Eco).
 - Profile names only `[a-z0-9_-]{1,32}`, `baseline` reserved. State files written atomically
   (`write_atomic`).
 

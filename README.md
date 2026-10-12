@@ -1,7 +1,7 @@
 # Ryzen Control
 
 Ryzen Master-style control for AMD Ryzen desktop processors on Linux (Ryzen 9000 verified,
-Ryzen 7000 expected: see [Processors](#processors)): per-core Curve Optimizer and Curve Shaper,
+Ryzen 1000–7000 expected: see [Processors](#processors)): per-core Curve Optimizer and Curve Shaper,
 PPT/TDC/EDC limits, boost frequency (FMax), maximum temperature (Tjmax), power profile and
 motherboard fans. Profiles applied at boot with protection after a crash.
 
@@ -31,8 +31,9 @@ has written and read back each of its functions; until then it is **expected**: 
 | Ryzen 9000 desktop: 9800X3D | Granite Ridge (23) | **verified** on 9800X3D, SMU 98.81.0, PM table 0x620105 | Curve Optimizer, FMax, PPT/TDC/EDC, Tjmax, voltage and temperature per core, all calibrations; Curve Shaper experimental (not verifiable) |
 | Ryzen 9000 desktop: 9600X, 9700X, 9900X, 9950X, 9900X3D, 9950X3D | Granite Ridge (23) | expected | as above; the limits are read at the PM table offsets measured on 0x620105, voltage and temperature per core only with that version; the 6-core CCDs (9600X, 9900X, 9900X3D) take the core positions from the fuses |
 | Ryzen 7000 desktop: 7600X … 7950X3D | Raphael (20) | expected | Curve Optimizer, FMax, Eco and Boost calibrations; PPT/TDC/EDC/Tjmax and Auto refused (no verified map of the limits in its PM table) |
-| Ryzen 5000 desktop | Vermeer (12) | not supported | no reliable Curve Optimizer readback, no FMax command |
-| Ryzen 1000–3000 desktop | Summit Ridge, Pinnacle Ridge, Matisse | not supported | no Curve Optimizer |
+| Ryzen 5000 desktop: 5600X … 5950X, 5800X3D | Vermeer (12) | expected | Curve Optimizer (−30..+30), PPT/TDC/EDC/Tjmax (PM tables 0x3808xx/0x3809xx), all calibrations, Auto on the PPT alone; no FMax (Zen 3 has no command for it); the core positions always come from the fuses; on the 5800X3D the BIOS may lock the power limits (the CO still works) |
+| Ryzen 3000 desktop: 3600 … 3950X | Matisse (4) | expected | PPT/TDC/EDC/Tjmax (PM tables 0x240803/0x240903), Quiet and Performance, Quiet also turns the boost off; no Curve Optimizer, so no calibrated modes |
+| Ryzen 1000/2000 desktop | Summit Ridge (9), Pinnacle Ridge (10) | expected | boost switch, power profile and fans only: no SMU command (no Curve Optimizer, no readable limits); Tdie instead of Tctl on the X models with an offset |
 | APUs and laptops (Ryzen G, mobile, Ryzen AI) | Raven Ridge … Strix Halo | not supported | other limits (STAPM, fast/slow PPT), often no RSMU mailbox |
 | Threadripper, EPYC | — | not supported | other interface (HSMP), out of scope |
 
@@ -169,6 +170,7 @@ sudo ryzenctl ppt 120                # limits: ppt (W), tdc (A), edc (A)
 sudo ryzenctl fmax 5000              # maximum boost frequency (MHz)
 sudo ryzenctl tjmax 85               # maximum temperature (°C), never above the baseline
 sudo ryzenctl power balanced         # power-saver | balanced | performance
+sudo ryzenctl boost off              # Precision Boost through the kernel (cpufreq), no SMU: on | off
 sudo ryzenctl default                # everything back to the base (BIOS) values, autostart off
 sudo ryzenctl trust on|off|status    # polkit rule: your user starts Ryzen Control without a password
 sudo ryzenctl hwtest                 # reversible test of every command with readback
@@ -212,8 +214,12 @@ BIOS. In profiles: `fan <N> step …`, `fan <N> curve …`, `fan <N> pump auto|m
 ### Modes and automatic calibration
 
 From the GUI (Modes page) or the CLI. Fixed presets (no test): **Default** = BIOS values,
-**Quiet** = limits ×0.55/0.63/0.83, FMax −400, Tjmax 80, fans 10 s/5 s, **Performance** =
-factory values with power at maximum. Modes **calibrated on the hardware** with load tests
+**Quiet** = limits ×0.55/0.63/0.83, FMax −400, Tjmax 80, fans 10 s/5 s (on Ryzen 1000–3000, which
+have neither Curve Optimizer nor FMax, also the boost off), **Performance** =
+factory values with power at maximum. If the BIOS reports the motherboard's limits instead of the
+CPU's (PBO "Enabled" on many boards: PPT 1000 W and the like), ratios of them mean nothing: Quiet
+and Eco use AMD's 65 W Eco mode values (88 W / 75 A / 150 A on AM5, 88 / 60 / 90 on AM4) and Auto
+is refused with the reason (set PBO to Auto/Disabled, or Advanced with your own limits). Modes **calibrated on the hardware** with load tests
 (**Eco**, **Auto**, **Boost**): the search for the per-core CO stability limit is a single one,
 shared and saved (`/var/lib/ryzenctl/co_limits.json`, reused by later calibrations), and the three
 modes use the same margin (+3), so the same validated undervolt.
@@ -303,7 +309,8 @@ the BIOS.
   only the enabled cores. With complete CCDs (8 cores) the positions are 0–7 in order. With
   disabled cores (e.g. 9600X, 9900X, 7600X) the positions come from the core fuses, read through
   the driver's `smn` file — reads only, only at the fuse addresses of the CPU family — and are used
-  only if they agree with the system topology; otherwise the per-core CO is refused.
+  only if they agree with the system topology; otherwise the per-core CO is refused. On Ryzen 5000
+  the fuses are always read: an 8-core part can sit on the second CCD of a two-CCD package.
 - **Crash-guard**: `ryzenctl.service` writes the markers `dirty` (boot in progress) and `active`
   (state modified) *before* touching the SMU and removes `dirty` at clean shutdown. If both
   exist at the next boot, the system crashed: the CPU profile is **not reapplied**,

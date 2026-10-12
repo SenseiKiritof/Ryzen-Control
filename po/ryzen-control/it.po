@@ -515,8 +515,17 @@ msgid "Performance"
 msgstr "Performance"
 
 #, python-format
-msgid "Performance/watt knee: PPT %d W, FMax %d MHz (maximum loss %d %%)"
-msgstr "Ginocchio prestazioni/watt: PPT %d W, FMax %d MHz (perdita massima %d %%)"
+msgid "Performance/watt knee: PPT %d W%s (maximum loss %d %%)"
+msgstr "Ginocchio prestazioni/watt: PPT %d W%s (perdita massima %d %%)"
+
+msgid ", FMax %d MHz"
+msgstr ", FMax %d MHz"
+
+msgid "Calibrated modes measure the per-core Curve Optimizer, not available on this CPU: %s"
+msgstr "Le modalità calibrate misurano il Curve Optimizer per core, non disponibile su questa CPU: %s"
+
+msgid "Precision Boost (kernel switch): off keeps the clock at the base frequency, the frequency lever of CPUs without FMax"
+msgstr "Precision Boost (interruttore del kernel): spento tiene la frequenza base, la leva sulla frequenza delle CPU senza FMax"
 
 msgid "Polkit rule for your user, only for Ryzen Control in the local session: the password is needed once to write it, then never again"
 msgstr "Regola polkit per il tuo utente, solo per Ryzen Control nella sessione locale: la prima volta la password serve per scriverla, poi mai più"
