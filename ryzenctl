@@ -1283,7 +1283,9 @@ FINAL_HEAVY_SEC = 60   # final pass: first the heaviest method at full load (fft
 # Final pass, single-core part (CoreCycler: all-core loads miss the CO instability that one thread alone at the highest
 # boost shows): per core one worker on one hardware thread, busy slices with short idle gaps, then SINGLE_GAP s idle
 SINGLE_SEC, SINGLE_GAP = 45, 2
-CORE_RAISE = 3   # a core that failed alone (single-core test): +3 on that core only, like a failed final pass on all
+CORE_RAISE = 3   # a core that failed alone (single-core test, verify): +3 on that core only, like a failed final pass on all
+VERIFY_MINUTES, VERIFY_MIN, VERIFY_MAX = 60, 10, 1440   # autotune verify: default and allowed duration (min)
+VERIFY_PAR_SEC = 60   # verify: the all-core pass that closes each iteration (co_test_parallel)
 FMAX_STEP = 100   # Auto: FMax knee sweep
 
 
@@ -1410,7 +1412,7 @@ def co_test_final(method, seconds):
 
 
 def single_sec():
-    """Duration of the single-core test of every core (final pass)."""
+    """Duration of the single-core test of every core (final pass, one verify iteration)."""
     return CORES * (SINGLE_SEC + SINGLE_GAP)
 
 
@@ -1514,6 +1516,12 @@ def at_total_estimate(mode, p):
 def at_estimate(st):
     """{total_s, remaining_s}: estimated remaining time from the current phase."""
     p, ph = st["params"], st["phase"]
+    if st.get("verify"):   # ponytail: failed cores still counted, the bursts closing co_test_parallel (~3 s per core) not
+        rem = 0
+        if ph == "verify":   # the rest of this iteration, then the iterations left
+            rem = (CORES - st["core"]) * (SINGLE_SEC + SINGLE_GAP) + VERIFY_PAR_SEC
+            rem += (st["iterations"] - st["iteration"]) * (single_sec() + VERIFY_PAR_SEC)
+        return {"total_s": st["eta_total"], "remaining_s": int(rem)}
     levels = max(1, (-p["colimit"]) // CO_STEP)
     rem = 0
     if ph == "co":
@@ -1867,22 +1875,23 @@ def at_mv_per_step(st):
 
 
 def cmd_autotune(ctx, args):
-    """autotune start eco|auto|boost [key=value…] | step | status | abort | save [apply] | estimate eco|auto|boost
-    [key=value…]. Under `serve` the hardware watchdog follows the run."""
+    """autotune start eco|auto|boost [key=value…] | verify <profile> [minutes=N watchdog=1] | step | status | abort |
+    finish | save [apply] | estimate eco|auto|boost [key=value…]. Under `serve` the hardware watchdog follows the run."""
     if WD and args[:1] == ["step"]:
         WD.follow(at_load())                   # (re)armed before the step: a resumed run is protected too
     try:
         st = _autotune(ctx, args)
     except Exception:
-        if WD and args[:1] in (["start"], ["step"]):
+        if WD and args[:1] in (["start"], ["verify"], ["step"]):
             WD.disarm()                        # the run stops here (the GUI shows the error and discards it)
         raise
     if isinstance(st, dict) and st.get("phase"):
         st["eta"] = at_estimate(st)
-        st["mv_per_step"] = at_mv_per_step(st)
-        st["final_margin"] = at_margin(st)
+        if not st.get("verify"):
+            st["mv_per_step"] = at_mv_per_step(st)
+            st["final_margin"] = at_margin(st)
     if WD and isinstance(st, dict) and "phase" in st:
-        WD.follow(st, arm=args[0] == "start")
+        WD.follow(st, arm=args[0] in ("start", "verify"))
         if WD.status:
             st["watchdog"] = WD.status
     return st
@@ -1890,7 +1899,7 @@ def cmd_autotune(ctx, args):
 
 def _autotune(ctx, args):
     if not args:
-        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1 watchdog=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
+        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1 watchdog=1] | verify <profile> [minutes=60] | step | status | abort | finish | save [apply] | estimate eco|auto|boost […]"))
     if args[0] == "status":
         return at_load() or {"phase": None}
     if args[0] == "estimate":
@@ -1902,6 +1911,18 @@ def _autotune(ctx, args):
                 "parallel_total_s": at_total_estimate(args[1], dict(p, parallel=1)),
                 "sequential_total_s": at_total_estimate(args[1], dict(p, parallel=0)), "params": p,
                 "single_s": single_sec(), "co_reuse": reused.get("co_reused"), "eco_from": reused.get("eco_from")}
+    if args[0] == "verify":
+        return at_verify_start(ctx, args[1:])
+    if args[0] == "finish":                            # verify: stop now and keep what was tested
+        rm(P(AT_ABORT_FLAG))                           # raised by serve to interrupt the test in progress
+        st = at_load()
+        if not st or not st.get("verify") or st["phase"] != "verify":
+            raise Err(_("no verification in progress"))
+        at_attribute_crash(st)
+        st.pop("interrupted", None)
+        at_verify_done(ctx, st)
+        at_save(st)
+        return st
     if args[0] == "abort":
         st = at_load()
         if st:
@@ -1957,7 +1978,7 @@ def _autotune(ctx, args):
         at_save(st)
         return st
     if args[0] != "step":
-        raise Err(_("usage: autotune start|step|status|abort|save|estimate"))
+        raise Err(_("usage: autotune start|verify|step|status|abort|finish|save|estimate"))
     st = at_load()
     if not st or st["phase"] == "done":
         raise Err(_("no calibration in progress (autotune start eco|auto|boost)"))
@@ -1999,6 +2020,8 @@ def at_attribute_crash(st):
         co_limits_save(st)
     elif ip["kind"] == "final":                        # with "core": the single-core test of that core alone
         at_final_failed(st, "crash", ip.get("core"))
+    elif ip["kind"] == "verify":                       # the core under test; in the all-core pass every core tested
+        at_verify_record(st, [ip["core"]] if ip.get("core") is not None else ip["cores"], "crash")
     else:                                              # post: final CO applied, unstable combination
         at_post_failed(st, "crash")
     return True
@@ -2009,6 +2032,8 @@ def at_step(ctx, st, base):
     if at_attribute_crash(st):
         at_save(st)
         return st
+    if st.get("verify"):
+        return at_verify_step(ctx, st)
     if st["phase"] == "co" and st.get("parallel"):
         v, cores = st["value"], st["active_cores"]
         st["in_progress"] = {"kind": "co_par", "cores": cores, "value": v, "boot_id": boot_id()}
@@ -2193,6 +2218,105 @@ def at_finish_eco(ctx, st, base):
     lines = ["co " + " ".join(str(v) for v in st["final"])]
     lines += [l for l in preset_lines("eco", base) if l.split()[0] not in ("co", "fan")]
     at_done(ctx, st, lines + at_fan_lines(st, base))
+
+
+# ---- autotune verify: long check of a saved profile (CoreCycler iterations, Ryzen Master "Validate Offset") --
+def at_verify_start(ctx, args):
+    """`autotune verify <profile> [minutes=N watchdog=1]`: the profile is applied with the normal `apply` (CPU part),
+    then only loads run, one test per step: every core alone (the single-core test of the final pass), then all
+    cores together (co_test_parallel), in iterations until the time is up. CO and limits are never written during
+    the run (the profile is applied again only after a reboot, when the CPU is back at stock)."""
+    if not args or "=" in args[0]:
+        raise Err(_("usage: autotune verify <profile> [minutes=%d]") % VERIFY_MINUTES)
+    name, p = args[0], {"minutes": VERIFY_MINUTES, "watchdog": 1}
+    for kv in args[1:]:
+        k, _sep, v = kv.partition("=")
+        if k not in p:
+            raise Err(_("unknown parameter '%s' (%s)") % (k, ", ".join(p)))
+        p[k] = to_int(v, k)
+    check_range("minutes", p["minutes"], VERIFY_MIN, VERIFY_MAX, " min")
+    check_range("watchdog", p["watchdog"], 0, 1)
+    if name == "baseline":
+        raise Err(_("'baseline' is reserved"))
+    try:
+        own = parse_lines(open(profile_path(name)).read())
+    except OSError:
+        raise Err(_("profile '%s' does not exist") % name)
+    if not any(t[0] == "co" for t in own):
+        raise Err(_("profile '%s' has no co line: nothing to verify") % name)
+    check_boost(name)
+    check_cpu()
+    why = co_support()
+    if why:
+        raise Err(_("Curve Optimizer not available on this CPU: %s") % why)
+    if at_load():
+        raise Err(_("a calibration or verification is already in progress or waiting for a choice: finish or discard it first"))
+    rm(P(AT_ABORT_FLAG))
+    apply_lines(profile_lines("baseline"), ctx, "cpu")             # the method probe, if needed, runs at stock
+    method = (co_limits_load() or {}).get("method") or heaviest_method()
+    run(["apply", name, "cpu"], ctx)
+    per = single_sec() + VERIFY_PAR_SEC
+    n = max(1, int(p["minutes"] * 60.0 / per + 0.5))
+    st = {"mode": name, "verify": True, "params": p, "phase": "verify", "core": 0, "iteration": 1, "iterations": n,
+          "final": read_co(), "lines": [" ".join(t) for t in own], "results": {}, "unstable": {}, "in_progress": None,
+          "method": method, "applied_boot": boot_id(), "started": time.strftime("%Y-%m-%d %H:%M"),
+          "resumed_after_crash": False, "eta_total": n * per}
+    at_save(st)
+    return st
+
+
+def at_verify_over(st):
+    return st["iteration"] > st["iterations"] or len(st["unstable"]) >= CORES
+
+
+def at_verify_step(ctx, st):
+    """One test of the verification: core st["core"] alone, or (st["core"] == CORES) all the cores not failed yet."""
+    if not at_verify_over(st):
+        if st.get("applied_boot") != boot_id():          # rebooted meanwhile (crash or not): the CPU is at stock again
+            run(["apply", st["mode"], "cpu"], ctx)
+            st["applied_boot"] = boot_id()
+        c, alive = st["core"], [k for k in range(CORES) if str(k) not in st["unstable"]]
+        st["in_progress"] = {"kind": "verify", "core": c if c < CORES else None, "cores": alive, "boot_id": boot_id()}
+        at_save(st)
+        if c < CORES:
+            failed, why = (set(), None) if co_test_single(c) else ({c}, LAST_FAIL["why"])
+        else:
+            failed, why = co_test_parallel(alive, VERIFY_PAR_SEC, st["method"])[0], _("load died or MCE error with all cores loaded")
+        st["in_progress"] = None
+        at_verify_record(st, failed, why)
+    if at_verify_over(st):
+        at_verify_done(ctx, st)
+    at_save(st)
+    return st
+
+
+def at_verify_record(st, failed, why):
+    """Outcome of the test in st["core"] (CORES: the all-core pass): the failed cores are recorded with the reason
+    and no longer tested, the others passed; then the next test: next core, all-core pass, next iteration.
+    State only (`boot` attributes a crash with it)."""
+    c = st["core"]
+    for k in failed:
+        st["unstable"][str(k)] = {"value": st["final"][k], "why": why}
+    for k in [c] if c < CORES else range(CORES):
+        if str(k) not in st["unstable"]:
+            st["results"][str(k)] = st["final"][k]
+    alive = [k for k in range(CORES) if str(k) not in st["unstable"]]
+    if c < CORES:
+        st["core"] = ([k for k in alive if k > c] + [CORES])[0]    # the all-core pass closes the iteration
+    else:
+        st["iteration"] += 1
+        st["core"] = (alive + [CORES])[0]
+
+
+def at_verify_done(ctx, st):
+    """End of the verification: CPU back at baseline (at_done). Proposal: the same profile with only the failed
+    cores raised by CORE_RAISE (towards 0, never above it); nothing when every core held."""
+    failed = {int(k) for k in st["unstable"]}
+    lines = []
+    if failed:
+        st["final"] = [max(v, min(0, v + CORE_RAISE)) if c in failed else v for c, v in enumerate(st["final"])]
+        lines = ["co " + " ".join(str(v) for v in st["final"])] + [l for l in st["lines"] if l.split()[0] != "co"]
+    at_done(ctx, st, lines)
 
 
 # ---- Crash guard: dirty / active / crashed markers -----------------------------------------
@@ -2760,10 +2884,10 @@ def fmt_hwtest(r):
 
 
 # ---- Hardware watchdog during a calibration (serve only) ----------------------------------
-# On Ryzen 9000 a too negative CO can freeze the machine instead of resetting it. While a calibration runs
-# under `serve` (the GUI), the first /sys/class/watchdog device stays armed and kept alive: a freeze becomes a
-# reset after its timeout, then the crash-guard and the resume of the calibration take over. The CLI (one
-# process per step) never arms it. Residual risk: if `serve` is killed with SIGKILL mid-calibration nothing
+# On Ryzen 9000 a too negative CO can freeze the machine instead of resetting it. While a calibration or a
+# verification runs under `serve` (the GUI), the first /sys/class/watchdog device stays armed and kept alive:
+# a freeze becomes a reset after its timeout, then the crash-guard and the resume of the run take over. The
+# CLI (one process per step) never arms it. Residual risk: if `serve` is killed with SIGKILL mid-run nothing
 # sends the magic close, the machine resets after the timeout and the next boot treats it as a crash
 # (conservative: the step in progress is recorded as unstable).
 WD_CLASS = "/sys/class/watchdog"
@@ -2953,7 +3077,7 @@ def cmd_serve(ctx, args):
             if not line:
                 continue
             try:
-                if json.loads(line) == ["autotune", "abort"]:
+                if json.loads(line) in (["autotune", "abort"], ["autotune", "finish"]):
                     at_request_abort()
             except ValueError:
                 pass
@@ -3636,6 +3760,77 @@ def selftest():
     FAKE.s["single_limits"] = {}
     FAKE.save()
 
+    # ---- autotune verify: long check of a saved profile, loads only, result per core, proposal ----
+    expect_err(["autotune", "verify"], "usage")
+    expect_err(["autotune", "verify", "nope"], "does not exist")
+    expect_err(["autotune", "verify", "baseline"], "reserved")
+    run(["profile", "save", "noco", "ppt 150"])
+    expect_err(["autotune", "verify", "noco"], "no co line")
+    run(["profile", "delete", "noco"])
+    vok = ["co -10 -10 -10 -10 -10 -10 -10 -10", "ppt 150", "fan 1 step 10000 5000"]
+    run(["profile", "save", "vok"] + vok)
+    expect_err(["autotune", "verify", "vok", "minutes=5"], "out of range")
+    expect_err(["autotune", "verify", "vok", "hours=1"], "unknown parameter")
+    run(["autotune", "start", "eco", "step=3"])
+    expect_err(["autotune", "verify", "vok"], "already in progress")     # a calibration is running (or waiting for a choice)
+    run(["autotune", "abort"])
+    expect_err(["autotune", "finish"], "no verification")
+    FAKE.s["log"] = []
+    FAKE.save()
+    st = run(["autotune", "verify", "vok", "minutes=10"])   # 10 min: one iteration (8 cores alone + all together ≈ 7 min)
+    assert st["phase"] == "verify" and st["verify"] and st["iterations"] == 1 and st["core"] == 0 and st["final"] == [-10] * CORES, st
+    assert st["eta"] == {"total_s": S + VERIFY_PAR_SEC, "remaining_s": S + VERIFY_PAR_SEC} and "final_margin" not in st, st
+    assert run(["status"])["co"] == [-10] * CORES and run(["status"])["limits"]["ppt"] == 150.0   # applied with `apply`
+    writes, cores_seen = len(FAKE.s["log"]), []
+    for _i in range(50):
+        cores_seen.append(st["core"])
+        st = run(["autotune", "step"])                        # one test per step: each core alone, then all together
+        if st["phase"] == "done":
+            break
+        assert len(FAKE.s["log"]) == writes, "SMU written during the verification"
+    assert cores_seen == list(range(CORES + 1)), cores_seen
+    assert st["profile_lines"] == [] and st["unstable"] == {} and st["results"] == {str(c): -10 for c in range(CORES)}, st
+    assert run(["status"])["co"] == [0] * CORES and not os.path.exists(marker("active"))   # back at baseline
+    expect_err(["autotune", "save"], "no completed calibration")          # held: nothing proposed
+    run(["autotune", "abort"])
+    # crash while a core runs alone: recorded on that core, the run goes on; after a reboot the profile is applied again
+    st = run(["autotune", "verify", "vok", "minutes=10"])
+    st = run(["autotune", "step"])                            # core 0 ok
+    st["in_progress"] = {"kind": "verify", "core": 1, "cores": list(range(CORES)), "boot_id": "other-boot"}
+    at_save(st)
+    reboot()
+    assert run(["boot"])["crashed"]                           # the crash-guard: profile not reapplied at boot
+    run(["crashed", "clear"])
+    assert run(["autotune", "status"])["unstable"] == {"1": {"value": -10, "why": "crash"}}   # attributed by boot already
+    st = run(["autotune", "step"])                            # core 2, with the profile applied again
+    assert st["resumed_after_crash"] and st["core"] == 3 and run(["status"])["co"] == [-10] * CORES, st
+    for _i in range(10):                                      # up to the all-core pass, then a crash during it
+        if st["core"] == CORES:
+            break
+        st = run(["autotune", "step"])
+    st["in_progress"] = {"kind": "verify", "core": None, "cores": [0, 2, 3], "boot_id": "other-boot"}
+    at_save(st)
+    st = run(["autotune", "finish"])                          # stop now: result and proposal from what was tested
+    assert st["phase"] == "done" and set(st["unstable"]) == {"0", "1", "2", "3"}, st
+    assert st["profile_lines"] == ["co -7 -7 -7 -7 -10 -10 -10 -10", "ppt 150", "fan 1 step 10000 5000"], st["profile_lines"]
+    run(["autotune", "abort"])
+    # a core that fails alone: only that one raised in the proposal, then Save
+    FAKE.s["single_limits"] = {"5": -8}
+    FAKE.save()
+    st = run(["autotune", "verify", "vok", "minutes=30"])     # 30 min: 4 iterations
+    assert st["iterations"] == 4
+    for _i in range(100):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["unstable"] == {"5": {"value": -10, "why": "simulato"}} and st["iteration"] == 5, st
+    assert st["final"] == [-10] * 5 + [-7] + [-10] * 2 and st["profile_lines"] == ["co -10 -10 -10 -10 -10 -7 -10 -10"] + vok[1:], st
+    assert run(["status"])["co"] == [0] * CORES and run(["autotune", "save"])["saved"] == "vok"
+    assert run(["profile", "show", "vok"])["lines"][-3:] == ["co -10 -10 -10 -10 -10 -7 -10 -10"] + vok[1:]
+    run(["profile", "delete", "vok"])
+    FAKE.s["single_limits"] = {}
+    FAKE.save()
+
     # ---- telemetry and caps ----
     tele = run(["telemetry"])
     assert len(tele["cores"]) == CORES and tele["cores"][0]["mhz"] == 3000 and tele["tctl"] == 52.0
@@ -3761,7 +3956,7 @@ def selftest_watchdog():
     assert done == 1 + 8 + 1 + 7 and marks[done] == "disarmed" and marks[done + 1:] == [None] * (25 - done), marks
     assert transcript().replace(b"\0", b"") == b"VC" and state() == "inactive" and run(["autotune", "status"])["phase"] == "done"
     run(["autotune", "abort"])
-    # abort, end of input (GUI closed), watchdog=0
+    # abort, end of input (GUI closed), watchdog=0, a verification stopped with `finish`
     assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
         "armed (60 s)", "armed (60 s)", "disarmed"] and transcript() == b"VC"
     assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"]]) == ["armed (60 s)"] * 2
@@ -3769,6 +3964,11 @@ def selftest_watchdog():
     run(["autotune", "abort"])
     assert serve([["autotune", "start", "eco", "step=3", "reuse=0", "watchdog=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
         "unavailable: disabled (watchdog=0)"] * 3 and transcript() == b""
+    run(["profile", "save", "wdv", "co " + " ".join(["-5"] * CORES)])
+    assert serve([["autotune", "verify", "wdv", "minutes=10"], ["autotune", "step"], ["autotune", "finish"]]) == [
+        "armed (60 s)", "armed (60 s)", "disarmed"] and transcript() == b"VC" and not os.path.exists(P(AT_ABORT_FLAG))
+    run(["autotune", "abort"])
+    run(["profile", "delete", "wdv"])
     # SIGTERM (logout, shutdown) to a real `serve` process on the fake root: magic close, then out
     open(P(Fake.WD_DEV), "wb").close()
     pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -3893,6 +4093,8 @@ def selftest_variants():
     expect_err(["co", "0", "-5"], "physical position")
     expect_err(["co", "all", "-5"], "physical position")
     expect_err(["autotune", "start", "auto", "step=3"], "physical position")
+    write_atomic(P(ETC + "/profiles/hand.conf"), "co " + " ".join(["-5"] * CORES) + "\n")   # written by hand: `profile save` refuses it
+    expect_err(["autotune", "verify", "hand"], "physical position")
     assert not any(l.startswith("co ") for l in run(["preset", "quiet", "show"])["lines"])
     assert run(["fmax", "5000"])["fmax"] == 5000 and run(["ppt", "150"])["ppt"] == 150.0
     r = run(["hwtest"])

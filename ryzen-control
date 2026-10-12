@@ -102,8 +102,13 @@ AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimiz
 AT_PARALLEL_SUB = _("Off: one core at a time, slower (%s) but attributes even a reboot with certainty")
 AT_SINGLE_SUB = _("One thread alone on each core, from idle to the highest boost: catches the CO instability that all-core "
                   "loads miss. A core that fails is raised alone. Adds %s")
-WD_TIP = _("During a calibration ryzenctl keeps the motherboard watchdog armed: if the PC freezes, it restarts by itself "
-           "after the timeout and the calibration resumes from where it was, with that step recorded as unstable.")
+WD_TIP = _("During a calibration or a verification ryzenctl keeps the motherboard watchdog armed: if the PC freezes, it "
+           "restarts by itself after the timeout and the run resumes from where it was, with that step recorded as unstable.")
+VERIFY_TEXT = _("The saved profile is applied, then every core is tested alone (one thread, from idle to the highest boost) and "
+                "then all cores together, over and over until the time is up; CO and limits are never changed during the run. "
+                "A core that fails is reported and the proposal raises only that core (+3, less negative). An unstable CO can "
+                "reboot the PC without warning: save everything before starting. At the end the CPU goes back to the stock values.")
+VERIFY_DURATIONS = ((30, _("30 min")), (60, _("1 h")), (180, _("3 h")), (480, _("8 h")))
 AT_PHASES = {"co": 0.6, "final": 0.7, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # share of the bar at the end of the phase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 # ryzenctl protocol values shown to the user (fan roles, why a CO level failed) through a translated name;
@@ -111,7 +116,7 @@ ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 ROLE_NAMES = {"ventola": _("fan"), "pompa": _("pump"), "sconosciuto": _("unknown"), "non-controllabile": _("not controllable")}
 WHY_NAMES = {"crash": _("crash"), "instabile": _("unstable"), "simulato": _("simulated")}
 AT_PHASE_NAMES = {"co": _("CO search"), "final": _("final pass"), "ppt": _("PPT knee"), "fmax_knee": _("FMax knee"),
-                  "bench": _("benchmark")}
+                  "bench": _("benchmark"), "verify": _("verification")}
 PUMP_KINDS = ("auto", "max", "fixed")   # same order as PUMP_MODES (ComboRow index)
 PUMP_MODES = (_("Automatic (BIOS) — recommended"), _("Maximum cap"), _("Fixed speed"))
 CSS = """
@@ -883,10 +888,12 @@ class AutotuneDialog(Adw.Window):
     """Calibration progress: one `autotune step` at a time until phase == done.
     Separate, resizable window (Adw.Dialog has fixed dimensions and the table is tall)."""
 
-    def __init__(self, win, mode):
-        super().__init__(title=_("%s calibration") % mode.capitalize(), transient_for=win, modal=True, destroy_with_parent=True,
+    def __init__(self, win, mode, verify=False):
+        # verify: `autotune verify` of the saved profile `mode` (same window: progress, per-core table, proposal)
+        super().__init__(title=(_("%s verification") if verify else _("%s calibration")) % mode.capitalize(), transient_for=win,
+                         modal=True, destroy_with_parent=True,
                          default_width=max(640, int(win.get_width() * 0.9)), default_height=max(560, int(win.get_height() * 0.9)))
-        self.win, self.mode = win, mode
+        self.win, self.mode, self.verify = win, mode, verify
         self.running = self.aborting = False
         self.closable = False
         self.connect("close-request", self.on_close_request)
@@ -950,11 +957,14 @@ class AutotuneDialog(Adw.Window):
         self.discard_btn = button(_("Discard"), self.discard, "destructive-action")
         self.save_btn = button(_("Save"), lambda: self.save(False))
         self.save_apply_btn = button(_("Save and apply"), lambda: self.save(True), "suggested-action")
-        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+        self.apply_btn = button(_("Apply the profile"), self.apply_profile, "suggested-action")   # verification passed
+        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn, self.apply_btn):
             b.set_visible(False)
         self.save_btn.set_tooltip_text(_("Writes the %s profile without activating it: apply it from the Modes page") % mode)
         self.save_apply_btn.set_tooltip_text(_("Writes the %s profile, applies it right away and selects it") % mode)
-        for b in (self.abort_btn, self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+        if verify:   # Stop keeps what was tested: result and proposal (`autotune finish`)
+            self.abort_btn.set_tooltip_text(_("Ends the verification now: result and proposal from the tests done so far"))
+        for b in (self.abort_btn, self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn, self.apply_btn):
             bar.append(b)
         # in a wide window the content stays centred and readable (max 1100 px), the grid widens
         clamp = Adw.Clamp(child=body, maximum_size=1100, tightening_threshold=800)
@@ -973,7 +983,7 @@ class AutotuneDialog(Adw.Window):
         return False
 
     def start(self, params):
-        argv = ["autotune", "start", self.mode] + ["%s=%d" % kv for kv in params.items()]
+        argv = ["autotune", "verify" if self.verify else "start", self.mode] + ["%s=%d" % kv for kv in params.items()]
         bg(lambda: self.win.h.call(*argv), self.got, self.fail)
 
     def loop(self):
@@ -984,6 +994,8 @@ class AutotuneDialog(Adw.Window):
 
     def got(self, st):
         self.running = False
+        if self.aborting:   # Stop pressed: the reply of the interrupted step is stale (finish/abort answer next)
+            return
         self.show(st)
         if st.get("phase") == "done":
             self.done(st)
@@ -1000,7 +1012,9 @@ class AutotuneDialog(Adw.Window):
     def show(self, st):
         ph, p = st.get("phase"), st.get("params", {})
         if st.get("resumed_after_crash"):
-            self.note.set_text(_("The system rebooted during a test: that step has been marked unstable. If the final CO was already "
+            self.note.set_text(_("The system rebooted during the test of a core: that core is recorded as failed (crash) and no longer "
+                                 "tested; after a reboot the profile is applied again.") if self.verify else
+                               _("The system rebooted during a test: that step has been marked unstable. If the final CO was already "
                                  "applied, the combination is unstable and the final pass is repeated with +3 on every core."))
             self.note.set_visible(True)
         if st.get("watchdog"):
@@ -1017,7 +1031,14 @@ class AutotuneDialog(Adw.Window):
             self.header.set_text(_("Started at %s · estimated %s in total") % (st.get("started", "")[-5:], mins(eta.get("total_s"))))
             self.eta.set_text(_("Estimated time remaining: %s") % mins(eta.get("remaining_s")))
         n = len(self.cells)
-        if ph == "co" and st.get("parallel"):
+        if ph == "verify":                        # one test per step: each core alone, then all together, per iteration
+            c, it = st.get("core", 0), (st.get("iteration", 1), st.get("iterations", 1))
+            if c < n:
+                self.phase.set_text(_("Verifying core %d alone at CO %d (iteration %d of %d)…") % ((c, st["final"][c]) + it))
+            else:
+                self.phase.set_text(_("Verifying all cores together (iteration %d of %d)…") % it)
+            frac = ((it[0] - 1) * (n + 1) + min(c, n)) / float(max(1, it[1] * (n + 1)))
+        elif ph == "co" and st.get("parallel"):
             levels = max(1, (-(p.get("colimit") or -5)) // 5)      # levels of 5 (CO_STEP), like at_estimate in ryzenctl
             self.phase.set_text(_("CO level %d: testing all cores together (still under test: %d cores)…") % (st["value"], len(st.get("active_cores", []))))
             frac = AT_PHASES["co"] * max(0, (-st["value"]) // 5 - 1) / levels
@@ -1057,12 +1078,18 @@ class AutotuneDialog(Adw.Window):
         base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * n
         ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * n
         ref_mhz = (st.get("samples", {}).get("0") or {}).get("mhz") or [None] * n
-        active = st.get("active_cores", []) if st.get("parallel") else [st.get("core")]
+        if ph == "verify":   # under test: the core alone, or every core not failed yet in the all-core pass
+            active = [st["core"]] if st["core"] < n else [c for c in range(n) if str(c) not in uns]
+        else:
+            active = st.get("active_cores", []) if st.get("parallel") else [st.get("core")]
         for c, cell in enumerate(self.cells):
             fab_sub = volts(ref[c]) + (" · " + mhz(ref_mhz[c]) if ref_mhz[c] is not None else "") if ref[c] is not None else None
             self.two_lines(cell["fab"], "%d" % base_co[c] if base_co[c] is not None else "—", fab_sub)
             smp = at_sample(st, c)                      # deepest measurement available for this core
-            cur = st["value"] if ph == "co" and c in active else (smp[0] if smp else None)
+            if ph in ("co", "verify") and c in active:
+                cur = st["value"] if ph == "co" else fin[c]
+            else:
+                cur = smp[0] if smp else None
             sub, css = None, None
             if smp:
                 dmv = round((smp[1] - ref[c]) * 1000) if ref[c] is not None else None
@@ -1144,7 +1171,7 @@ class AutotuneDialog(Adw.Window):
             self.result.append(label(st["error"], ["warning"], wrap=True))
         tries = st.get("final_tries", 0)
         crashed = any(u.get("why") == "crash" for u in (st.get("unstable") or {}).values())
-        if (tries or crashed) and st.get("final"):
+        if (tries or crashed) and st.get("final") and not self.verify:
             why = []
             if tries:
                 why.append(_("the combined pass failed once") if tries == 1 else _("the combined pass failed %d times") % tries)
@@ -1155,7 +1182,16 @@ class AutotuneDialog(Adw.Window):
         if cm and st.get("final"):   # cores that failed alone in the single-core test of the final pass
             self.result.append(label(_("Raised alone after failing the single-core test: %s") % ", ".join(
                 _("core %s +%d") % (c, m) for c, m in sorted(cm.items(), key=lambda kv: int(kv[0]))), ["warning"], wrap=True))
-        if st.get("final"):   # per core: stock → final CO and measured ΔV (sample at the final level or the closest one)
+        if self.verify:   # per core: failed (reason) or held; the live table above has the details
+            uns = st.get("unstable") or {}
+            if uns:
+                self.result.append(label(_("Failed: %s. The proposal raises only those cores by +3 (less negative).") % ", ".join(
+                    _("core %s at CO %d (%s)") % (c, u["value"], WHY_NAMES.get(u.get("why"), u.get("why")))
+                    for c, u in sorted(uns.items(), key=lambda kv: int(kv[0]))), ["warning"], wrap=True))
+            else:
+                self.result.append(label(_("No core failed (iterations completed: %d of %d; every core alone, then all together).") % (
+                    min(st.get("iteration", 1) - 1, st.get("iterations", 0)), st.get("iterations", 0)), ["success"], wrap=True))
+        elif st.get("final"):   # per core: stock → final CO and measured ΔV (sample at the final level or the closest one)
             n = len(st["final"])
             base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * n
             ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * n
@@ -1184,7 +1220,7 @@ class AutotuneDialog(Adw.Window):
                 pct(g), ops(bench.get("fabbrica")), ops(bench.get("boost")), pct(bench.get("gain_st_pct"))),
                 ["numeric", "success" if g > 0 else ("error" if g < 0 else "dim-label")], wrap=True))
         if st.get("profile_lines"):
-            self.result.append(label(_("%s profile: stock → calibrated") % self.mode, ["heading"]))
+            self.result.append(label((_("%s profile: stock → proposed") if self.verify else _("%s profile: stock → calibrated")) % self.mode, ["heading"]))
             self.result.append(profile_view(st["profile_lines"], self.win.status))
         knee = st.get("knee")
         if knee and knee["ppt"].get("chosen"):
@@ -1200,8 +1236,15 @@ class AutotuneDialog(Adw.Window):
                                      ["warning"], wrap=True))
         self.abort_btn.set_visible(False)
         if st.get("profile_lines"):
-            self.phase.set_text(_("Calibration complete: discard, save, or save and apply?"))
+            self.phase.set_text(_("Verification complete: discard the proposal, save it, or save and apply?") if self.verify
+                                else _("Calibration complete: discard, save, or save and apply?"))
             for b in (self.discard_btn, self.save_btn, self.save_apply_btn):
+                b.set_visible(True)
+        elif self.verify and not st.get("unstable"):   # held: nothing to change; the CPU is back at the stock values
+            complete = st.get("iteration", 1) > st.get("iterations", 0)   # not stopped early with Stop / Show the result
+            self.phase.set_text(_("Verification passed: nothing to change") if complete
+                                else _("Verification stopped early: no core failed in the tests done"))
+            for b in (self.close_btn, self.apply_btn):
                 b.set_visible(True)
         else:
             self.phase.set_text(_("Calibration ended without a profile to save"))
@@ -1209,22 +1252,33 @@ class AutotuneDialog(Adw.Window):
         self.follow()   # the proposed profile is at the bottom
         # the choice is mandatory: the window closes only afterwards (the state stays on disk and is proposed again)
 
-    def choose(self, argv, msg):
-        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+    def choose(self, argv, msg, more=()):
+        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn, self.apply_btn):
             b.set_sensitive(False)
-        self.win.run([argv], lambda _r: (self.win.toast(msg), setattr(self, "closable", True), self.close()))
+        self.win.run([argv] + list(more), lambda _r: (self.win.toast(msg), setattr(self, "closable", True), self.close()))
+
+    def apply_profile(self):
+        """After a verification that passed: the profile again, as before the run (the CPU is at the stock values)."""
+        self.choose(["autotune", "abort"], _("Profile '%s' applied") % self.mode, (["apply", self.mode], ["use", self.mode]))
 
     def discard(self):
-        self.choose(["autotune", "abort"], _("Calibration discarded, CPU at baseline"))
+        self.choose(["autotune", "abort"], _("Verification discarded, CPU at baseline") if self.verify else _("Calibration discarded, CPU at baseline"))
 
     def save(self, apply):
         self.choose(["autotune", "save"] + (["apply"] if apply else []),
                     _("%s profile saved and applied") % self.mode if apply else _("%s profile saved (not applied)") % self.mode)
 
+    def finished(self, st):
+        self.show(st)
+        self.done(st)
+
     def abort(self):
         self.aborting = True
         self.abort_btn.set_sensitive(False)
         self.phase.set_text(_("Stopping…"))
+        if self.verify:   # what was tested is kept: result and proposal
+            bg(lambda: self.win.h.call("autotune", "finish"), self.finished, self.fail)
+            return
         self.win.run([["autotune", "abort"]], lambda _r: (self.win.toast(_("Calibration discarded, CPU at baseline")), setattr(self, "closable", True), self.close()))
 
 
@@ -1251,7 +1305,7 @@ class ModesPage(Gtk.ScrolledWindow):
             cols.append(col)
         content.append(cols)
         self.rows, first = {}, None
-        self.tables = {}
+        self.tables, self.verify_btns = {}, {}
         for key, title, sub in MODES:
             if key in PRESETS:   # expandable: under the row the stock → profile table
                 row = Adw.ExpanderRow(title=title, subtitle=sub, expanded=True)
@@ -1278,6 +1332,12 @@ class ModesPage(Gtk.ScrolledWindow):
                     cal = button(_("Calibrate…"), lambda k=key: self.calibrate(k))
                     cal.set_tooltip_text(_("Measures on this CPU: per-core undervolt, FMax, limits and fans"))
                     row.add_suffix(cal)
+                    ver = Gtk.Button(icon_name="security-high-symbolic", valign=Gtk.Align.CENTER, visible=False,
+                                     tooltip_text=_("Verify…: long stability test of the saved profile (each core alone, then all together)"))
+                    ver.add_css_class("flat")   # compact like the regenerate button; only once the profile exists
+                    ver.connect("clicked", lambda *_a, k=key: self.verify(k))
+                    row.add_suffix(ver)
+                    self.verify_btns[key] = ver
                 regen = Gtk.Button(icon_name="view-refresh-symbolic", valign=Gtk.Align.CENTER,
                                    tooltip_text=_("Regenerate the profile from the stock values"))
                 regen.add_css_class("flat")
@@ -1285,7 +1345,7 @@ class ModesPage(Gtk.ScrolledWindow):
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
             if key == "boost":
-                self.boost_widgets = (chk, cal, regen)
+                self.boost_widgets = (chk, cal, regen, self.verify_btns[key])
             lists["calibrate" if key in CALIBRATED else "preset"].append(row)
         self.lock_boost(True)   # until the status says that unlock is on
 
@@ -1311,6 +1371,8 @@ class ModesPage(Gtk.ScrolledWindow):
             if regen:
                 exists = key in shown
                 regen.set_visible(exists)
+                if key in self.verify_btns:   # ryzenctl verifies only where the per-core CO is usable
+                    self.verify_btns[key].set_visible(exists and st.get("co") is not None)
                 row.set_subtitle(sub if exists else sub + _(" — profile not created yet: tick to create it"))
                 if key in self.tables:
                     row.remove(self.tables.pop(key))
@@ -1442,6 +1504,23 @@ class ModesPage(Gtk.ScrolledWindow):
                 pending["timer"] = 0
             if r == "start":
                 AutotuneDialog(self.win, mode).start(params())
+        d.connect("response", resp)
+        d.present(self.win)
+        return d
+
+    def verify(self, mode):
+        """Long verification of the saved profile (`autotune verify`, CoreCycler-like iterations): the duration, then
+        the calibration window with the progress and, at the end, the result and the proposal."""
+        dur = Adw.ComboRow(title=_("Duration"), model=Gtk.StringList.new([t for _m, t in VERIFY_DURATIONS]), selected=1)
+        lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        lb.append(dur)
+        d = Adw.AlertDialog(heading=_("Verify the %s profile?") % mode.capitalize(), body=VERIFY_TEXT, extra_child=lb)
+        d.add_response("cancel", _("Cancel"))
+        d.add_response("start", _("Start"))
+        d.set_response_appearance("start", Adw.ResponseAppearance.DESTRUCTIVE)
+        def resp(_d, r):
+            if r == "start":
+                AutotuneDialog(self.win, mode, verify=True).start({"minutes": VERIFY_DURATIONS[dur.get_selected()][0]})
         d.connect("response", resp)
         d.present(self.win)
         return d
@@ -1895,13 +1974,44 @@ class Window(Adw.ApplicationWindow):
         if at.get("phase") and not getattr(self, "at_asked", False):
             self.at_asked = True   # once per session
             if at["phase"] == "done":   # finished without a choice (GUI closed): discard / save / save and apply is proposed again
-                dlg = AutotuneDialog(self, at.get("mode", "eco"))
+                dlg = AutotuneDialog(self, at.get("mode", "eco"), verify=bool(at.get("verify")))
                 dlg.show(at)
                 dlg.done(at)
             else:
                 self.ask_resume(at)
 
+    def ask_verify(self, at):
+        """A verification left halfway (GUI closed, or a crash): what failed so far, then continue, see the result now
+        (`autotune finish`: result and proposal of what was tested) or discard."""
+        uns = at.get("unstable") or {}
+        failed = ", ".join(_("core %s at CO %d (%s)") % (c, u["value"], WHY_NAMES.get(u.get("why"), u.get("why")))
+                           for c, u in sorted(uns.items(), key=lambda kv: int(kv[0]))) or _("none")
+        d = Adw.AlertDialog(heading=_("Verification interrupted"),
+                            body=_("The verification of the %s profile started on %s was left halfway (iteration %d of %d). Failed so "
+                                   "far: %s. A core that locked up the system is recorded as failed and no longer tested. Continue the "
+                                   "verification, see the result now, or discard it and stay on the stock values?") % (
+                                       at.get("mode", "?"), at.get("started", "?"), at.get("iteration", 1), at.get("iterations", 1), failed))
+        d.add_response("abort", _("Discard"))
+        d.add_response("finish", _("Show the result"))
+        d.add_response("resume", _("Continue verification"))
+        d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)
+        def resp(_d, r):
+            if r == "abort":
+                self.run([["autotune", "abort"]], lambda _r: self.toast(_("Verification discarded, CPU at baseline")))
+                return
+            dlg = AutotuneDialog(self, at.get("mode", "?"), verify=True)
+            dlg.show(at)
+            if r == "resume":
+                dlg.loop()
+            else:
+                dlg.abort()   # for a verification: `autotune finish`, then the result
+        d.connect("response", resp)
+        d.present(self)
+        return d
+
     def ask_resume(self, at):
+        if at.get("verify"):
+            return self.ask_verify(at)
         ph = at.get("phase")
         where = AT_PHASE_NAMES.get(ph, ph)
         if ph == "co":
@@ -2178,6 +2288,39 @@ class App(Adw.Application):
                 d = modes.calibrate_params("eco", win.h.call("autotune", "estimate", "eco"))
                 assert d.single.get_active() and d.params()["single"] == 1 and d.single.get_subtitle(), "single-core switch"
                 d.force_close()
+                # a verification of a saved profile: Verify… on the row, the duration, then the same window to the end
+                win.h.call("preset", "eco")
+                modes.refresh(dict(win.status, profile_lines={"eco": win.h.call("profile", "show", "eco")["lines"]}))
+                assert modes.verify_btns["eco"].get_visible(), "Verify… missing on a saved calibrated profile"
+                modes.verify("eco").force_close()
+                dlg = AutotuneDialog(win, "eco", verify=True)
+                st = win.h.call("autotune", "verify", "eco", "minutes=10")
+                for _i in range(100):
+                    dlg.show(st)
+                    if st["phase"] == "done":
+                        break
+                    st = win.h.call("autotune", "step")
+                dlg.done(st)
+                assert not st["profile_lines"] and dlg.apply_btn.get_visible(), "a passed verification offers to apply the profile"
+                win.h.call("autotune", "abort")
+                dlg.closable = True
+                dlg.close()
+                dlg = AutotuneDialog(win, "eco", verify=True)   # stopped before the last iteration: not "passed"
+                dlg.done(dict(st, iteration=st["iterations"]))
+                assert dlg.apply_btn.get_visible() and dlg.phase.get_text() != _("Verification passed: nothing to change")
+                dlg.closable = True
+                dlg.close()
+                cores = win.status["cores"]
+                failed = dict(st, unstable={"1": {"value": -12, "why": "crash"}}, final=[-9 if c == 1 else -12 for c in range(cores)],
+                              profile_lines=["co " + " ".join("-9" if c == 1 else "-12" for c in range(cores))])
+                dlg = AutotuneDialog(win, "eco", verify=True)   # a core failed: the proposal raises only that one
+                dlg.show(failed)
+                dlg.done(failed)
+                assert dlg.save_btn.get_visible() and not dlg.apply_btn.get_visible()
+                dlg.closable = True
+                dlg.close()
+                win.ask_resume(dict(failed, phase="verify", core=2, iteration=1, iterations=3))
+                win.h.call("profile", "delete", "eco")
             win.ask_resume({"mode": "auto", "phase": "ppt", "started": "today"})
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
