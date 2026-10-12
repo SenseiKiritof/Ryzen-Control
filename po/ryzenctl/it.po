@@ -510,3 +510,6 @@ msgstr "la posizione fisica dei core è sconosciuta (fusibili dei core illeggibi
 
 msgid "SMN read of 0x%08X not allowed"
 msgstr "lettura SMN di 0x%08X non consentita"
+
+msgid "Auto needs the power limits of the PM table, not readable on this CPU: use Eco or Boost"
+msgstr "Auto ha bisogno dei limiti di potenza della PM table, non leggibili su questa CPU: usa Eco o Boost"

@@ -2117,7 +2117,10 @@ class App(Adw.Application):
             win.h.call("unlock", "on")   # needed by the Boost calibration below
             # the first Eco measures from scratch, the last one reuses the final passes just recorded: done at once;
             # no calibration without a per-core CO (ryzenctl refuses it)
-            for i, mode in enumerate(("eco", "auto", "boost", "eco") if win.status.get("co") is not None else ()):
+            # Auto sweeps the PPT: not on CPUs whose PM table limits are unknown (ryzenctl refuses it)
+            pm_limits = (win.status.get("limits") or {}).get("ppt") is not None
+            for i, mode in enumerate((("eco", "auto", "boost", "eco") if pm_limits else ("eco", "boost", "eco"))
+                                     if win.status.get("co") is not None else ()):
                 dlg = AutotuneDialog(win, mode)
                 st = win.h.call("autotune", "start", mode, "step=3", "reuse=%d" % (i > 0))
                 dlg.show(st)
@@ -2126,7 +2129,7 @@ class App(Adw.Application):
                         break
                     st = win.h.call("autotune", "step")
                     dlg.show(st)
-                assert i < 3 or st.get("eco_from"), "Eco did not reuse the validated undervolt"
+                assert i == 0 or mode != "eco" or st.get("eco_from"), "Eco did not reuse the validated undervolt"
                 dlg.done(st)
                 win.h.call("autotune", "abort")
                 dlg.closable = True

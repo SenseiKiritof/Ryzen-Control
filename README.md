@@ -66,9 +66,10 @@ needs root asks for the administrator password once per session; "Stop asking fo
 in Preferences removes even that one. The screenshots below come from the fake backend
 (`make screenshots`), so the values are illustrative.
 
-**Monitor** — Tctl and per-core temperature, PPT and TDC against their limits, MHz, voltage and
-Curve Optimizer per core, a 60 s graph of Tctl (blue, °C) and PPT (orange, W, its limit dashed),
-fan speeds and power mode.
+**Monitor** — the CPU family and its active cores on top (with a note when the family has not
+been verified on hardware yet), Tctl and per-core temperature, PPT and TDC against their limits,
+MHz, voltage and Curve Optimizer per core, a 60 s graph of Tctl (blue, °C) and PPT (orange, W, its
+limit dashed), fan speeds and power mode. Every per-core view lists only the active cores.
 
 ![Monitor page](docs/screenshots/monitor.png)
 
@@ -256,6 +257,11 @@ the BIOS.
   every value. Without a baseline of this boot no CPU write is accepted.
 - Every write is verified by reading the value back; if it does not match, one retry, then
   restore of the base value and error.
+- The Curve Optimizer addresses a core by its physical position in the CCD, while Linux lists
+  only the enabled cores. With complete CCDs (8 cores) the positions are 0–7 in order. With
+  disabled cores (e.g. 9600X, 9900X, 7600X) the positions come from the core fuses, read through
+  the driver's `smn` file — reads only, only at the fuse addresses of the CPU family — and are used
+  only if they agree with the system topology; otherwise the per-core CO is refused.
 - **Crash-guard**: `ryzenctl.service` writes the markers `dirty` (boot in progress) and `active`
   (state modified) *before* touching the SMU and removes `dirty` at clean shutdown. If both
   exist at the next boot, the system crashed: the CPU profile is **not reapplied**,

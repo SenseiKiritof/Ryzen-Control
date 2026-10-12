@@ -48,7 +48,9 @@ notification; Preferences tab; unknown fan channels in a collapsed section. Tag 
 2 CCDs, no PM table, 2×6 cores, Raphael). Step 19: Raphael (Zen 4, `verified: False`: CO and FMax,
 no PM map → limits refused); CCDs with disabled cores: the physical slots come from the core fuses
 (SMN reads, ZenStates-Core addresses; `core_map`), refused only if unreadable or inconsistent;
-Vermeer/Matisse left out for lack of reliable IDs/maps. Next: phase 5 steps 20–21, phase 6 tray icon
+Vermeer/Matisse left out for lack of reliable IDs/maps. Step 20: the GUI shows and uses only the
+active cores (rows from `status.cores`/telemetry), the family and core count on the Monitor, a note
+for families not verified; Auto refused where the PM limits are unknown (its knee needs the PPT). Next: phase 5 step 21 (processors table in the README), phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
 
