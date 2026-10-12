@@ -65,7 +65,7 @@ default on), hardware watchdog during a calibration, `autotune verify` — done 
 custom calibrations, `autotune start <mode> name=<profile>`: saved under their own name, never over
 eco/auto/boost, and their CO search never written over the shared `co_limits.json`; listed in
 `settings.calibrated` (status `calibrated`) with the base mode; GUI "Custom" row in the Calibrated
-column. Tag `v0.5.0` after the hardware checks of the watchdog and the single-core phase.
+column; `retry=1` (custom only) ignores the reused measurement's crash margin and recorded failures. Tag `v0.5.0` after the hardware checks of the watchdog and the single-core phase.
 Next: phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.

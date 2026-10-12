@@ -1143,3 +1143,12 @@ msgstr "Il risultato viene salvato come nuovo profilo: Eco, Auto e Boost restano
 
 msgid "from %s, %s"
 msgstr "da %s, %s"
+
+msgid "Retry from the last stable value, ignoring the crash"
+msgstr "Riprova dall'ultimo valore stabile, ignorando il crash"
+
+msgid "The crash of the measurement is ignored: the final pass starts again from the last stable value + margin."
+msgstr "Il crash della misura viene ignorato: il passaggio finale riparte dall'ultimo valore stabile + margine."
+
+msgid "When the reused measurement ended with a crash (or a final pass failed), the final pass normally starts 3 steps further away and skips what failed. On: from the last stable value + margin again; a freeze is possible (the watchdog resets the PC, the crash is recorded)."
+msgstr "Quando la misura riusata è finita con un crash (o un passaggio finale è fallito), di norma il passaggio finale parte 3 passi più lontano e salta ciò che è fallito. Attivo: riparte dall'ultimo valore stabile + margine; un blocco è possibile (il watchdog riavvia il PC, il crash viene registrato)."

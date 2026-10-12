@@ -243,7 +243,11 @@ base mode (Eco, Auto, Boost) and the name of a new profile, then the usual dialo
 saved under that name and listed in the Custom row (apply, Verify…, delete): the Eco, Auto and Boost
 profiles are never overwritten, and a new search of the CO limit stays in the custom calibration —
 the shared measurement the three modes reuse is untouched. So a working Auto stays as it is while you
-try other parameters. A custom calibration based on Boost follows Boost's unlock rule.
+try other parameters. A custom calibration based on Boost follows Boost's unlock rule. Only here,
+"Retry from the last stable value, ignoring the crash" (`retry=1`): when the reused measurement ended
+with a crash, or a final pass failed, the final pass normally starts 3 steps further away and skips
+what failed; with it on, it starts again from the last stable value + margin (a freeze is possible:
+the watchdog resets the PC and the new crash is recorded).
 
 **Verify…** (shield button on a saved calibrated profile; CLI `autotune verify`): hours of load on the
 saved profile without changing anything, like CoreCycler or Ryzen Master's "Validate": each core alone

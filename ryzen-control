@@ -1464,9 +1464,9 @@ class ModesPage(Gtk.ScrolledWindow):
                                  _("Create and apply"), go, extra=profile_view(res["lines"], self.win.status))
             bg(lambda: self.win.h.call("preset", key, "show"), ask, lambda m: (self.win.toast(m), self.win.reload()))
 
-    def calibrate(self, mode, name=None):
+    def calibrate(self, mode, name=None, retry=0):
         """First the estimate (`autotune estimate`), then a simple choice: automatic with the ryzenctl defaults, or the parameters by hand.
-        name: a custom calibration from the base `mode`, saved under that name."""
+        name: a custom calibration from the base `mode`, saved under that name; retry: it ignores the crash of the reused measurement."""
         def ask(est):
             p = est["params"]
             target = _("target Tctl %d °C, ") % p["target"] if "target" in p else ""   # Boost: no thermal target
@@ -1478,6 +1478,8 @@ class ModesPage(Gtk.ScrolledWindow):
             else:
                 auto = _("all cores together, %s — %sCO (Curve Optimizer) down to %d with margin %d, %d s per test.") % (
                     mins(est["parallel_total_s"]), target, p["colimit"], p["margin"], p["step"])
+            if p.get("retry"):
+                auto += " " + _("The crash of the measurement is ignored: the final pass starts again from the last stable value + margin.")
             # the chosen level as the subtitle (as a value at the end of the row the dialog cut it down to "…");
             # use_subtitle before model/selected: set after them, libadwaita leaves the subtitle empty
             fans = Adw.ComboRow(title=_("Fans"), use_subtitle=True, model=Gtk.StringList.new(list(FAN_LEVELS)), selected=p.get("fans", 0),
@@ -1498,7 +1500,7 @@ class ModesPage(Gtk.ScrolledWindow):
                     self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected())), name)
             d.connect("response", resp)
             d.present(self.win)
-        bg(lambda: self.win.h.call("autotune", "estimate", mode), ask, self.win.toast)
+        bg(lambda: self.win.h.call("autotune", "estimate", mode, *(["retry=1"] if retry else [])), ask, self.win.toast)
 
     def calibrate_params(self, mode, est, name=None):
         """Parameters (ranges from AT_PARAMS, defaults from ryzenctl) with an estimate that follows the changes → autotune start → progress."""
@@ -1523,7 +1525,8 @@ class ModesPage(Gtk.ScrolledWindow):
         group.add(repeat)
         estimate = label("", ["heading"], margin_top=6)
         params = lambda: dict(((k, int(r.get_value())) for k, r in spins.items()), parallel=int(parallel.get_active()),
-                              single=int(single.get_active()), reuse=int(not repeat.get_active()), fans=fans.get_selected())
+                              single=int(single.get_active()), reuse=int(not repeat.get_active()), fans=fans.get_selected(),
+                              retry=est["params"].get("retry", 0))
         def show_est(e):
             estimate.set_text(_("Estimated duration: %s") % mins(e["total_s"]) + (
                 _(" (undervolt validated by the final pass of %s: no load test)") % e["eco_from"] if e.get("eco_from") else ""))
@@ -1597,9 +1600,14 @@ class ModesPage(Gtk.ScrolledWindow):
                             selected=bases.index("auto") if "auto" in bases else 0)
         entry = Adw.EntryRow(title=_("Name of the new profile"))
         note = label("", ["dim-label", "caption"], wrap=True, margin_top=6)
+        retry = Adw.SwitchRow(title=_("Retry from the last stable value, ignoring the crash"), active=False,
+                              subtitle=_("When the reused measurement ended with a crash (or a final pass failed), the final pass "
+                                         "normally starts 3 steps further away and skips what failed. On: from the last stable value + "
+                                         "margin again; a freeze is possible (the watchdog resets the PC, the crash is recorded)."))
         lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
         lb.append(base)
         lb.append(entry)
+        lb.append(retry)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         box.append(lb)
         box.append(note)
@@ -1625,11 +1633,11 @@ class ModesPage(Gtk.ScrolledWindow):
         base.connect("notify::selected", suggest)
         entry.connect("changed", check)
         suggest()
-        d.base, d.entry = base, entry   # reachable from the smoke test
+        d.base, d.entry, d.retry = base, entry, retry   # reachable from the smoke test
 
         def resp(_d, r):
             if r == "next":
-                self.calibrate(bases[base.get_selected()], entry.get_text())
+                self.calibrate(bases[base.get_selected()], entry.get_text(), int(retry.get_active()))
         d.connect("response", resp)
         d.present(self.win)
         return d
@@ -2462,6 +2470,7 @@ class App(Adw.Application):
                 # a custom calibration: base and name (never a mode's), saved under its own name and listed in its row
                 d = modes.calibrate_custom()
                 assert d.entry.get_text().endswith("-custom") and d.get_response_enabled("next"), "custom name not proposed"
+                assert not d.retry.get_active(), "retrying past crashes must be an explicit choice"
                 d.entry.set_text("auto")
                 assert not d.get_response_enabled("next"), "a mode's name accepted for a custom calibration"
                 d.force_close()

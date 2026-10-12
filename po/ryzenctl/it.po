@@ -601,3 +601,6 @@ msgstr "nessuna verifica in corso"
 
 msgid "load died or MCE error with all cores loaded"
 msgstr "carico terminato o errore MCE con tutti i core sotto carico"
+
+msgid "retry=1 only for a custom calibration (name=<profile>): it retries what already crashed"
+msgstr "retry=1 solo per una calibrazione personalizzata (name=<profilo>): riprova ciò che è già andato in crash"

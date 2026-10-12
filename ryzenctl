@@ -1373,11 +1373,12 @@ AT_PATH = STATE + "/autotune.json"
 # passes (final_failures: never retried; final_passed: Eco reuses them without load tests). Every
 # mode applies the same margin +3: Eco = Auto's undervolt with the quiet limits. reuse=1 reuses the
 # previous measurement; `target` only places the quiet fan curve (fans=2: minimum up to target−10 °C).
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2, "single": 1, "watchdog": 1},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1},
-               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1}}   # no target: the fans use eco's
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2, "single": 1, "watchdog": 1, "retry": 0},
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1, "retry": 0},
+               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1, "retry": 0}}   # no target: the fans use eco's
 # single=1: the final pass ends with each core tested alone (see SINGLE_SEC); watchdog=1: under `serve` the hardware
-# watchdog stays armed for the whole calibration (Watchdog)
+# watchdog stays armed for the whole calibration (Watchdog); retry=1 (custom calibrations only): the reused
+# measurement's crash margin and recorded failures are ignored, the final pass starts from the last stable + margin
 # fans: 0 = BIOS (baseline steps and curves); 1 = moderate: rise 3 s / fall 2 s and the BIOS curve raised
 # by 10 % with 100 % at 100 °C (the BIOS curves reach 100 % only at 125 °C, so under load the fans hardly
 # react; this is the curve tuned by hand on the 9800X3D); 2 = quiet: 10 s / 5 s, BIOS minimum up to
@@ -1714,6 +1715,7 @@ def at_params(mode, kvs):
     check_range("reuse", params["reuse"], 0, 1)
     check_range("single", params["single"], 0, 1)
     check_range("watchdog", params["watchdog"], 0, 1)
+    check_range("retry", params["retry"], 0, 1)
     check_range("fans", params["fans"], 0, 2)
     if "loss" in params:
         check_range("loss", params["loss"], 1, 50, " %")
@@ -1942,7 +1944,7 @@ CRASH_MARGIN = 3   # the search ended with a system lock-up: the "stable" level 
 def at_margin(st):
     """Margin over the measured limit: the mode's own, +3 for each failed final pass, +3 if
     the search ended with a crash (the stable level was tried only for `step` seconds)."""
-    crashed = any(u.get("why") == "crash" for u in st.get("unstable", {}).values())
+    crashed = any(u.get("why") == "crash" for u in st.get("unstable", {}).values()) and not st["params"].get("retry")
     return st["params"]["margin"] + 3 * st.get("final_tries", 0) + (CRASH_MARGIN if crashed else 0)
 
 
@@ -1961,7 +1963,7 @@ def at_reused(mode, params):
         return {}
     st = {"params": params, "phase": "final", "results": saved["results"], "unstable": saved["unstable"],
           "samples": saved.get("samples") or {}, "co_reused": saved["time"], "active_cores": [], "final_tries": 0,
-          "core_margin": {}, "final_failures": list(saved.get("final_failures", []))}
+          "core_margin": {}, "final_failures": [] if params.get("retry") else list(saved.get("final_failures", []))}
     while not at_spent(st):                    # already failed (even with a crash): +3, on the core that failed alone
         ff = at_known_bad(st, at_final_values(st))
         if not ff:
@@ -2088,6 +2090,8 @@ def _autotune(ctx, args):
             if name in PRESETS or name in ("baseline", "default", "custom"):
                 raise Err(_("'%s' is a mode of its own: a custom calibration needs another name") % name)
         params = at_params(args[1], [a for a in args[2:] if not a.startswith("name=")])
+        if params["retry"] and not name:   # it retries what already crashed: never over a mode's own profile
+            raise Err(_("retry=1 only for a custom calibration (name=<profile>): it retries what already crashed"))
         rm(P(AT_ABORT_FLAG))
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
               "parallel": bool(params["parallel"]), "active_cores": list(range(CORES)),
@@ -4366,6 +4370,20 @@ def selftest_variants():
     assert st["calibrated"]["auto-2"]["base"] == "auto" and st["profile"] == "auto-2"
     run(["profile", "delete", "auto-2"])
     assert "auto-2" not in run(["status"])["calibrated"]
+    # retry=1 (custom only): the crash of the reused measurement and its recorded failures are ignored, the final
+    # pass starts again from the last stable + margin
+    saved = json.loads(open(P(CO_LIMITS_PATH)).read())
+    saved["unstable"]["0"] = {"value": saved["results"]["0"] - CO_STEP, "why": "crash"}   # the search ended with a crash
+    res = [saved["results"][str(c)] for c in range(CORES)]
+    saved["final_failures"] = [{"values": [min(0, r + 6) for r in res], "time": "x"}]   # and margin +6 failed
+    write_atomic(P(CO_LIMITS_PATH), json.dumps(saved))
+    expect_err(["autotune", "start", "auto", "retry=1", "step=3"], "custom calibration")
+    st = run(["autotune", "start", "auto", "name=auto-r", "step=3"])
+    assert at_final_values(st) == [min(0, r + 9) for r in res], at_final_values(st)   # +3 margin, +3 crash, +3 failure
+    run(["autotune", "abort"])
+    st = run(["autotune", "start", "auto", "name=auto-r", "retry=1", "step=3"])
+    assert at_final_values(st) == [min(0, r + 3) for r in res] and not st["final_failures"], at_final_values(st)
+    run(["autotune", "abort"])
     # a custom Boost follows Boost's unlock rule
     run(["unlock", "on"])
     calibrate("boost", "name=boost-2", "step=3")
