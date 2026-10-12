@@ -3,7 +3,7 @@ Name:           ryzen-control
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
 Version:        0.4.5
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -122,6 +122,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.4.5-3
+- Per-core Curve Optimizer also on CPUs with disabled cores (physical positions from the core
+  fuses, read-only); the GUI shows and uses only the active cores and the CPU family
+
 * Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.4.5-2
 - Raphael (Ryzen 7000) recognised, not verified yet: Curve Optimizer and FMax; per-core Curve
   Optimizer refused on CPUs with disabled cores (the physical core is not known)
