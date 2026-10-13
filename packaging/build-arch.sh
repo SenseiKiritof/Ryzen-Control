@@ -10,7 +10,8 @@ v=$(sed -n 's/^VERSION := //p' Makefile)
 id builder >/dev/null 2>&1 || useradd -m builder
 snap=/home/builder/src pkg=/home/builder/pkg
 mkdir -p "$snap" "$pkg"
-tar -C "$src" --exclude=.git -c . | tar -C "$snap" -x
+tar -C "$src" --exclude=.git -c . | tar -C "$snap" -x --no-same-owner   # root-owned: git as root refuses a tree of
+                                                                  # another user (CI checkout: "dubious ownership")
 cd "$snap"
 git init -q
 git add -A

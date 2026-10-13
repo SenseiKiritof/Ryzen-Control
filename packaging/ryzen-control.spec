@@ -2,7 +2,7 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.7.0
+Version:        0.7.1
 Release:        1%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
@@ -124,6 +124,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.7.1-1
+- Release workflow: the GitHub release is created once with the RPM, the .deb and the Arch package
+  (immutable releases); the Arch build no longer trips on the CI checkout's owner
+
 * Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.7.0-1
 - Debian/Ubuntu and Arch packages (packaging/debian, packaging/PKGBUILD) on the same make install
 
