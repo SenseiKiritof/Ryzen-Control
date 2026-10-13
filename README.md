@@ -11,9 +11,9 @@ motherboard fans. Profiles applied at boot with protection after a crash.
 > negative can reboot the system (no damage, but unsaved work is lost): read "Safety" before
 > using it.
 
-Status: phases 1–5 done on the development system — `ryzenctl` helper/CLI, systemd services,
+Status: phases 1–6 done on the development system — `ryzenctl` helper/CLI, systemd services,
 driver via DKMS, RPM package, fans, GTK4 GUI, calibrations, per-family support for other Ryzen
-CPUs. Next: tray icon, deb/Arch packages (see `docs/plans/`).
+CPUs, system tray icon. Next: deb/Arch packages (see `docs/plans/`).
 
 ![Modes page: presets on the left, calibrated modes on the right](docs/screenshots/modes.png)
 
@@ -155,6 +155,16 @@ raises the PPT/TDC/EDC and FMax ceilings (unlock); "Hardware check" writes and r
 value per command, then restores the baseline.
 
 ![Preferences page](docs/screenshots/preferences.png)
+
+**System tray** — Preferences → "Icon in the system tray" (or `ryzen-control --tray`): an icon in
+the panel, bottom right (KDE Plasma natively; on GNOME it needs the AppIndicator extension). Left
+click opens the window; the right-click menu has the modes (the active one ticked; a calibrated mode
+not calibrated yet, or Boost without the unlock, greyed out), the custom calibrations, "Apply at
+startup", "Open Ryzen Control" and "Quit"; after a crash the choice Reactivate / Stay on Default
+comes first and the icon asks for attention. The tooltip shows Tctl (read without root) and, once
+`ryzenctl serve` runs anyway, the PPT. With the tray on, closing the window keeps the icon, and
+"Start Ryzen Control at login" starts only the icon: no password until you pick something from the
+menu (then once per session, as for the window).
 
 ## Usage (CLI)
 

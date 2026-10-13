@@ -1688,6 +1688,11 @@ class PrefsPage(Adw.PreferencesPage):
                                    subtitle=_("Opens the window at every login (asks for the password, unless the option below is on). After a crash "
                                               "it shows the warning and leaves the profile deactivated: it never re-applies anything on its own"))
         self.login.connect("notify::active", self.on_login)
+        self.tray = Adw.SwitchRow(title=_("Icon in the system tray"), active=bool(self.win.ui.get("tray")),
+                                  subtitle=_("Modes and Apply at startup from the tray; closing the window keeps the icon, and at "
+                                             "login only the icon starts (no password until you use it). KDE Plasma; on GNOME it "
+                                             "needs the AppIndicator extension"))
+        self.tray.connect("notify::active", self.on_tray)
         self.trust = Adw.SwitchRow(title=_("Stop asking for the password"),
                                    subtitle=_("Polkit rule for your user, only for Ryzen Control in the local session: "
                                               "the password is needed once to write it, then never again"))
@@ -1699,7 +1704,7 @@ class PrefsPage(Adw.PreferencesPage):
         self.hw_btn = button(_("Run"), self.hwtest)
         hw.add_suffix(self.hw_spin)
         hw.add_suffix(self.hw_btn)
-        for title, items in ((_("Startup"), (self.autostart, self.login, self.trust)), (_("Limits and checks"), (self.unlock, hw))):
+        for title, items in ((_("Startup"), (self.autostart, self.login, self.tray, self.trust)), (_("Limits and checks"), (self.unlock, hw))):
             g = Adw.PreferencesGroup(title=title)
             for r in items:
                 g.add(r)
@@ -1717,17 +1722,27 @@ class PrefsPage(Adw.PreferencesPage):
             self.win.run([["autostart", "on" if row.get_active() else "off"]])
 
     def on_login(self, row, _p):
-        """The user's XDG autostart (~/.config/autostart): no privilege, only the window at login."""
+        """The user's XDG autostart (~/.config/autostart): no privilege; the window at login, or only the tray icon."""
         try:
             if row.get_active():
                 os.makedirs(os.path.dirname(LOGIN_DESKTOP), exist_ok=True)
                 with open(LOGIN_DESKTOP, "w") as f:
-                    f.write("[Desktop Entry]\nType=Application\nName=Ryzen Control\nExec=ryzen-control\nIcon=%s\n"
-                            "Terminal=false\nX-GNOME-Autostart-enabled=true\n" % APP_ID)
+                    f.write("[Desktop Entry]\nType=Application\nName=Ryzen Control\nExec=ryzen-control%s\nIcon=%s\n"
+                            "Terminal=false\nX-GNOME-Autostart-enabled=true\n" % (" --tray" if self.tray.get_active() else "", APP_ID))
             elif os.path.exists(LOGIN_DESKTOP):
                 os.remove(LOGIN_DESKTOP)
         except OSError as e:
             self.win.toast(str(e))
+
+    def on_tray(self, row, _p):
+        self.win.ui["tray"] = row.get_active()
+        ui_save(self.win.ui)
+        try:
+            self.win.get_application().set_tray(row.get_active())
+        except GLib.Error as e:
+            self.win.toast(str(e))
+        if self.login.get_active():   # the login entry follows: only the icon, or the window
+            self.on_login(self.login, None)
 
     def on_unlock(self, row, _p):
         if self.loading:
@@ -2092,9 +2107,17 @@ class Window(Adw.ApplicationWindow):
         self.pages = [P(self) for P in (MonitorPage, ModesPage, CpuPage, CurvePage, FansPage, PrefsPage)]
         for p in self.pages:
             self.stack.add_titled_with_icon(p, p.NAME, p.TITLE, p.ICON)
-        self.connect("close-request", lambda *_a: helper.close())
+        self.connect("close-request", self.on_close)
         self.reload()
         GLib.timeout_add_seconds(1, self.tick)
+
+    def on_close(self, *_a):
+        """With the tray icon the application and its ryzenctl serve stay (no new password to reopen it)."""
+        app = self.get_application()
+        if not app.tray and app.helper:
+            app.helper.close()
+            app.helper = None
+        return False
 
     # -- helper and reload --
     def reload(self):
@@ -2291,23 +2314,322 @@ def save_png(widget, path):
     tex.save_to_png(path)
 
 
+ROOT_DIR = MOCK_DIR if "--mock" in sys.argv else ""   # where ryzenctl keeps its files (the fake backend's root in --mock)
+
+SNI_XML = """<node>
+ <interface name="org.kde.StatusNotifierItem">
+  <property name="Category" type="s" access="read"/><property name="Id" type="s" access="read"/>
+  <property name="Title" type="s" access="read"/><property name="Status" type="s" access="read"/>
+  <property name="WindowId" type="i" access="read"/><property name="IconName" type="s" access="read"/>
+  <property name="AttentionIconName" type="s" access="read"/><property name="OverlayIconName" type="s" access="read"/>
+  <property name="ToolTip" type="(sa(iiay)ss)" access="read"/><property name="ItemIsMenu" type="b" access="read"/>
+  <property name="Menu" type="o" access="read"/>
+  <method name="ContextMenu"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="Activate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="SecondaryActivate"><arg type="i" direction="in"/><arg type="i" direction="in"/></method>
+  <method name="Scroll"><arg type="i" direction="in"/><arg type="s" direction="in"/></method>
+  <signal name="NewTitle"/><signal name="NewIcon"/><signal name="NewAttentionIcon"/><signal name="NewOverlayIcon"/>
+  <signal name="NewToolTip"/><signal name="NewStatus"><arg type="s"/></signal>
+ </interface>
+ <interface name="com.canonical.dbusmenu">
+  <property name="Version" type="u" access="read"/><property name="TextDirection" type="s" access="read"/>
+  <property name="Status" type="s" access="read"/><property name="IconThemePath" type="as" access="read"/>
+  <method name="GetLayout"><arg type="i" direction="in"/><arg type="i" direction="in"/><arg type="as" direction="in"/>
+   <arg type="u" direction="out"/><arg type="(ia{sv}av)" direction="out"/></method>
+  <method name="GetGroupProperties"><arg type="ai" direction="in"/><arg type="as" direction="in"/>
+   <arg type="a(ia{sv})" direction="out"/></method>
+  <method name="GetProperty"><arg type="i" direction="in"/><arg type="s" direction="in"/><arg type="v" direction="out"/></method>
+  <method name="Event"><arg type="i" direction="in"/><arg type="s" direction="in"/><arg type="v" direction="in"/>
+   <arg type="u" direction="in"/></method>
+  <method name="EventGroup"><arg type="a(isvu)" direction="in"/><arg type="ai" direction="out"/></method>
+  <method name="AboutToShow"><arg type="i" direction="in"/><arg type="b" direction="out"/></method>
+  <method name="AboutToShowGroup"><arg type="ai" direction="in"/><arg type="ai" direction="out"/><arg type="ai" direction="out"/></method>
+  <signal name="ItemsPropertiesUpdated"><arg type="a(ia{sv})"/><arg type="a(ias)"/></signal>
+  <signal name="LayoutUpdated"><arg type="u"/><arg type="i"/></signal>
+  <signal name="ItemActivationRequested"><arg type="i"/><arg type="u"/></signal>
+ </interface>
+</node>"""
+
+
+def local_state():
+    """What the tray needs without root: the settings (profile, autostart, unlock, custom calibrations), the crash
+    marker and the profile names, from the files ryzenctl keeps readable by everyone."""
+    def js(path):
+        try:
+            with open(ROOT_DIR + path) as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+    d = ROOT_DIR + "/etc/ryzenctl/profiles"
+    return {"settings": js("/etc/ryzenctl/settings.json") or {}, "crashed": js("/var/lib/ryzenctl/crashed"),
+            "profiles": sorted(f[:-5] for f in os.listdir(d) if f.endswith(".conf")) if os.path.isdir(d) else []}
+
+
+def user_tctl():
+    """Tctl without root: k10temp (its Tdie where it has one), the fake backend's in --mock; None if unknown."""
+    try:
+        if ROOT_DIR:
+            with open(ROOT_DIR + "/fake_smu.json") as f:
+                return json.load(f)["tctl"]
+        for d in sorted(os.listdir("/sys/class/hwmon")):
+            base = "/sys/class/hwmon/" + d
+            with open(base + "/name") as f:
+                if f.read().strip() != "k10temp":
+                    continue
+            tdie = os.path.exists(base + "/temp2_label") and open(base + "/temp2_label").read().strip() == "Tdie"
+            with open(base + "/temp%d_input" % (2 if tdie else 1)) as f:
+                return int(f.read()) / 1000.0
+    except (OSError, ValueError, KeyError):
+        pass
+    return None
+
+
+class Tray:
+    """The icon in the system tray: a StatusNotifierItem with a com.canonical.dbusmenu menu exported on the session
+    bus with Gio (no extra dependency, works on Wayland; KDE Plasma natively, GNOME with the AppIndicator
+    extension). Menu and tooltip come from local_state() and k10temp: no root until an entry needs it, then the
+    application's single `ryzenctl serve` (one pkexec prompt). export=False: the menu only (smoke test)."""
+    PATH, MENU = "/StatusNotifierItem", "/MenuBar"
+
+    def __init__(self, app, export=True):
+        self.app, self.rev, self.items, self.key = app, 1, [], None
+        self.tip, self.status, self.ppt, self.asking, self.conn = "", "Active", None, False, None
+        self.name = "org.kde.StatusNotifierItem-%d-1" % os.getpid()
+        if export:
+            self.conn = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+            node = Gio.DBusNodeInfo.new_for_xml(SNI_XML)
+            # register_object_with_closures2 since GLib 2.84; the older name (deprecated there) before it
+            reg = getattr(self.conn, "register_object_with_closures2", None) or self.conn.register_object
+            self.regs = [reg(self.PATH, node.interfaces[0], self.on_sni, self.sni_prop, None),
+                         reg(self.MENU, node.interfaces[1], self.on_menu, self.menu_prop, None)]
+            self.watch = None
+            self.own = Gio.bus_own_name_on_connection(self.conn, self.name, Gio.BusNameOwnerFlags.NONE, self.on_name, None)
+        self.refresh()
+        self.timer = GLib.timeout_add_seconds(2, lambda: self.refresh() or True)
+
+    def close(self):
+        GLib.source_remove(self.timer)
+        if self.conn:
+            if self.watch:
+                Gio.bus_unwatch_name(self.watch)
+            Gio.bus_unown_name(self.own)
+            for r in self.regs:
+                self.conn.unregister_object(r)
+
+    def on_name(self, conn, _name):   # our name first, then the host (and again whenever Plasma restarts)
+        self.watch = Gio.bus_watch_name_on_connection(conn, "org.kde.StatusNotifierWatcher", Gio.BusNameWatcherFlags.NONE,
+                                                      self.on_watcher, None)
+
+    def on_watcher(self, conn, *_a):
+        conn.call("org.kde.StatusNotifierWatcher", "/StatusNotifierWatcher", "org.kde.StatusNotifierWatcher",
+                  "RegisterStatusNotifierItem", GLib.Variant("(s)", (self.name,)), None, Gio.DBusCallFlags.NONE, -1, None, None)
+
+    def emit(self, path, iface, signal, args=None):
+        if self.conn:
+            self.conn.emit_signal(None, path, iface, signal, args)
+
+    # -- the menu --
+    def build(self, ls):
+        """Entries (None = separator) from the local state: crash choice, modes (radio), Apply at startup, Open, Quit."""
+        s, crashed, items = ls["settings"], ls["crashed"], []
+
+        def add(label, action=None, toggle=None, on=False):
+            items.append({"label": label, "action": action, "toggle": toggle, "on": on})
+        if crashed:
+            prof = crashed.get("profile")
+            add(_("Profile '%s' deactivated after a crash (%s)") % (prof or "-", crashed.get("time", "?")))
+            if prof:
+                add(_("Reactivate"), lambda: self.run([["crashed", "clear"], ["autostart", "on"], ["apply", prof]]))
+            add(_("Stay on Default"), lambda: self.run([["crashed", "clear"], ["default"]]))
+            items.append(None)
+        prof, cal = s.get("profile"), s.get("calibrated") or {}
+        titles = dict((k, t) for k, t, _sub in MODES)
+        for key in ["default"] + [k for k, _t, _s in MODES if k in PRESETS] + sorted(cal):
+            if key == "default":
+                act = lambda: self.run([["default"]])
+            elif (key == "boost" or cal.get(key, {}).get("base") == "boost") and not s.get("unlock"):
+                act = None
+            elif key in ls["profiles"]:
+                act = lambda k=key: self.run([["apply", k], ["use", k]])
+            elif key in ("quiet", "performance"):   # fixed presets: created from the stock values on the way
+                act = lambda k=key: self.run([["preset", k], ["apply", k], ["use", k]])
+            else:
+                act = None
+            why = "" if act else (_(" (needs unlock)") if key == "boost" or key in cal else _(" (not calibrated)"))
+            add(titles.get(key, key) + why, act, "radio", prof == key or (key == "default" and not prof))
+        if prof and prof not in PRESETS and prof not in cal:   # a profile saved by hand: shown, chosen in the window
+            add(_("Custom: %s") % prof, None, "radio", True)
+        items.append(None)
+        add(_("Apply at startup"), (lambda: self.run([["autostart", "off" if s.get("autostart") else "on"]])) if prof else None,
+            "checkmark", bool(s.get("autostart")))
+        items.append(None)
+        add(_("Open Ryzen Control"), self.app.activate)
+        add(_("Quit"), self.app.quit_all)
+        return items
+
+    def props(self, it):
+        if it is None:
+            return {"type": GLib.Variant("s", "separator")}
+        p = {"label": GLib.Variant("s", it["label"].replace("_", "__")), "enabled": GLib.Variant("b", it["action"] is not None)}
+        if it["toggle"]:
+            p["toggle-type"] = GLib.Variant("s", it["toggle"])
+            p["toggle-state"] = GLib.Variant("i", 1 if it["on"] else 0)
+        return p
+
+    def layout(self):
+        kids = [GLib.Variant("(ia{sv}av)", (i, self.props(it), [])) for i, it in enumerate(self.items, 1)]
+        return GLib.Variant("(u(ia{sv}av))", (self.rev, (0, {"children-display": GLib.Variant("s", "submenu")}, kids)))
+
+    def click(self, i):
+        it = self.items[i - 1] if 0 < i <= len(self.items) else None
+        if it and it["action"]:
+            it["action"]()
+
+    def refresh(self):
+        """Local state every 2 s and before the menu opens: new layout when it changed, tooltip, attention after a crash.
+        True when the layout changed."""
+        ls = local_state()
+        self.items = self.build(ls)
+        key = repr([it and (it["label"], it["action"] is not None, it["on"]) for it in self.items])
+        changed = key != self.key
+        if changed:
+            self.key, self.rev = key, self.rev + 1
+            self.emit(self.MENU, "com.canonical.dbusmenu", "LayoutUpdated", GLib.Variant("(ui)", (self.rev, 0)))
+        prof, t = ls["settings"].get("profile"), user_tctl()
+        mode = dict((k, title) for k, title, _s in MODES).get(prof, prof) if prof else _("Default")
+        tip = "Tctl %s" % fmt(t, " °C") + (" · PPT %s" % fmt(self.ppt, " W") if self.ppt is not None else "") + "\n" + \
+            _("Mode: %s") % mode + (_(" (applied at startup)") if ls["settings"].get("autostart") else "") + \
+            ("\n" + _("Profile deactivated after a crash: choose in the menu") if ls["crashed"] else "")
+        if tip != self.tip:
+            self.tip = tip
+            self.emit(self.PATH, "org.kde.StatusNotifierItem", "NewToolTip")
+        status = "NeedsAttention" if ls["crashed"] else "Active"
+        if status != self.status:
+            self.status = status
+            self.emit(self.PATH, "org.kde.StatusNotifierItem", "NewStatus", GLib.Variant("(s)", (status,)))
+        h = self.app.helper   # the PPT only once ryzenctl serve runs anyway (never a prompt for a tooltip), one request at a time
+        if h and h.p.poll() is None and not self.asking:
+            self.asking = True
+            bg(lambda: h.call("telemetry").get("ppt"), self.got_ppt, lambda _m: self.got_ppt(None))
+        return changed
+
+    def got_ppt(self, ppt):
+        self.asking, self.ppt = False, ppt
+
+    def run(self, cmds):
+        """A privileged choice from the menu: the application's ryzenctl serve (the session's first one asks the
+        password), then the tray and the window follow; an error becomes a notification."""
+        def done(_r):
+            self.refresh()
+            win = self.app.props.active_window
+            if win:
+                win.reload()
+
+        def fail(msg):
+            n = Gio.Notification.new("Ryzen Control")
+            n.set_body(msg)
+            self.app.send_notification("tray-error", n)
+            self.refresh()
+        h = self.app.get_helper()
+        bg(lambda: [h.call(*a) for a in cmds], done, fail)
+
+    # -- D-Bus --
+    def sni_prop(self, _conn, _sender, _path, _iface, prop):
+        theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+        icon = APP_ID if theme.has_icon(APP_ID) else "applications-system"
+        v = {"Category": ("s", "Hardware"), "Id": ("s", "ryzen-control"), "Title": ("s", "Ryzen Control"),
+             "Status": ("s", self.status), "WindowId": ("i", 0), "IconName": ("s", icon), "AttentionIconName": ("s", "dialog-warning"),
+             "OverlayIconName": ("s", ""), "ToolTip": ("(sa(iiay)ss)", (icon, [], "Ryzen Control", self.tip)),
+             "ItemIsMenu": ("b", False), "Menu": ("o", self.MENU)}.get(prop)
+        return GLib.Variant(*v) if v else None
+
+    def on_sni(self, _conn, _sender, _path, _iface, method, _params, invocation):
+        if method == "Activate":   # left click: the window, like the launcher
+            self.app.activate()
+        invocation.return_value(None)
+
+    def menu_prop(self, _conn, _sender, _path, _iface, prop):
+        v = {"Version": ("u", 3), "TextDirection": ("s", "ltr"), "Status": ("s", "normal"), "IconThemePath": ("as", [])}.get(prop)
+        return GLib.Variant(*v) if v else None
+
+    def on_menu(self, _conn, _sender, _path, _iface, method, params, invocation):
+        if method == "GetLayout":
+            invocation.return_value(self.layout())
+        elif method == "GetGroupProperties":
+            ids = params.unpack()[0]
+            invocation.return_value(GLib.Variant("(a(ia{sv}))", ([(i, self.props(self.items[i - 1])) for i in ids
+                                                                  if 0 < i <= len(self.items)],)))
+        elif method == "GetProperty":
+            i, name = params.unpack()
+            p = self.props(self.items[i - 1]) if 0 < i <= len(self.items) else {}
+            invocation.return_value(GLib.Variant("(v)", (p.get(name, GLib.Variant("s", "")),)))
+        elif method == "Event":
+            i, event = params.unpack()[:2]
+            invocation.return_value(None)
+            if event == "clicked":
+                GLib.idle_add(lambda: self.click(i) and False)
+        elif method == "EventGroup":
+            for i, event, _data, _ts in params.unpack()[0]:
+                if event == "clicked":
+                    GLib.idle_add(lambda i=i: self.click(i) and False)
+            invocation.return_value(GLib.Variant("(ai)", ([],)))
+        elif method == "AboutToShow":
+            invocation.return_value(GLib.Variant("(b)", (self.refresh(),)))
+        elif method == "AboutToShowGroup":
+            invocation.return_value(GLib.Variant("(aiai)", ([0] if self.refresh() else [], [])))
+        else:
+            invocation.return_value(None)
+
+
 class App(Adw.Application):
-    def __init__(self, mock, smoke=False, shots=None):
+    def __init__(self, mock, smoke=False, shots=None, tray=False):
         # the mock must not activate the real instance; --smoke/--screenshots run as their own instance,
         # otherwise a mock window already open would receive the activation and the check would pass untested
         super().__init__(application_id=APP_ID + (".Mock" if mock else ""),
                          flags=Gio.ApplicationFlags.NON_UNIQUE if (smoke or shots) else Gio.ApplicationFlags.DEFAULT_FLAGS)
         self.mock, self.smoke, self.smoke_failed, self.shots = mock, smoke, False, shots
+        self.helper, self.tray, self.hidden, self.styled = None, None, tray, False   # hidden: --tray, only the icon at first
+
+    def get_helper(self):
+        """The application's single `ryzenctl serve`, shared by the window and the tray; started at the first need."""
+        if self.helper is None or self.helper.p.poll() is not None:
+            self.helper = Helper(self.mock)
+        return self.helper
+
+    def set_tray(self, on):
+        """The icon in the system tray (Preferences, --tray): while it is there the application lives without a window."""
+        if on and not self.tray:
+            self.tray = Tray(self)
+            self.hold()
+        elif not on and self.tray:
+            self.tray.close()
+            self.tray = None
+            self.release()
+
+    def quit_all(self):
+        if self.helper:
+            self.helper.close()
+        self.quit()
 
     def do_activate(self):
-        if not self.props.active_window:
+        if not self.styled:
+            self.styled = True
             prov = Gtk.CssProvider()
             try:
                 prov.load_from_string(CSS)
             except AttributeError:   # GTK < 4.12
                 prov.load_from_data(CSS.encode())
             Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
-            win = Window(self, Helper(self.mock))
+            if (self.hidden or ui_load().get("tray")) and not (self.smoke or self.shots):
+                try:
+                    self.set_tray(True)
+                except GLib.Error:   # no session bus: the window as usual
+                    self.hidden = False
+        if self.hidden:   # --tray: only the icon until "Open Ryzen Control" (no password until then)
+            self.hidden = False
+            return
+        if not self.props.active_window:
+            win = Window(self, self.get_helper())
             if self.smoke:
                 GLib.timeout_add(500, self.run_smoke)
             if self.shots:
@@ -2502,6 +2824,30 @@ class App(Adw.Application):
                                    profile_lines={"smoke-custom": win.h.call("profile", "show", "smoke-custom")["lines"]}))
                 assert "smoke-custom" in modes.custom_chk and len(modes.custom_rows) == 2, "custom calibration not listed"
                 win.h.call("profile", "delete", "smoke-custom")
+            # the tray menu (its logic, not exported on the bus): modes as radio entries with the active one checked,
+            # a calibrated mode without a profile and Boost without unlock disabled, the crash choice on top
+            tray = Tray(self, export=False)
+            sent = []
+            tray.run = sent.append
+            ls = {"settings": {"profile": "quiet", "autostart": True, "unlock": False, "calibrated": {"auto-x": {"base": "auto"}}},
+                  "crashed": None, "profiles": ["quiet", "auto-x"]}
+            items = tray.build(ls)
+            find = lambda its, text: next(it for it in its if it and it["label"] == text)
+            assert find(items, _("Quiet"))["on"] and not find(items, _("Default"))["on"], "tray: active mode not checked"
+            assert find(items, _("Eco") + _(" (not calibrated)"))["action"] is None, "tray: Eco without a profile"
+            assert find(items, _("Boost") + _(" (needs unlock)"))["action"] is None, "tray: Boost without unlock"
+            for text in (_("Performance"), "auto-x", _("Apply at startup")):
+                find(items, text)["action"]()
+            assert sent == [[["preset", "performance"], ["apply", "performance"], ["use", "performance"]],
+                            [["apply", "auto-x"], ["use", "auto-x"]], [["autostart", "off"]]], sent
+            items = tray.build(dict(ls, crashed={"time": "10:49", "profile": "quiet"}))
+            assert items[0]["action"] is None and items[1]["label"] == _("Reactivate") and items[3] is None, "tray: crash entries"
+            del sent[:]
+            items[1]["action"]()
+            assert sent == [[["crashed", "clear"], ["autostart", "on"], ["apply", "quiet"]]], sent
+            tray.items = items
+            assert tray.layout().get_type_string() == "(u(ia{sv}av))" and "Tctl" in tray.tip, "tray: layout or tooltip"
+            tray.close()
             win.ask_resume({"mode": "auto", "phase": "ppt", "started": "today"})
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
@@ -2537,7 +2883,7 @@ class App(Adw.Application):
 
 def main():
     argv = list(sys.argv)
-    mock, smoke = "--mock" in argv, "--smoke" in argv
+    mock, smoke, tray = "--mock" in argv, "--smoke" in argv, "--tray" in argv
     shots = None
     if "--screenshots" in argv:   # --mock --screenshots DIR: README screenshots from the fake backend
         i = argv.index("--screenshots")
@@ -2546,8 +2892,8 @@ def main():
             sys.exit("usage: ryzen-control --mock --screenshots DIR")
         os.makedirs(shots, exist_ok=True)
         del argv[i:i + 2]
-    app = App(mock, smoke and mock, shots)
-    rc = app.run([a for a in argv if a not in ("--mock", "--smoke")])
+    app = App(mock, smoke and mock, shots, tray)
+    rc = app.run([a for a in argv if a not in ("--mock", "--smoke", "--tray")])
     sys.exit(1 if app.smoke_failed else rc)
 
 

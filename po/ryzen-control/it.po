@@ -1155,3 +1155,36 @@ msgstr "Quando la misura riusata è finita con un crash (o un passaggio finale �
 
 msgid "The lockup of the measurement at CO %s is ignored, as you chose: the final pass starts from the last stable value + margin, at CO %s."
 msgstr "Il blocco della misura a CO %s viene ignorato, come hai scelto: il passaggio finale parte dall'ultimo valore stabile + margine, a CO %s."
+
+msgid " (applied at startup)"
+msgstr " (applicata all'avvio)"
+
+msgid " (needs unlock)"
+msgstr " (richiede lo sblocco)"
+
+msgid " (not calibrated)"
+msgstr " (non calibrata)"
+
+msgid "Custom: %s"
+msgstr "Personalizzato: %s"
+
+msgid "Icon in the system tray"
+msgstr "Icona nel vassoio di sistema"
+
+msgid "Mode: %s"
+msgstr "Modalità: %s"
+
+msgid "Modes and Apply at startup from the tray; closing the window keeps the icon, and at login only the icon starts (no password until you use it). KDE Plasma; on GNOME it needs the AppIndicator extension"
+msgstr "Modalità e Applica all'avvio dal vassoio; chiudendo la finestra l'icona resta, e al login parte solo l'icona (nessuna password finché non la usi). KDE Plasma; su GNOME serve l'estensione AppIndicator"
+
+msgid "Open Ryzen Control"
+msgstr "Apri Ryzen Control"
+
+msgid "Profile '%s' deactivated after a crash (%s)"
+msgstr "Profilo '%s' disattivato dopo un crash (%s)"
+
+msgid "Profile deactivated after a crash: choose in the menu"
+msgstr "Profilo disattivato dopo un crash: scegli nel menu"
+
+msgid "Quit"
+msgstr "Esci"
