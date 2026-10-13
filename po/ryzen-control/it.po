@@ -1206,3 +1206,17 @@ msgstr "PPT fast"
 
 msgid "Slow PPT"
 msgstr "PPT slow"
+
+msgid "On battery: the firmware's power limits apply until AC power is back"
+msgstr "A batteria: valgono i limiti di potenza del firmware finché non torna l'alimentatore"
+
+msgid "On AC power: the firmware's power limits apply until back on battery or a restart"
+msgstr "Con l'alimentatore: valgono i limiti di potenza del firmware finché non si torna a batteria o fino al riavvio"
+
+#, python-format
+msgid "The firmware keeps overriding the power limits: re-applying stopped (%s); apply the mode again to retry"
+msgstr "Il firmware continua a sovrascrivere i limiti di potenza: riapplicazione interrotta (%s); applica di nuovo la modalità per riprovare"
+
+#, python-format
+msgid "Profile deselected; CPU values not written: %s"
+msgstr "Profilo deselezionato; valori della CPU non scritti: %s"

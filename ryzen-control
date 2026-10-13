@@ -252,6 +252,19 @@ def mhz(v):
     return _("n/a") if v is None else "{:,} MHz".format(int(v)).replace(",", " ")
 
 
+def laptop_notes(rp):
+    """The notes of a laptop (Monitor, tray tooltip) from ryzenctl's re-apply state (status, telemetry, or its file in
+    /run): the profile's limits held on the other power source, re-applying stopped."""
+    rp, notes = rp or {}, []
+    if rp.get("held"):
+        notes.append(_("On battery: the firmware's power limits apply until AC power is back") if rp["held"] == "battery"
+                     else _("On AC power: the firmware's power limits apply until back on battery or a restart"))
+    if rp.get("gave_up"):
+        notes.append(_("The firmware keeps overriding the power limits: re-applying stopped (%s); apply the mode again to retry")
+                     % rp["gave_up"])
+    return notes
+
+
 def at_tested(st, c, level):
     """Was core c really tested at CO level `level`? In parallel the samples also report the cores
     already out of the test, parked at their last stable CO: those must be ignored."""
@@ -735,6 +748,8 @@ class MonitorPage(Gtk.Box):
         top.append(self.cpu)
         top.append(self.unverified)
         self.append(top)
+        self.laptop = label("", ["warning"], wrap=True, visible=False)   # laptop_notes, from the telemetry
+        self.append(self.laptop)
         tiles = Gtk.Box(spacing=12, homogeneous=True)
         self.tiles = {}
         for key, title in (("tctl", "Tctl"), ("ppt", "PPT"), ("tdc", "TDC"), ("fmax", "FMax")):
@@ -787,6 +802,9 @@ class MonitorPage(Gtk.Box):
         self.unverified.set_visible(not st.get("verified", True))
 
     def telemetry(self, t):
+        notes = laptop_notes(t.get("reapply"))
+        self.laptop.set_text("\n".join(notes))
+        self.laptop.set_visible(bool(notes))
         value, sub, _bar = self.tiles["tctl"]
         value.set_text(fmt(t["tctl"], " °C"))
         sub.set_text("Tccd " + fmt(t["tccd"], " °C") + " · Tjmax " + fmt(t["tjmax"], " °C"))
@@ -1458,8 +1476,10 @@ class ModesPage(Gtk.ScrolledWindow):
     def on_mode(self, chk, key):
         if self.loading or not chk.get_active():
             return
-        if key == "default":
-            self.win.run([["default"]], lambda _r: self.win.toast(_("Stock values applied")))
+        if key == "default":   # a laptop on the other power source: the CPU values are not written (cpu_skipped says why)
+            self.win.run([["default"]], lambda r: self.win.toast(
+                _("Profile deselected; CPU values not written: %s") % r[0]["cpu_skipped"] if r[0].get("cpu_skipped")
+                else _("Stock values applied")))
         elif key == "custom":
             self.win.toast(_("Set the values in the CPU, Curves and Fans pages and use \"Apply now\""))
         elif key in self.win.status.get("profile_lines", {}):
@@ -2370,7 +2390,7 @@ SNI_XML = """<node>
 
 def local_state():
     """What the tray needs without root: the settings (profile, autostart, unlock, custom calibrations), the crash
-    marker and the profile names, from the files ryzenctl keeps readable by everyone."""
+    marker, the profile names and a laptop's re-apply state, from the files ryzenctl keeps readable by everyone."""
     def js(path):
         try:
             with open(ROOT_DIR + path) as f:
@@ -2379,7 +2399,8 @@ def local_state():
             return None
     d = ROOT_DIR + "/etc/ryzenctl/profiles"
     return {"settings": js("/etc/ryzenctl/settings.json") or {}, "crashed": js("/var/lib/ryzenctl/crashed"),
-            "profiles": sorted(f[:-5] for f in os.listdir(d) if f.endswith(".conf")) if os.path.isdir(d) else []}
+            "profiles": sorted(f[:-5] for f in os.listdir(d) if f.endswith(".conf")) if os.path.isdir(d) else [],
+            "reapply": js("/run/ryzenctl/reapply.json")}
 
 
 def user_tctl():
@@ -2516,7 +2537,8 @@ class Tray:
         mode = dict((k, title) for k, title, _s in MODES).get(prof, prof) if prof else _("Default")
         tip = "Tctl %s" % fmt(t, " °C") + (" · PPT %s" % fmt(self.ppt, " W") if self.ppt is not None else "") + "\n" + \
             _("Mode: %s") % mode + (_(" (applied at startup)") if ls["settings"].get("autostart") else "") + \
-            ("\n" + _("Profile deactivated after a crash: choose in the menu") if ls["crashed"] else "")
+            ("\n" + _("Profile deactivated after a crash: choose in the menu") if ls["crashed"] else "") + \
+            "".join("\n" + n for n in laptop_notes(ls.get("reapply")))
         if tip != self.tip:
             self.tip = tip
             self.emit(self.PATH, "org.kde.StatusNotifierItem", "NewToolTip")
@@ -2757,6 +2779,12 @@ class App(Adw.Application):
                 curve.refresh(dict(win.status, cores=k))
                 assert len(mon.cores) == len(curve.cores) == k and mon.grid.get_child_at(0, k + 1) is None, "core rows not following the count"
                 assert not any(p.get_parent() for p in old), "old core rows kept"
+            # a laptop: the profile's limits held on the other power source, re-applying stopped; gone with them
+            rp = {"held": "battery", "gave_up": "2026-10-13 12:00"}
+            mon.telemetry(dict(t, reapply=rp))
+            assert mon.laptop.get_visible() and mon.laptop.get_text() == "\n".join(laptop_notes(rp)) and len(laptop_notes(rp)) == 2
+            mon.telemetry(t)
+            assert not mon.laptop.get_visible(), "laptop note left on the Monitor"
             win.h.call("unlock", "on")   # needed by the Boost calibration below
             # the first Eco measures from scratch, the last one reuses the final passes just recorded: done at once;
             # no calibration without a per-core CO (ryzenctl refuses it)
@@ -2864,6 +2892,12 @@ class App(Adw.Application):
             assert sent == [[["crashed", "clear"], ["autostart", "on"], ["apply", "quiet"]]], sent
             tray.items = items
             assert tray.layout().get_type_string() == "(u(ia{sv}av))" and "Tctl" in tray.tip, "tray: layout or tooltip"
+            state = os.path.join(ROOT_DIR, "run", "ryzenctl", "reapply.json")   # what `ryzenctl reapply` leaves on a laptop
+            with open(state, "w") as f:
+                json.dump({"held": "ac"}, f)
+            tray.refresh()
+            os.remove(state)
+            assert laptop_notes({"held": "ac"})[0] in tray.tip, "tray: laptop note missing from the tooltip"
             tray.close()
             prefs = next(p for p in win.pages if isinstance(p, PrefsPage))   # the login entry: only the icon, or the window too
             prefs.login.set_active(True)

@@ -90,18 +90,18 @@ if [ ! -s "$DROPIN" ] && grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/
     echo "Until then the ryzen_smu module cannot be loaded."
 fi
 # 2. Services: the preset enables them; start now (loads the module, captures the baseline, no
-#    profile applied).
-%systemd_post ryzenctl.service ryzenctl-resume.service
+#    profile applied; the reapply timer does nothing without a laptop profile).
+%systemd_post ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer
 if [ -d /run/systemd/system ]; then
-    systemctl start ryzenctl.service >/dev/null 2>&1 || :
+    systemctl start ryzenctl.service ryzenctl-reapply.timer >/dev/null 2>&1 || :
 fi
 
 %preun
-%systemd_preun ryzenctl.service ryzenctl-resume.service
+%systemd_preun ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer ryzenctl-reapply.service
 dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 
 %postun
-%systemd_postun ryzenctl.service ryzenctl-resume.service
+%systemd_postun ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer ryzenctl-reapply.service
 
 %files -f ryzenctl.lang -f ryzen-control.lang
 %license LICENSE ryzen_smu/LICENSE
@@ -113,7 +113,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %{_metainfodir}/org.ryzencontrol.RyzenControl.metainfo.xml
 %{_unitdir}/ryzenctl.service
 %{_unitdir}/ryzenctl-resume.service
+%{_unitdir}/ryzenctl-reapply.service
+%{_unitdir}/ryzenctl-reapply.timer
 %{_presetdir}/80-ryzen-control.preset
+%{_udevrulesdir}/60-ryzen-control.rules
 %{_modprobedir}/ryzen-control.conf
 %{_datadir}/polkit-1/actions/org.ryzencontrol.RyzenControl.policy
 %config(noreplace) %{_sysconfdir}/xdg/autostart/ryzenctl-notify.desktop
