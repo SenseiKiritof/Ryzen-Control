@@ -138,6 +138,7 @@ systemctl --no-reload preset ryzenctl-reapply.timer >/dev/null 2>&1 || :
 - Laptops: the baseline records the power source, CPU writes only on that source; the reapply timer and a
   udev rule write the profile's limits again after the firmware's rewrites, and stop after 3 corrections
   within 2 minutes
+- Default chosen by hand keeps "Apply at startup" (after a crash, "Stay on Default" still turns it off)
 
 * Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.7.1-1
 - Release workflow: the GitHub release is created once with the RPM, the .deb and the Arch package
