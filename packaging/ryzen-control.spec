@@ -3,7 +3,7 @@ Name:           ryzen-control
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
 Version:        0.6.0
-Release:        1%{?dist}
+Release:        2%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -124,6 +124,9 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.6.0-2
+- "Start minimized to the tray icon": at login only the icon, or the window as well
+
 * Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.6.0-1
 - System tray icon (StatusNotifierItem): modes, custom calibrations, Apply at startup and the crash
   choice from its menu, Tctl/PPT in the tooltip; `ryzen-control --tray` and a Preferences switch, the

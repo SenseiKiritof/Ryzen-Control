@@ -80,7 +80,8 @@ with Gio (`register_object_with_closures2`, the old name before GLib 2.84); `--t
 menu and tooltip from `local_state()` (settings.json, crashed, profile names: world-readable) and k10temp,
 no root until a menu entry needs it, then the app's single `ryzenctl serve` (`App.get_helper`, shared with
 the window, kept when the window closes while the tray is on); PPT in the tooltip only when serve runs
-anyway. Verified on the mock over D-Bus in Plasma (registered, layout, click → mode applied, Quit).
+anyway. Verified on the mock over D-Bus in Plasma (registered, layout, click → mode applied, Quit) and by
+the user on the installed package. **Phase 6 closed, tag `v0.6.0`** (2026-10-13).
 Next: phase 7 deb/PKGBUILD.
 
 Lessons from the hardware: the PM table reflects a new limit after tens of ms → readback with
