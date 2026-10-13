@@ -7,6 +7,7 @@ Release:        3%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
+URL:            https://github.com/SenseiKiritof/Ryzen-Control
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 

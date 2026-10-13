@@ -30,6 +30,7 @@
     </p>
   </description>
   <launchable type="desktop-id">org.ryzencontrol.RyzenControl.desktop</launchable>
+  <url type="homepage">https://github.com/SenseiKiritof/Ryzen-Control</url>
   <provides>
     <binary>ryzen-control</binary>
     <binary>ryzenctl</binary>
