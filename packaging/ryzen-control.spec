@@ -3,7 +3,7 @@ Name:           ryzen-control
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
 Version:        0.5.0
-Release:        2%{?dist}
+Release:        3%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -123,6 +123,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-3
+- Custom calibrations can retry from the last stable value, ignoring the crash of the measurement
+- The single-core test is chosen in the first calibration dialog, at every start
+
 * Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-2
 - Ryzen 5000 (Curve Optimizer -30..+30, limits), Ryzen 3000 (limits) and Ryzen 1000/2000 (boost,
   power, fans) recognised, not verified yet; FMax optional; boost on/off through the kernel; Tdie on
