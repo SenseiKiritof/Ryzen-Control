@@ -69,7 +69,8 @@ column; `retry=1` (custom only) ignores the reused measurement's crash margin an
 **Phase 5 closed, tag `v0.5.0`** (2026-10-13), on the 9800X3D: `hwtest` ok, watchdog armed and
 disarmed by `serve`; forced reset proven (2026-10-13: `serve` killed with SIGKILL during a verify →
 the board reset by itself on the SP5100 TCO timer; with systemd driving it, 0.5.0-5, a killed `serve`
-no longer resets the PC and the next ryzenctl released it), a custom calibration from Auto with the single-core test passed at −29 on every core
+no longer resets the PC and the next ryzenctl released it, while a kernel crash, sysrq c, during a
+verify was reset by the systemd-driven watchdog), a custom calibration from Auto with the single-core test passed at −29 on every core
 (PPT 114 W, FMax 4750).
 Next: phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
