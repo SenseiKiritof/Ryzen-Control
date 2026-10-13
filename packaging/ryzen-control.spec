@@ -3,7 +3,7 @@ Name:           ryzen-control
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
 Version:        0.5.0
-Release:        3%{?dist}
+Release:        4%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -124,6 +124,9 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-4
+- A custom calibration that ignores the crash says so in its window; homepage URL in the metadata
+
 * Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-3
 - Custom calibrations can retry from the last stable value, ignoring the crash of the measurement
 - The single-core test is chosen in the first calibration dialog, at every start
