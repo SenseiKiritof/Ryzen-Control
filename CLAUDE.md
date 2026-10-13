@@ -73,9 +73,16 @@ no longer resets the PC and the next ryzenctl released it, while a kernel crash,
 verify was reset by the systemd-driven watchdog), a custom calibration from Auto with the single-core test passed at −29 on every core
 (PPT 114 W, FMax 4750). Tag `v0.5.1` (2026-10-13): the calibration watchdog driven by systemd, verified
 (freeze and kernel crash reset the PC, a dead ryzenctl does not), clearer custom-retry text.
-Next: phase 6 tray icon
-(StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
-deb/PKGBUILD.
+**Phase 6** (tray, step 22): `Tray` in `ryzen-control`, a StatusNotifierItem + com.canonical.dbusmenu exported
+with Gio (`register_object_with_closures2`, the old name before GLib 2.84); `--tray` starts only the icon
+(`App.hold`), Preferences "Icon in the system tray" (ui.json `tray`) and "Start minimized to the tray icon"
+(`tray_minimized`, default on: the login entry then runs `--tray`, otherwise the window opens too);
+menu and tooltip from `local_state()` (settings.json, crashed, profile names: world-readable) and k10temp,
+no root until a menu entry needs it, then the app's single `ryzenctl serve` (`App.get_helper`, shared with
+the window, kept when the window closes while the tray is on); PPT in the tooltip only when serve runs
+anyway. Verified on the mock over D-Bus in Plasma (registered, layout, click → mode applied, Quit) and by
+the user on the installed package. **Phase 6 closed, tag `v0.6.0`** (2026-10-13).
+Next: phase 7 deb/PKGBUILD.
 
 Lessons from the hardware: the PM table reflects a new limit after tens of ms → readback with
 a wait (`READBACK_WAIT`); the baseline is recaptured only at boot, so after an update that
