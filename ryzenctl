@@ -1384,6 +1384,8 @@ def cmd_profile(ctx, args):
         lines = parse_lines("\n".join(args[2:]))
         apply_lines(lines, {"dry": True})          # validates everything, does not touch the hardware
         write_atomic(path, "# ryzenctl profile '%s'\n" % name + "\n".join(" ".join(t) for t in lines) + "\n")
+        if name == s["profile"]:
+            reapply_off()   # saved, not applied: `reapply` must not write it before the next apply or boot
         return {"saved": name, "lines": len(lines)}
     if len(args) == 2 and args[0] == "delete":
         path = profile_path(args[1])
@@ -4711,6 +4713,11 @@ def selftest_laptop():
     firmware_reset()
     n = writes()
     assert not wanted() and run(["reapply"]) is None and writes() == n
+    run(["apply", "quiet"])
+    assert wanted()
+    # the selected profile saved again: not written by reapply until it is applied
+    run(["profile", "save", "quiet"] + open(P(ETC + "/profiles/quiet.conf")).read().splitlines()[1:])
+    assert not wanted()
     run(["apply", "quiet"])
     assert wanted()
     # crashed, a calibration in progress or waiting for a choice: nothing written; allowed via serve
