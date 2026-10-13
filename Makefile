@@ -1,7 +1,7 @@
 # Ryzen Control — the single source of truth for the installed layout. Packages (RPM, deb, Arch)
 # call `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` /
 # `install-locales` are the pieces.
-VERSION := 0.6.0
+VERSION := 0.7.0
 # DKMS module version: bump ONLY when ryzen_smu/ changes (a new /usr/src directory means a
 # rebuild + dracut, about a minute at upgrade time). Same value as %drv_version in the spec.
 DRV_VERSION := 0.4.1
@@ -29,10 +29,10 @@ TMPROOT := $(or $(TMPDIR),/tmp)/ryzen-control-check
 PO := $(wildcard po/*/*.po)
 MO := $(foreach p,$(PO),build/locale/$(notdir $(basename $(p)))/LC_MESSAGES/$(notdir $(patsubst %/,%,$(dir $(p)))).mo)
 
-.PHONY: all install install-cli install-gui install-dkms-src install-locales locales dkms uninstall check driver-check dist rpm screenshots
+.PHONY: all install install-cli install-gui install-dkms-src install-locales locales dkms uninstall check driver-check dist rpm deb arch screenshots
 
 all:
-	@echo "Targets: install [DESTDIR=…] (install-cli install-gui install-dkms-src install-locales), locales, dkms, uninstall, check, driver-check, dist, rpm"
+	@echo "Targets: install [DESTDIR=…] (install-cli install-gui install-dkms-src install-locales), locales, dkms, uninstall, check, driver-check, dist, rpm, deb, arch"
 
 install: install-cli $(if $(wildcard ryzen-control),install-gui) install-dkms-src install-locales
 
@@ -89,6 +89,8 @@ uninstall:
 # desktop entries, metainfo, the calibration window over every state of the fake backend
 # (needs a display; a fresh fake root each time), once in English and once with the Italian catalog.
 check: locales
+	@v=$(VERSION); grep -q "^Version: *$$v$$" packaging/ryzen-control.spec && head -1 packaging/debian/changelog | grep -qF "($$v)" \
+	  && grep -q "^pkgver=$$v$$" packaging/PKGBUILD || { echo "VERSION $$v differs in the spec, debian/changelog or PKGBUILD"; exit 1; }
 	python3 ryzenctl selftest
 	rm -rf "$(TMPROOT)" && $(MAKE) install DESTDIR="$(TMPROOT)" >/dev/null
 	cd "$(TMPROOT)" && find . -type f | sort
@@ -120,6 +122,18 @@ rpm: dist
 	rpmbuild -ba packaging/ryzen-control.spec
 	cp "$$HOME"/rpmbuild/RPMS/noarch/ryzen-control-$(VERSION)-*.rpm dist/
 	ls -1 dist/
+
+# deb and Arch packages, built in a container with podman from the committed tree (like `make rpm`);
+# the same scripts run in the release workflow.
+deb: dist
+	podman run --rm -i -v "$(CURDIR)/dist":/out:z docker.io/library/debian:trixie \
+	  sh -c 'mkdir /src && cd /src && tar -xz --strip-components=1 --no-same-owner && sh packaging/build-deb.sh /out' \
+	  < dist/ryzen-control-$(VERSION).tar.gz
+
+arch: dist
+	podman run --rm -i -v "$(CURDIR)/dist":/out:z docker.io/library/archlinux:latest \
+	  sh -c 'mkdir /src && cd /src && tar -xz --strip-components=1 --no-same-owner && sh packaging/build-arch.sh /out' \
+	  < dist/ryzen-control-$(VERSION).tar.gz
 
 # kbuild rejects spaces in the path: build a copy of the driver outside the repo.
 driver-check:

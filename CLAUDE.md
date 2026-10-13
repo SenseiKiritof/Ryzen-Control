@@ -82,7 +82,15 @@ no root until a menu entry needs it, then the app's single `ryzenctl serve` (`Ap
 the window, kept when the window closes while the tray is on); PPT in the tooltip only when serve runs
 anyway. Verified on the mock over D-Bus in Plasma (registered, layout, click → mode applied, Quit) and by
 the user on the installed package. **Phase 6 closed, tag `v0.6.0`** (2026-10-13).
-Next: phase 7 deb/PKGBUILD.
+**Phase 7** (steps 23–24): `packaging/debian/` (debhelper 13, `dh_dkms` on the dkms.conf that make install
+generated, `dh_installsystemd`: ryzenctl.service started, the resume unit only enabled; lintian overrides for
+the sleep targets and the missing man pages) and `packaging/PKGBUILD` (+ `.install`: services to enable by
+hand, the dkms pacman hook builds the module). Both through the same `make install`; built and checked in
+containers by `packaging/build-deb.sh` / `build-arch.sh` (`make deb`, `make arch` with podman, and two jobs
+of the release workflow): lintian clean, namcap warnings expected (empty state dirs, the python3 shebang,
+runtime-only deps); installed, selftest and removed in Debian 13, Ubuntu 24.04 and Arch containers; not used
+on real Debian/Ubuntu/Arch hardware. `make check` fails if VERSION differs in the spec, debian/changelog or
+PKGBUILD.
 
 Lessons from the hardware: the PM table reflects a new limit after tens of ms → readback with
 a wait (`READBACK_WAIT`); the baseline is recaptured only at boot, so after an update that
@@ -126,8 +134,9 @@ Auto's undervolt: Eco now reuses the validated CO and the FMax sweep is gone.
   rebuilds the module only if it is missing for the running kernel or the key changes: **when
   the source in `ryzen_smu/` changes, `DRV_VERSION`** (Makefile) **= `%drv_version`** (spec)
   **must be bumped**, otherwise dkms keeps the old module; `VERSION` (app) does not touch the
-  module, so a release does not rebuild it; `packaging/debian/` and `packaging/PKGBUILD` in
-  phase 7.
+  module, so a release does not rebuild it. `packaging/debian/` and `packaging/PKGBUILD` (phase 7)
+  are wrappers of the same make install; bump `debian/changelog` and `pkgver` with VERSION (make check
+  enforces it).
 
 Compatibility constraints: Python ≥ 3.9 syntax (no newer feature), libadwaita ≥ 1.5, no Python
 dependency beyond PyGObject, no test framework.
@@ -141,6 +150,7 @@ python3 ryzenctl selftest       # fake backend; encodings, validation, ceilings,
 make check                      # selftest + layout in a temporary root + systemd-analyze verify + desktop-file-validate + appstreamcli
 make driver-check               # builds the driver in a copy outside the repo (kbuild does NOT accept spaces in the path: `make -C ryzen_smu` fails here)
 make rpm                        # tarball from HEAD (only what is committed) + RPM in dist/; rpmlint NOT installed
+make deb / make arch            # the same tarball, .deb / Arch package built and checked in a podman container
 RYZENCTL_ROOT=/tmp/fake python3 ryzenctl boot   # CLI on the fake backend (state in $ROOT/fake_smu.json)
 python3 ryzen-control --mock    # GUI without driver or pkexec (phase 3)
 make screenshots                # docs/screenshots/*.png from a fresh fake backend (regenerate after visible UI changes)
@@ -149,8 +159,8 @@ make screenshots                # docs/screenshots/*.png from a fresh fake backe
 On hardware (the user runs them, with `! command`; commit after their result): checklist in
 README "Hardware verification".
 
-Not testable on this machine: `dpkg-buildpackage`, `namcap`, `stress-ng` (missing).
-The deb/Arch packages must be marked "untested" in the README.
+Not on this machine: `dpkg-buildpackage`, `lintian`, `namcap` (run in containers: `make deb`, `make arch`),
+`stress-ng`. The deb/Arch packages are container-tested only: the README says so.
 
 ## Architecture
 

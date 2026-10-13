@@ -1,4 +1,5 @@
-# On every v* tag, builds the RPM in a Fedora container and attaches it to a GitHub release.
+# On every v* tag, builds the RPM (Fedora), the .deb (Debian) and the Arch package in containers and
+# attaches them to a GitHub release.
 # The tag must match VERSION in the Makefile (same rule as the local tags).
 name: Release
 on:
@@ -30,3 +31,28 @@ jobs:
             dist/*.rpm
             dist/*.tar.gz
           generate_release_notes: true
+  # deb and Arch packages, after the RPM job (tag checked, release created); same scripts as make deb / make arch
+  deb:
+    needs: rpm
+    runs-on: ubuntu-latest
+    container: debian:trixie
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and check the .deb (lintian)
+        run: sh packaging/build-deb.sh dist
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.deb
+  arch:
+    needs: rpm
+    runs-on: ubuntu-latest
+    container: archlinux:latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and check the Arch package (makepkg, namcap)
+        run: sh packaging/build-arch.sh dist
+      - name: Attach to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.pkg.tar.zst
