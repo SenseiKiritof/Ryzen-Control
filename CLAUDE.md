@@ -71,7 +71,8 @@ disarmed by `serve`; forced reset proven (2026-10-13: `serve` killed with SIGKIL
 the board reset by itself on the SP5100 TCO timer; with systemd driving it, 0.5.0-5, a killed `serve`
 no longer resets the PC and the next ryzenctl released it, while a kernel crash, sysrq c, during a
 verify was reset by the systemd-driven watchdog), a custom calibration from Auto with the single-core test passed at −29 on every core
-(PPT 114 W, FMax 4750).
+(PPT 114 W, FMax 4750). Tag `v0.5.1` (2026-10-13): the calibration watchdog driven by systemd, verified
+(freeze and kernel crash reset the PC, a dead ryzenctl does not), clearer custom-retry text.
 Next: phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.

@@ -2,8 +2,8 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.5.0
-Release:        5%{?dist}
+Version:        0.5.1
+Release:        1%{?dist}
 Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
@@ -124,6 +124,11 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.1-1
+- The calibration watchdog is driven by systemd: a freeze or a kernel crash resets the PC, a Ryzen
+  Control that dies does not (its interrupted step counts as a crash when it starts again)
+- A custom calibration that ignores the crash of the measurement says so in its window
+
 * Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-5
 - The calibration watchdog is driven by systemd: a freeze still resets the PC, a Ryzen Control that
   dies does not; its interrupted step counts as a crash when it starts again
