@@ -1484,8 +1484,12 @@ class ModesPage(Gtk.ScrolledWindow):
             # use_subtitle before model/selected: set after them, libadwaita leaves the subtitle empty
             fans = Adw.ComboRow(title=_("Fans"), use_subtitle=True, model=Gtk.StringList.new(list(FAN_LEVELS)), selected=p.get("fans", 0),
                                 tooltip_text=_("Also in automatic mode: how much the mode touches the fans (only the channels recognised as fans)"))
+            # chosen at every start, also in automatic mode (the user's request): on by default
+            single = Adw.SwitchRow(title=_("Single-core test in the final pass"), active=bool(p.get("single", 1)),
+                                   subtitle=AT_SINGLE_SUB % mins(est.get("single_s")))
             lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
             lb.append(fans)
+            lb.append(single)
             d = Adw.AlertDialog(heading=_("Custom calibration from %s → %s") % (mode.capitalize(), name) if name else
                                 _("Calibrate the %s mode?") % mode.capitalize(),
                                 body=_("Automatic (recommended): %s\n\n%s\n\n%s") % (auto, AT_WARNING, CO_TIP), extra_child=lb)
@@ -1495,9 +1499,9 @@ class ModesPage(Gtk.ScrolledWindow):
             d.set_response_appearance("auto", Adw.ResponseAppearance.SUGGESTED)
             def resp(_d, r):
                 if r == "auto":
-                    AutotuneDialog(self.win, mode, name=name).start(dict(p, parallel=1, fans=fans.get_selected()))
+                    AutotuneDialog(self.win, mode, name=name).start(dict(p, parallel=1, fans=fans.get_selected(), single=int(single.get_active())))
                 elif r == "custom":
-                    self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected())), name)
+                    self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected(), single=int(single.get_active()))), name)
             d.connect("response", resp)
             d.present(self.win)
         bg(lambda: self.win.h.call("autotune", "estimate", mode, *(["retry=1"] if retry else [])), ask, self.win.toast)

@@ -291,7 +291,8 @@ The CO search uses as the first phase of every level the heaviest stress-ng meth
 (probed at start with factory CO); measurements from earlier versions, taken without this load,
 are not reused. The **final pass** (all cores at the proposed CO) starts with the stress-ng
 method that draws the most power on this CPU, at full load for 60 s with verify, then 100 s
-full / 50 % / 10 %; then, with `single=1` (default, a switch in the GUI), **each core alone** with one
+full / 50 % / 10 %; then, with `single=1` (default; a switch in the first calibration dialog, so it is chosen at every
+start, also in automatic mode), **each core alone** with one
 thread for 45 s and a load that comes and goes: a too-negative CO fails at the highest single-core
 boost, which all-core loads never reach (CoreCycler's lesson); a core that fails alone is raised
 alone (+3) and the final pass repeated. If it fails, or if in a later phase (knee, benchmark) a load dies, an
