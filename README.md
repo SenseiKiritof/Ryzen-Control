@@ -11,9 +11,10 @@ motherboard fans. Profiles applied at boot with protection after a crash.
 > negative can reboot the system (no damage, but unsaved work is lost): read "Safety" before
 > using it.
 
-Status: phases 1–6 done on the development system — `ryzenctl` helper/CLI, systemd services,
+Status: phases 1–7 done — `ryzenctl` helper/CLI, systemd services,
 driver via DKMS, RPM package, fans, GTK4 GUI, calibrations, per-family support for other Ryzen
-CPUs, system tray icon. Next: deb/Arch packages (see `docs/plans/`).
+CPUs, system tray icon on the development system; deb and Arch packages built and install-tested in
+containers (see `docs/plans/`).
 
 ![Modes page: presets on the left, calibrated modes on the right](docs/screenshots/modes.png)
 
@@ -90,10 +91,42 @@ sudo ryzenctl status                        # BIOS values, "Baseline of this boo
 sudo ryzenctl hwtest                        # writes and reads back every command close to the baseline, then restores it
 ```
 
+### Debian / Ubuntu (deb)
+
+Debian 13 or Ubuntu 24.04 and newer (libadwaita ≥ 1.5). The `.deb` is attached to every release, or:
+
+```sh
+make deb                                   # in a Debian container with podman → dist/ryzen-control_<version>_all.deb
+sudo apt install ./dist/ryzen-control_*_all.deb
+```
+
+On Debian/Ubuntu itself: `cp -r packaging/debian debian && dpkg-buildpackage -us -uc -b`. DKMS builds
+`ryzen_smu` for the installed kernels — install the kernel headers (`linux-headers-amd64` on Debian,
+`linux-headers-generic` on Ubuntu) — and the services are enabled, `ryzenctl.service` started.
+Secure Boot: Ubuntu signs DKMS modules with its own MOK key and asks to enroll it; on Debian
+`sudo mokutil --import /var/lib/dkms/mok.pub` and a reboot, as on Fedora.
+
+### Arch Linux
+
+The package is attached to every release, or:
+
+```sh
+make arch                                  # in an Arch container with podman → dist/ryzen-control-<version>-1-any.pkg.tar.zst
+sudo pacman -U dist/ryzen-control-*.pkg.tar.zst
+sudo systemctl enable --now ryzenctl.service ryzenctl-resume.service
+```
+
+On Arch itself `packaging/PKGBUILD` builds the GitHub tag (`makepkg -si` in `packaging/`). The DKMS
+pacman hook builds the module: install `linux-headers` (or the headers of your kernel).
+
+Both packages are built, checked with lintian / namcap, installed, run the selftest and removed in
+Debian 13, Ubuntu 24.04 and Arch containers (`packaging/build-deb.sh`, `packaging/build-arch.sh`, also
+in the release workflow); they have not been used on real Debian, Ubuntu or Arch hardware yet.
+
 ### Other distributions
 
-deb and Arch packages are planned (`packaging/`). In the meantime, with `dkms`, the kernel
-headers, `python3 >= 3.9`, `polkit` and `systemd` installed:
+With `dkms`, the kernel headers, `python3 >= 3.9`, PyGObject, GTK 4, libadwaita ≥ 1.5, `polkit` and
+`systemd` installed:
 
 ```sh
 sudo make install && sudo make dkms
