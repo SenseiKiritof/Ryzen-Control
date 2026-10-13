@@ -1685,15 +1685,20 @@ class PrefsPage(Adw.PreferencesPage):
         self.autostart = Adw.SwitchRow(title=_("Apply at startup"), subtitle=_("Re-applies the selected profile at boot and on resume"))
         self.autostart.connect("notify::active", self.on_autostart)
         self.login = Adw.SwitchRow(title=_("Start Ryzen Control at login"), active=os.path.exists(LOGIN_DESKTOP),
-                                   subtitle=_("Opens the window at every login, or only the tray icon when that option is on (the password is "
+                                   subtitle=_("Opens the window at every login, or only the tray icon with \"Start minimized\" (the password is "
                                               "asked at the first use, unless \"Stop asking for the password\" is on). After a crash it shows the "
                                               "warning and leaves the profile deactivated: it never re-applies anything on its own"))
         self.login.connect("notify::active", self.on_login)
         self.tray = Adw.SwitchRow(title=_("Icon in the system tray"), active=bool(self.win.ui.get("tray")),
-                                  subtitle=_("Modes and Apply at startup from the tray; closing the window keeps the icon, and at "
-                                             "login only the icon starts (no password until you use it). KDE Plasma; on GNOME it "
-                                             "needs the AppIndicator extension"))
+                                  subtitle=_("Modes and Apply at startup from the tray; closing the window keeps the icon. "
+                                             "KDE Plasma; on GNOME it needs the AppIndicator extension"))
         self.tray.connect("notify::active", self.on_tray)
+        # the user's choice for the login: only the icon (no password until it is used) or the window as well
+        self.minimized = Adw.SwitchRow(title=_("Start minimized to the tray icon"), active=self.win.ui.get("tray_minimized", True),
+                                       sensitive=self.tray.get_active(),
+                                       subtitle=_("At login only the icon starts, no password until you use it; off: the window "
+                                                  "opens too"))
+        self.minimized.connect("notify::active", self.on_minimized)
         self.trust = Adw.SwitchRow(title=_("Stop asking for the password"),
                                    subtitle=_("Polkit rule for your user, only for Ryzen Control in the local session: "
                                               "the password is needed once to write it, then never again"))
@@ -1705,7 +1710,7 @@ class PrefsPage(Adw.PreferencesPage):
         self.hw_btn = button(_("Run"), self.hwtest)
         hw.add_suffix(self.hw_spin)
         hw.add_suffix(self.hw_btn)
-        for title, items in ((_("Startup"), (self.autostart, self.login, self.tray, self.trust)), (_("Limits and checks"), (self.unlock, hw))):
+        for title, items in ((_("Startup"), (self.autostart, self.login, self.tray, self.minimized, self.trust)), (_("Limits and checks"), (self.unlock, hw))):
             g = Adw.PreferencesGroup(title=title)
             for r in items:
                 g.add(r)
@@ -1729,7 +1734,7 @@ class PrefsPage(Adw.PreferencesPage):
                 os.makedirs(os.path.dirname(LOGIN_DESKTOP), exist_ok=True)
                 with open(LOGIN_DESKTOP, "w") as f:
                     f.write("[Desktop Entry]\nType=Application\nName=Ryzen Control\nExec=ryzen-control%s\nIcon=%s\n"
-                            "Terminal=false\nX-GNOME-Autostart-enabled=true\n" % (" --tray" if self.tray.get_active() else "", APP_ID))
+                            "Terminal=false\nX-GNOME-Autostart-enabled=true\n" % (" --tray" if self.tray.get_active() and self.minimized.get_active() else "", APP_ID))
             elif os.path.exists(LOGIN_DESKTOP):
                 os.remove(LOGIN_DESKTOP)
         except OSError as e:
@@ -1742,7 +1747,14 @@ class PrefsPage(Adw.PreferencesPage):
             self.win.get_application().set_tray(row.get_active())
         except GLib.Error as e:
             self.win.toast(str(e))
+        self.minimized.set_sensitive(row.get_active())
         if self.login.get_active():   # the login entry follows: only the icon, or the window
+            self.on_login(self.login, None)
+
+    def on_minimized(self, row, _p):
+        self.win.ui["tray_minimized"] = row.get_active()
+        ui_save(self.win.ui)
+        if self.login.get_active():
             self.on_login(self.login, None)
 
     def on_unlock(self, row, _p):
@@ -2849,6 +2861,13 @@ class App(Adw.Application):
             tray.items = items
             assert tray.layout().get_type_string() == "(u(ia{sv}av))" and "Tctl" in tray.tip, "tray: layout or tooltip"
             tray.close()
+            prefs = next(p for p in win.pages if isinstance(p, PrefsPage))   # the login entry: only the icon, or the window too
+            prefs.login.set_active(True)
+            for tray_on, minimized, exe in ((True, True, "ryzen-control --tray"), (True, False, "ryzen-control\n"), (False, True, "ryzen-control\n")):
+                prefs.tray.set_active(tray_on)
+                prefs.minimized.set_active(minimized)
+                assert "Exec=" + exe in open(LOGIN_DESKTOP).read() and prefs.minimized.get_sensitive() == tray_on, (tray_on, minimized)
+            prefs.login.set_active(False)
             win.ask_resume({"mode": "auto", "phase": "ppt", "started": "today"})
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,

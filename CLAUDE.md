@@ -75,7 +75,8 @@ verify was reset by the systemd-driven watchdog), a custom calibration from Auto
 (freeze and kernel crash reset the PC, a dead ryzenctl does not), clearer custom-retry text.
 **Phase 6** (tray, step 22): `Tray` in `ryzen-control`, a StatusNotifierItem + com.canonical.dbusmenu exported
 with Gio (`register_object_with_closures2`, the old name before GLib 2.84); `--tray` starts only the icon
-(`App.hold`), Preferences "Icon in the system tray" (ui.json `tray`; the login entry then runs `--tray`);
+(`App.hold`), Preferences "Icon in the system tray" (ui.json `tray`) and "Start minimized to the tray icon"
+(`tray_minimized`, default on: the login entry then runs `--tray`, otherwise the window opens too);
 menu and tooltip from `local_state()` (settings.json, crashed, profile names: world-readable) and k10temp,
 no root until a menu entry needs it, then the app's single `ryzenctl serve` (`App.get_helper`, shared with
 the window, kept when the window closes while the tray is on); PPT in the tooltip only when serve runs

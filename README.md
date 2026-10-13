@@ -163,8 +163,9 @@ not calibrated yet, or Boost without the unlock, greyed out), the custom calibra
 startup", "Open Ryzen Control" and "Quit"; after a crash the choice Reactivate / Stay on Default
 comes first and the icon asks for attention. The tooltip shows Tctl (read without root) and, once
 `ryzenctl serve` runs anyway, the PPT. With the tray on, closing the window keeps the icon, and
-"Start Ryzen Control at login" starts only the icon: no password until you pick something from the
-menu (then once per session, as for the window).
+"Start minimized to the tray icon" (on by default) decides what "Start Ryzen Control at login" opens:
+only the icon — no password until you pick something from the menu, then once per session as for
+the window — or the window as well.
 
 ## Usage (CLI)
 
