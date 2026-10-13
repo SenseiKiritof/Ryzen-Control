@@ -1685,8 +1685,9 @@ class PrefsPage(Adw.PreferencesPage):
         self.autostart = Adw.SwitchRow(title=_("Apply at startup"), subtitle=_("Re-applies the selected profile at boot and on resume"))
         self.autostart.connect("notify::active", self.on_autostart)
         self.login = Adw.SwitchRow(title=_("Start Ryzen Control at login"), active=os.path.exists(LOGIN_DESKTOP),
-                                   subtitle=_("Opens the window at every login (asks for the password, unless the option below is on). After a crash "
-                                              "it shows the warning and leaves the profile deactivated: it never re-applies anything on its own"))
+                                   subtitle=_("Opens the window at every login, or only the tray icon when that option is on (the password is "
+                                              "asked at the first use, unless \"Stop asking for the password\" is on). After a crash it shows the "
+                                              "warning and leaves the profile deactivated: it never re-applies anything on its own"))
         self.login.connect("notify::active", self.on_login)
         self.tray = Adw.SwitchRow(title=_("Icon in the system tray"), active=bool(self.win.ui.get("tray")),
                                   subtitle=_("Modes and Apply at startup from the tray; closing the window keeps the icon, and at "

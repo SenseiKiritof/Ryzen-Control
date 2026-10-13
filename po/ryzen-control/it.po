@@ -487,8 +487,8 @@ msgstr "Un passo di CO (Curve Optimizer) vale circa 3–5 mV di tensione in meno
 msgid "Only the Quiet fan level uses it: minimum speed up to this value −10 °C"
 msgstr "Lo usa solo il livello ventole Silenziose: velocità minima fino a questo valore −10 °C"
 
-msgid "Opens the window at every login (asks for the password, unless the option below is on). After a crash it shows the warning and leaves the profile deactivated: it never re-applies anything on its own"
-msgstr "Apre la finestra a ogni accesso (chiede la password, salvo l'opzione qui sotto). Dopo un crash mostra l'avviso e lascia il profilo disattivato: non riapplica nulla da sola"
+msgid "Opens the window at every login, or only the tray icon when that option is on (the password is asked at the first use, unless \"Stop asking for the password\" is on). After a crash it shows the warning and leaves the profile deactivated: it never re-applies anything on its own"
+msgstr "Apre la finestra a ogni login, oppure solo l'icona nel vassoio se quell'opzione è attiva (la password viene chiesta al primo uso, salvo «Non chiedere più la password»). Dopo un crash mostra l'avviso e lascia il profilo disattivato: non riapplica mai nulla da solo"
 
 msgid "PPT"
 msgstr "PPT"
