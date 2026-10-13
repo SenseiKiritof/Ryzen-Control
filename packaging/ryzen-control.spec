@@ -2,9 +2,9 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.7.1
+Version:        0.8.0
 Release:        1%{?dist}
-Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
+Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
 URL:            https://github.com/SenseiKiritof/Ryzen-Control
@@ -33,8 +33,9 @@ Provides:       ryzen-smu-dkms = %{version}-%{release}
 %{?systemd_requires}
 
 %description
-Ryzen Master-style control for AMD Ryzen desktop processors on Linux
-(Ryzen 9000 verified, Ryzen 1000-7000 expected):
+Ryzen Master-style control for AMD Ryzen processors on Linux
+(Ryzen 9000 desktop verified, Ryzen 1000-7000 desktop and the APUs of
+desktops, mini PCs and laptops expected):
 per-core Curve Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost
 frequency and maximum temperature, power profile and motherboard fans.
 Profiles applied at boot with protection after a crash: the profile is
@@ -90,18 +91,22 @@ if [ ! -s "$DROPIN" ] && grep -qE '\[(integrity|confidentiality)\]' /sys/kernel/
     echo "Until then the ryzen_smu module cannot be loaded."
 fi
 # 2. Services: the preset enables them; start now (loads the module, captures the baseline, no
-#    profile applied).
-%systemd_post ryzenctl.service ryzenctl-resume.service
+#    profile applied; the reapply timer does nothing without a laptop profile).
+%systemd_post ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer
 if [ -d /run/systemd/system ]; then
-    systemctl start ryzenctl.service >/dev/null 2>&1 || :
+    systemctl start ryzenctl.service ryzenctl-reapply.timer >/dev/null 2>&1 || :
 fi
 
 %preun
-%systemd_preun ryzenctl.service ryzenctl-resume.service
+%systemd_preun ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer ryzenctl-reapply.service
 dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 
 %postun
-%systemd_postun ryzenctl.service ryzenctl-resume.service
+%systemd_postun ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer ryzenctl-reapply.service
+
+# The reapply timer is new in 0.8.0: %%systemd_post presets units on a fresh install only
+%triggerun -- ryzen-control < 0.8.0
+systemctl --no-reload preset ryzenctl-reapply.timer >/dev/null 2>&1 || :
 
 %files -f ryzenctl.lang -f ryzen-control.lang
 %license LICENSE ryzen_smu/LICENSE
@@ -113,7 +118,10 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %{_metainfodir}/org.ryzencontrol.RyzenControl.metainfo.xml
 %{_unitdir}/ryzenctl.service
 %{_unitdir}/ryzenctl-resume.service
+%{_unitdir}/ryzenctl-reapply.service
+%{_unitdir}/ryzenctl-reapply.timer
 %{_presetdir}/80-ryzen-control.preset
+%{_udevrulesdir}/60-ryzen-control.rules
 %{_modprobedir}/ryzen-control.conf
 %{_datadir}/polkit-1/actions/org.ryzencontrol.RyzenControl.policy
 %config(noreplace) %{_sysconfdir}/xdg/autostart/ryzenctl-notify.desktop
@@ -124,6 +132,14 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.8.0-1
+- APUs (Ryzen 4000G-8000G, mini PCs, laptops; expected): fast/slow PPT, Tctl, TDC/EDC read back from the
+  PM table; Quiet and Performance
+- Laptops: the baseline records the power source, CPU writes only on that source; the reapply timer and a
+  udev rule write the profile's limits again after the firmware's rewrites, and stop after 3 corrections
+  within 2 minutes
+- Default chosen by hand keeps "Apply at startup" (after a crash, "Stay on Default" still turns it off)
+
 * Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.7.1-1
 - Release workflow: the GitHub release is created once with the RPM, the .deb and the Arch package
   (immutable releases); the Arch build no longer trips on the CI checkout's owner

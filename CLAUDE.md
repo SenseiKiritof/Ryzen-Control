@@ -90,7 +90,20 @@ containers by `packaging/build-deb.sh` / `build-arch.sh` (`make deb`, `make arch
 of the release workflow): lintian clean, namcap warnings expected (empty state dirs, the python3 shebang,
 runtime-only deps); installed, selftest and removed in Debian 13, Ubuntu 24.04 and Arch containers; not used
 on real Debian/Ubuntu/Arch hardware. `make check` fails if VERSION differs in the spec, debian/changelog or
-PKGBUILD. The repository's GitHub releases are immutable (no asset can be added after publishing): the
+PKGBUILD. **Phase 8** (APUs and laptops, rev. 20–21), all expected, tested on fake hardware only: step 25
+desktop APUs and mini PCs — fast/slow/Tctl/TDC/EDC, Quiet/Performance presets; step 26 laptops (done by an
+agent, reviewed): the APU entries are `mobile`, the baseline records the power source (`# source`,
+`power_source`: Mains/USB online = AC), `load_baseline(strict)` refuses CPU writes on the other source
+(`source_mismatch`), Default there writes only fan/power/boost; `apply_lines` runs `power`/`boost` first
+(amd-pmf rewrites the limits on a platform profile change); `ryzenctl reapply` (ryzenctl-reapply.timer every
+10 s, udev rule `60-ryzen-control.rules` on AC changes, both gated by the flag `/run/ryzenctl/reapply-wanted`
+that `reapply_mark` keeps only on a laptop with autostart and a profile changing a limit) writes back the
+drifted limits and gives up after `REAPPLY_MAX` corrections in `REAPPLY_WINDOW` s (state `/run/ryzenctl/reapply.json`,
+read by the Monitor and the tray); a limit set by hand (`limit_setter` outside a profile) or a save of the
+selected profile stops it until the next apply. **Phase 8 closed, tag `v0.8.0`** (2026-10-13) after the regression
+check on the 9800X3D: `hwtest` ok, a mode and Default applied, the timer enabled by the RPM's `%triggerun` on the
+upgrade from 0.7.1, firing every 10 s and silent in the journal (no flag on a desktop).
+The repository's GitHub releases are immutable (no asset can be added after publishing): the
 workflow builds the three packages in parallel as artifacts and one `release` job publishes them together
 (v0.7.0 has the RPM only; v0.7.1 is the first with all three).
 
@@ -129,8 +142,9 @@ Auto's undervolt: Eco now reuses the validated CO and the FMax sweep is gone.
   if present + `install-dkms-src`; `DESTDIR`, `PREFIX`; `APPID` is only used for the file names in
   `data/`, the id `org.ryzencontrol.RyzenControl` is written inside the files). Every package is
   a wrapper that calls the Makefile, never a duplicated layout.
-- `data/` — systemd units (`ryzenctl.service`, `ryzenctl-resume.service`), preset, modprobe
-  blacklist, polkit policy, .desktop, icon, metainfo, notify autostart.
+- `data/` — systemd units (`ryzenctl.service`, `ryzenctl-resume.service`, `ryzenctl-reapply.service` +
+  `.timer`), udev rule (laptops' AC changes), preset, modprobe blacklist, polkit policy, .desktop, icon,
+  metainfo, notify autostart.
 - `packaging/ryzen-control.spec` (RPM: **a single package** `ryzen-control`, noarch, with the
   driver's DKMS source inside; `Obsoletes: ryzen-smu-dkms` for releases 1-4). The `%post`
   rebuilds the module only if it is missing for the running kernel or the key changes: **when
@@ -242,6 +256,16 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   0x10 (turns off the display); on Zen 2/3 never RSMU 0x58 (PBO scalar), 0x5A–0x5D (OC mode,
   PROCHOT, OC frequency), 0x61 (OC VID). Never voltage commands, OC mode (RSMU 0x5D), fixed VID (0x61),
   PBO scalar (0x5B), `smn` writes, FCLK/memory.
+- APUs (`APU_CMD`/`APU_PM`, codenames 2, 17, 14, 11, 21, 24, 22, 26): fast/slow PPT MP1 0x15/0x16, Tctl MP1
+  0x19, TDC/EDC MP1 0x1A/0x1C where mapped, read back from the PM table (explicit `pm_versions`: codename 22
+  has two table families); STAPM read only; no CO, no FMax, no unlock (`cap_of`: the stock value is the ceiling).
+  Writing exactly the stock value is always allowed back (an APU Tctl limit can be 100 °C > TJMAX_ABS_MAX).
+- Laptops: a system battery (`system_battery`, power_supply type Battery whose scope is not Device: a wireless
+  mouse does not count) refuses every family not marked `mobile` (only the APUs) — the driver reports Dragon
+  Range and Fire Range (HX laptops) as Raphael and Granite Ridge. On a laptop CPU writes only on the baseline's
+  power source; `reapply` writes only the limit lines of the selected profile (stock ones included) that drifted,
+  through the setters (readback, markers),
+  never while crashed, during a calibration or after the give-up.
 - Gate: the driver's `codename` must be a key of `FAMILIES` (23 Granite Ridge verified; 20 Raphael,
   12 Vermeer, 4 Matisse, 10 Pinnacle Ridge, 9 Summit Ridge not verified), otherwise total refusal
   (`family()`); no readable CPU topology → refusal too. `boost` and `power` are kernel switches

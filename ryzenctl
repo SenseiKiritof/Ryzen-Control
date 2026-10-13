@@ -35,10 +35,12 @@ CO_MIN, CO_MAX = -50, 30       # Curve Optimizer and Curve Shaper
 FMAX_MIN, FMAX_UNLOCK_EXTRA = 3000, 200
 TJMAX_MIN, TJMAX_ABS_MAX = 60, 95   # TJMAX_ABS_MAX: never above it, whatever the family says
 PPT_MIN, TDC_MIN, EDC_MIN = 45, 30, 45           # W, A, A — never 0: PPT 0 locks the CPU at 606 MHz
+APU_MIN_W = 6                  # fast/slow PPT of the APUs: the U-series go down to ~6 W (UXTU's eco presets)
 UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC = 230, 160, 230
 READBACK_TOL = 0.6             # W/A: the limits come back as floats from the PM table
 READBACK_WAIT = 1.0            # s: the SMU updates the PM table at its own pace, not at once
 READBACK_POLL = 0.02
+REAPPLY_MAX, REAPPLY_WINDOW = 3, 120   # laptops: this many corrections within the window (s) = the firmware keeps overriding
 # Fans (nct6775). Autodetect: channel at 40 % for 20 s under load; the pump raises Tctl by
 # degrees within seconds, a radiator fan warms the liquid slowly.
 # ponytail: thresholds tuned on a 360 AIO; adjust them if a small radiator gets close.
@@ -141,6 +143,34 @@ FAMILIES = {
     10: {"name": "Pinnacle Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
     9: {"name": "Summit Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
 }
+# APUs (Ryzen G desktop, mini PCs, and laptops: "mobile", with the power source rules of source_mismatch and
+# cmd_reapply): the fast/slow PPT, Tctl and VRM current limits through MP1 (the same IDs in RyzenAdj,
+# ZenStates-Core and UXTU), read back from the PM table (RyzenAdj api.c: the STAPM/fast/slow header is shared
+# by every table version, the other offsets are per version, hence explicit pm_versions). STAPM is read only: a lower slow PPT already caps the
+# sustained power, and STAPM is the firmware's skin-temperature lever (STTv2 overwrites it). No Curve
+# Optimizer (no CO readback verified on any APU), no FMax command.
+APU_CMD = {"fast_set": (MP1, 0x15), "slow_set": (MP1, 0x16), "tjmax_set": (MP1, 0x19),
+           "tdc_set": (MP1, 0x1A), "edc_set": (MP1, 0x1C)}
+APU_PM = {"stapm_limit": 0, "stapm": 1, "fast_limit": 2, "fast": 3, "slow_limit": 4, "slow": 5,
+          "tdc_limit": 8, "tdc": 9, "edc_limit": 12, "thm_limit": 16, "tctl": 17}
+APU_HEADER = {k: APU_PM[k] for k in ("stapm_limit", "stapm", "fast_limit", "fast", "slow_limit", "slow")}
+APU = {"cmd": APU_CMD, "pm_prefix": None, "pm": APU_PM, "pm_cores": {}, "tjmax_max": 95, "verified": False, "mobile": True}
+FAMILIES.update({
+    2: dict(APU, name="Renoir", pm_versions=(0x370000, 0x370001, 0x370002, 0x370003, 0x370005)),   # 4000 G/U/H
+    17: dict(APU, name="Lucienne", pm_versions=(0x370000, 0x370001, 0x370002, 0x370003, 0x370005)),   # 5000U (Zen 2)
+    14: dict(APU, name="Cezanne", pm_versions=(0x400005,)),            # 5000 G/U/H, Barcelo
+    11: dict(APU, name="Rembrandt", pm_versions=(0x450004, 0x450005)),  # 6000
+    21: dict(APU, name="Phoenix", pm_versions=(0x4C0006, 0x4C0007, 0x4C0008, 0x4C0009)),     # 7040, 8000G
+    24: dict(APU, name="Hawk Point", pm_versions=(0x4C0006, 0x4C0007, 0x4C0008, 0x4C0009)),  # 8040
+    # Strix Point: not the 0x650007 table (Krackan, another layout); TDC at 12, no separate EDC
+    22: dict(APU, name="Strix Point", pm_versions=(0x5D0008, 0x5D0009),
+             cmd={k: v for k, v in APU_CMD.items() if k != "edc_set"},
+             pm=dict(APU_HEADER, tdc_limit=12, tdc=13, thm_limit=16, tctl=17)),
+    # Strix Halo: fast/slow/Tctl read back on a real Ryzen AI MAX+ (ryzen_smu PR #50, RyzenAdj c9b07e0)
+    26: dict(APU, name="Strix Halo", pm_versions=(0x64010C, 0x64020C),
+             cmd={k: APU_CMD[k] for k in ("fast_set", "slow_set", "tjmax_set")},
+             pm=dict(APU_HEADER, thm_limit=22, tctl=23)),
+})
 # Never in any entry (sources above): voltage/VID, OC mode, PBO scalar, SMN writes. Dangerous neighbours
 # of the allowed IDs on Zen 2/3: RSMU 0x58 PBO scalar, 0x5A–0x5D OC mode/frequency, 0x61 OC VID.
 SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
@@ -327,7 +357,9 @@ class Fake:
                 "vermeer8": {"codename": 12, "cores": 8, "ccds": 1, "pm_version": 0x380905,    # 5800X sitting on the
                              "phys": [1]},                                                 # second CCD of the package
                 "matisse": {"codename": 4, "cores": 8, "ccds": 1, "pm_version": 0x240903},     # 3700X: no CO, no FMax
-                "pinnacle": {"codename": 10, "cores": 8, "ccds": 1, "pm_version": 0}}          # 2700X: no SMU command
+                "pinnacle": {"codename": 10, "cores": 8, "ccds": 1, "pm_version": 0},          # 2700X: no SMU command
+                "cezanne": {"codename": 14, "cores": 8, "ccds": 1, "pm_version": 0x400005},    # 5700G: APU, no CO
+                "phoenix": {"codename": 21, "cores": 8, "ccds": 1, "pm_version": 0x4C0006}}    # 8700G
     FAN_DIR = HWMON + "/hwmon0"
 
     def __init__(self, variant=None):
@@ -437,8 +469,8 @@ class Fake:
         if name == "co_set":
             c = self.core(a)
             self._write(lambda: c is not None and s["co"].__setitem__(c, s16(a)))
-        elif name in ("ppt_set", "tdc_set", "edc_set"):
-            self._write(lambda: s.__setitem__(name[:3], a / 1000.0))
+        elif name in ("ppt_set", "tdc_set", "edc_set", "fast_set", "slow_set"):
+            self._write(lambda: s.__setitem__(name[:-4], a / 1000.0))
         elif name == "co_get":
             c = self.core(a)
             return 1, [(s["co"][c] if c is not None else 0) & 0xFFFFFFFF, 0, 0, 0, 0, 0]
@@ -506,10 +538,11 @@ class Fake:
             return s["pm_version"], [0.0] * 457
         PM = fam["pm"]
         t = [0.0] * 457
-        t[PM["ppt_limit"]], t[PM["ppt"]] = s["ppt"], 61.0
-        t[PM["tdc_limit"]], t[PM["tdc"]] = s["tdc"], 23.0
-        t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
-        t[PM["edc_limit"]] = s["edc"]
+        vals = {"ppt_limit": s["ppt"], "ppt": 61.0, "tdc_limit": s["tdc"], "tdc": 23.0, "thm_limit": s["thm"],
+                "tctl": s["tctl"], "edc_limit": s["edc"], "stapm_limit": s.get("stapm", 65.0), "stapm": 38.0,   # APU header
+                "fast_limit": s.get("fast", 88.0), "fast": 52.0, "slow_limit": s.get("slow", 65.0), "slow": 41.0}
+        for k, i in PM.items():
+            t[i] = vals[k]
         layout = fam["pm_cores"].get(s["pm_version"])
         for c, (ccd, slot) in enumerate(self.slots if layout else []):   # by physical slot, like the real arrays
             i = 8 * ccd + slot
@@ -560,7 +593,48 @@ def family():
             code, ", ".join("%s %d" % (f["name"], c) for c, f in sorted(FAMILIES.items()))))
     if not CORES:
         raise Err(_("CPU topology not readable (/sys/devices/system/cpu)"))
+    if not FAMILIES[code].get("mobile") and system_battery():
+        # the driver reports the HX laptop CPUs as desktops (Dragon Range as Raphael, Fire Range as Granite
+        # Ridge: same CPUID model): firmware, EC and battery limits of a laptop are handled for the APUs only
+        raise Err(_("laptop detected (%s): the driver reports this processor as the desktop %s, a laptop part (Ryzen HX) "
+                    "that is not supported: only the laptop APUs are") % (system_battery(), FAMILIES[code]["name"]))
     return FAMILIES[code]
+
+
+def power_supplies():
+    """[(name, type)] of the power supplies of the machine itself; those of devices (a wireless mouse's battery: scope
+    "Device") do not count."""
+    d = P("/sys/class/power_supply")
+    out = []
+    for n in sorted(os.listdir(d) if os.path.isdir(d) else []):
+        try:
+            kind = read_text("/sys/class/power_supply/%s/type" % n)
+            scope = read_text("/sys/class/power_supply/%s/scope" % n) if os.path.exists("%s/%s/scope" % (d, n)) else "System"
+        except OSError:
+            continue
+        if scope != "Device":
+            out.append((n, kind))
+    return out
+
+
+def system_battery():
+    """The name of a battery that powers the machine (a laptop), or None."""
+    return next((n for n, kind in power_supplies() if kind == "Battery"), None)
+
+
+def power_source():
+    """"ac" or "battery" on a laptop, None without a system battery (a desktop, a mini PC). AC: a Mains supply or a USB
+    one (a USB-C charger) online."""
+    sup = power_supplies()
+    if not any(kind == "Battery" for _n, kind in sup):
+        return None
+    for n, kind in sup:
+        try:
+            if kind in ("Mains", "USB") and read_text("/sys/class/power_supply/%s/online" % n) != "0":
+                return "ac"
+        except OSError:
+            pass
+    return "battery"
 
 
 def smu(name, *args):
@@ -635,6 +709,9 @@ def power_get():
 
 def power_set(profile):
     if FAKE:
+        if FAKE.s.get("pmf") and FAKE.s["power"] != profile:   # like amd-pmf on a laptop: a new platform profile, new limits
+            FAKE.s.pop("fast", None)
+            FAKE.s.pop("slow", None)
         FAKE.s["power"] = profile
         FAKE.save()
         return
@@ -733,7 +810,7 @@ def values_from_lines(lines):
     for t in lines:
         if t[0] == "co" and len(t) == CORES + 1:
             v["co"] = [int(x) for x in t[1:]]
-        elif t[0] in ("ppt", "tdc", "edc", "fmax", "tjmax") and len(t) == 2:
+        elif t[0] in ("ppt", "fast", "slow", "tdc", "edc", "fmax", "tjmax") and len(t) == 2:
             v[t[0]] = int(t[1])
         elif t[0] == "shaper" and len(t) == 5:
             v["shaper"][int(t[1])] = [int(x) for x in t[2:]]
@@ -769,12 +846,17 @@ def read_limits():
     return {k: round(t[i], 1) for k, i in family()["pm"].items()}
 
 
+# Each limit and where the PM table reports it (readback); fast before slow: raising back keeps slow ≤ fast.
+LIMIT_PM = {"ppt": "ppt_limit", "fast": "fast_limit", "slow": "slow_limit", "tdc": "tdc_limit", "edc": "edc_limit",
+            "tjmax": "thm_limit"}
+
+
 def capture_lines():
     """Current state in profile format (the baseline is a profile like any other)."""
     lim = read_limits()
     co, fmax = read_co(), read_fmax()
     lines = (["co " + " ".join(str(v) for v in co)] if co is not None else []) + (["fmax %d" % fmax] if fmax is not None else [])
-    for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
+    for key, pm_key in LIMIT_PM.items():
         if pm_key in lim:
             lines.append("%s %d" % (key, round(lim[pm_key])))
     # Curve Shaper excluded: on the 9800X3D (SMU 98.81.0) 0xA6 replies OK but 0x84 does not change,
@@ -800,20 +882,53 @@ def cmd_baseline(ctx, args):
     if os.path.exists(P(STATE + "/active")):
         raise Err(_("baseline not captured: CPU state already modified in this boot"))
     lines = capture_lines()
-    write_atomic(P(STATE + "/baseline.conf"), "# baseline captured by ryzenctl\n" + "\n".join(lines) + "\n")
+    src = power_source()   # a laptop: the limits of this power source (source_mismatch)
+    write_atomic(P(STATE + "/baseline.conf"), "# baseline captured by ryzenctl\n" + ("# source %s\n" % src if src else "")
+                 + "\n".join(lines) + "\n")
     touch_sync(P(RUN + "/baseline-done"))
     return values_from_lines(parse_lines("\n".join(lines)))
 
 
 def load_baseline(strict=True):
-    """Baseline values. strict: it must have been captured in THIS boot."""
+    """Baseline values. strict (CPU writes): it must have been captured in THIS boot, on a laptop on the power source
+    in use."""
     try:
         text = open(P(STATE + "/baseline.conf")).read()
     except OSError:
         raise Err(_("baseline missing: CPU writes refused (did the ryzenctl service run?)"))
     if strict and not os.path.exists(P(RUN + "/baseline-done")):
         raise Err(_("baseline not captured in this boot: CPU writes refused"))
+    why = source_mismatch(text) if strict else None
+    if why:
+        raise Err(why)
     return values_from_lines(parse_lines(text))
+
+
+def baseline_source(text=None):
+    """The power source the baseline was captured on ("ac", "battery"; its `# source` line), None without a system
+    battery or without a baseline."""
+    try:
+        text = open(P(STATE + "/baseline.conf")).read() if text is None else text
+    except OSError:
+        return None
+    m = re.search(r"^# source (\w+)$", text, re.M)
+    return m.group(1) if m else None
+
+
+def source_mismatch(text=None):
+    """On a laptop, why the CPU must not be written now, or None. The baseline (every value's ceiling, what Default
+    writes back) holds the limits of the power source it was captured on; on the other one the firmware sets its own,
+    and limits captured on AC may be more than the battery and the EC tolerate."""
+    src, base = power_source(), baseline_source(text)
+    if src is None or src == base:
+        return None
+    if base is None:
+        return _("the baseline does not record the power source: CPU writes refused until the next boot")
+    if src == "battery":
+        return _("on battery: the firmware's limits apply until AC power is back or the next boot (the baseline was "
+                 "captured on AC power: CPU writes refused)")
+    return _("on AC power: the firmware's limits apply until back on battery or the next boot (the baseline was "
+             "captured on battery: CPU writes refused)")
 
 
 def cap_of(base, key, unlock):
@@ -823,6 +938,8 @@ def cap_of(base, key, unlock):
         return min(base[key], family().get("tjmax_max", TJMAX_ABS_MAX), TJMAX_ABS_MAX)
     if key == "fmax":
         return base[key] + (FMAX_UNLOCK_EXTRA if unlock else 0)
+    if key in ("fast", "slow"):   # APUs: no unlock, the stock limits are the ceiling
+        return base[key]
     hard = {"ppt": UNLOCK_PPT, "tdc": UNLOCK_TDC, "edc": UNLOCK_EDC}[key]
     return max(base[key], hard) if unlock else base[key]
 
@@ -875,9 +992,13 @@ def limit_setter(key, pm_key, cmd_name, unit, lo):
         check_cpu()
         s = load_settings()
         base = load_baseline()
-        check_range(key, v, lo, cap_of(base, key, s["unlock"]), " " + unit)
+        cap = cap_of(base, key, s["unlock"])   # no baseline for the key: refused
+        if v != base[key]:   # the stock value is always allowed back (an APU's Tctl limit can be 100 °C)
+            check_range(key, v, lo, cap, " " + unit)
         if not read_limits():
             raise Err(_("PM table missing: cannot verify %s, write refused") % key)
+        if not ctx.get("dry") and not ctx.get("profile"):
+            reapply_off()   # a value set by hand: the profile is no longer re-applied over it
         scale = 1 if key == "tjmax" else 1000
         got = write_verify(ctx, key, float(v), lambda x: smu(cmd_name, int(x * scale)),
                            lambda: read_limits().get(pm_key), float(base[key]), near)
@@ -1054,22 +1175,25 @@ def cmd_status(ctx, args):
         "smu_version": _("fake") if FAKE else read_text(SMU_DIR + "/version"),
         "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
         "co": read_co(), "fmax": read_fmax(), "shaper": read_shaper(),
-        "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"),
-                   "edc": lim.get("edc_limit"), "tjmax": lim.get("thm_limit")},
-        "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
+        "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"), "edc": lim.get("edc_limit"),
+                   "tjmax": lim.get("thm_limit"), "stapm": lim.get("stapm_limit"),   # APUs: STAPM read only
+                   "fast": lim.get("fast_limit"), "slow": lim.get("slow_limit")},
+        "now": {"ppt": lim.get("ppt", lim.get("fast")), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
         "power": power_get(), "boost": boost_get(),
         "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
         "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
         "trusted": trust_user() in trust_users(), "calibrated": s.get("calibrated", {}),
         "crashed": crashed_info(), "caps": caps(base, s["unlock"]) if base else None,
         "active": os.path.exists(marker("active")),
+        "power_source": power_source(), "baseline_source": baseline_source(), "reapply": reapply_state() or None,
     }
 
 
 def caps(base, unlock):
     """Allowed ranges (min, max) for the GUI: same logic as cap_of."""
     out = {"co": list(co_range()), "fan_step_ms": [0, FAN_STEP_MAX_MS], "fan_step_tol_ms": FAN_STEP_TOL_MS}
-    for key, lo in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN), ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
+    for key, lo in (("ppt", PPT_MIN), ("fast", APU_MIN_W), ("slow", APU_MIN_W), ("tdc", TDC_MIN), ("edc", EDC_MIN),
+                    ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
         if key in base:
             out[key] = [lo, cap_of(base, key, unlock)]
     return out
@@ -1135,9 +1259,11 @@ def cmd_telemetry(ctx, args):
                 info = fan_roles().get(str(n), {})
                 fans.append({"canale": n, "rpm": rpm, "pwm": hw_read("%s/pwm%d" % (fd, n)),
                              "role": info.get("role", "sconosciuto"), "name": info.get("name")})
-    return {"tctl": tctl(), "tccd": tccd, "ppt": lim.get("ppt"), "ppt_limit": lim.get("ppt_limit"),
+    return {"tctl": tctl(), "tccd": tccd, "ppt": lim.get("ppt", lim.get("fast")),   # APUs: the fast PPT's power
+            "ppt_limit": lim.get("ppt_limit", lim.get("fast_limit")),
             "tdc": lim.get("tdc"), "tdc_limit": lim.get("tdc_limit"), "edc_limit": lim.get("edc_limit"),
-            "tjmax": lim.get("thm_limit"), "fmax": read_fmax(), "cores": cores, "fans": fans, "power": power_get()}
+            "tjmax": lim.get("thm_limit"), "fmax": read_fmax(), "cores": cores, "fans": fans, "power": power_get(),
+            "reapply": reapply_state() or None}   # laptops: limits held on the other power source, re-applying stopped
 
 
 def fmt_status(st):
@@ -1152,20 +1278,25 @@ def fmt_status(st):
         ("Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + _("  (experimental, not verified)"))
         if st["shaper"] is not None else _("Shaper  n/a on this CPU"),
         "FMax    %s MHz%s" % (f(st["fmax"]), bl("fmax", " MHz")),
-        _("Limits  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s") % (
-            f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
-            f(st["limits"]["edc"], " A"), bl("edc", " A"), f(st["limits"]["tjmax"], " °C"), bl("tjmax", " °C")),
+        _("Limits  ") + "  ".join("%s %s%s" % (name, f(st["limits"].get(k), u), bl(k, u)) for k, name, u in (
+            (("stapm", "STAPM", " W"), ("fast", _("fast PPT"), " W"), ("slow", _("slow PPT"), " W"))
+            if st["limits"].get("fast") is not None else (("ppt", "PPT", " W"),))
+            + (("tdc", "TDC", " A"), ("edc", "EDC", " A"), ("tjmax", "Tjmax", " °C"))),
         _("Now     PPT %s  TDC %s  Tctl %s") % (f(st["now"]["ppt"], " W"), f(st["now"]["tdc"], " A"), f(st["now"]["tctl"], " °C")),
         _("Power   %s%s, boost %s%s") % (st["power"] or _("n/a"), bl("power"), st["boost"] or _("n/a"), bl("boost")),
         _("Baseline %s, unlock %s, autostart %s, profile %s") % (
             _("of this boot") if st["baseline_fresh"] else (_("stale") if b else _("missing")),
             "ON" if st["unlock"] else "off", "ON" if st["autostart"] else "off", st["profile"] or "-"),
     ]
+    if st.get("power_source"):
+        src, rp = {"ac": _("AC power"), "battery": _("battery")}, st.get("reapply") or {}
+        lines.append(_("Laptop  on %s, baseline captured on %s") % (src[st["power_source"]], src.get(st["baseline_source"], "?"))
+                     + (_("; re-applying stopped %s: %s") % (rp["gave_up"], rp.get("why")) if rp.get("gave_up") else ""))
     return "\n".join(lines)
 
 
 # ---- Profiles ----------------------------------------------------------------------------
-PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "boost", "fan"}  # shaper: experimental, excluded
+PROFILE_CMDS = {"co", "ppt", "fast", "slow", "tdc", "edc", "fmax", "tjmax", "power", "boost", "fan"}  # shaper: experimental, excluded
 FAN_PROFILE_SUBCMDS = ("step", "curve", "pump")   # `fan <N> step …` | `fan <N> curve …` | `fan <N> pump auto|<pct>`
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
@@ -1209,16 +1340,17 @@ def with_stock(lines):
 
 
 def apply_lines(lines, ctx, part=None):
-    """Executes the lines (part: 'cpu' | 'fan' | None=all). Stops at the first error."""
+    """Executes the lines (part: 'cpu' | 'fan' | None=all). Stops at the first error. `power` and `boost` first: on a
+    laptop amd-pmf rewrites the power limits at every platform profile change, so the limits come after it."""
     done = []
-    for n, t in enumerate(lines, 1):
+    for n, t in sorted(enumerate(lines, 1), key=lambda nt: nt[1][0] not in ("power", "boost")):
         is_fan = t[0] == "fan"
         if part == "fan" and not is_fan or part == "cpu" and is_fan:
             continue
         if t[0] not in PROFILE_CMDS or (is_fan and (len(t) < 3 or t[2] not in FAN_PROFILE_SUBCMDS)):
             raise Err(_("line %d: '%s' not allowed in a profile") % (n, " ".join(t[:3])))
         try:
-            run(t, ctx)
+            run(t, dict(ctx, profile=True))   # the profile's own values: re-applying goes on (limit_setter)
         except Err as e:
             raise Err(_("line %d (%s): %s") % (n, " ".join(t), e))
         done.append(" ".join(t))
@@ -1229,7 +1361,11 @@ def cmd_apply(ctx, args):
     if len(args) not in (1, 2) or (len(args) == 2 and args[1] not in ("cpu", "fan")):
         raise Err(_("usage: apply <profile|baseline> [cpu|fan]"))
     check_boost(args[0])
-    return {"applied": apply_lines(profile_lines(args[0]), ctx, args[1] if len(args) == 2 else None)}
+    done = apply_lines(profile_lines(args[0]), ctx, args[1] if len(args) == 2 else None)
+    if args[1:] != ["fan"] and not ctx.get("dry"):
+        rm(P(REAPPLY_STATE))   # applied again: past corrections and a give-up are forgotten
+        reapply_mark(args[0])
+    return {"applied": done}
 
 
 def cmd_profile(ctx, args):
@@ -1248,6 +1384,8 @@ def cmd_profile(ctx, args):
         lines = parse_lines("\n".join(args[2:]))
         apply_lines(lines, {"dry": True})          # validates everything, does not touch the hardware
         write_atomic(path, "# ryzenctl profile '%s'\n" % name + "\n".join(" ".join(t) for t in lines) + "\n")
+        if name == s["profile"]:
+            reapply_off()   # saved, not applied: `reapply` must not write it before the next apply or boot
         return {"saved": name, "lines": len(lines)}
     if len(args) == 2 and args[0] == "delete":
         path = profile_path(args[1])
@@ -1258,6 +1396,7 @@ def cmd_profile(ctx, args):
         if s["profile"] == args[1]:
             s["profile"] = None
         save_settings(s)
+        reapply_mark()
         return {"deleted": args[1]}
     raise Err(_("usage: profile list | show <name> | save <name> <line>… | delete <name>"))
 
@@ -1270,6 +1409,8 @@ def cmd_use(ctx, args):
     s = load_settings()
     s["profile"] = args[0]
     save_settings(s)
+    rm(P(REAPPLY_STATE))   # chosen again: past corrections and a give-up are forgotten
+    reapply_mark()
     return {"profile": args[0]}
 
 
@@ -1281,6 +1422,7 @@ def cmd_autostart(ctx, args):
         raise Err(_("no profile selected (use <profile>)"))
     s["autostart"] = args == ["on"]
     save_settings(s)
+    reapply_mark()
     return {"autostart": s["autostart"], "profile": s["profile"]}
 
 
@@ -1288,14 +1430,14 @@ def cmd_autostart(ctx, args):
 # ponytail: fixed ratios relative to the baseline (quiet ≈ AMD's 65 W eco on a 162 W part, auto ≈ 105 W eco);
 # the Auto calibration replaces them with values measured on this CPU, the Eco one adds the measured CO.
 PRESETS = {
-    "quiet": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
+    "quiet": {"ppt": 0.55, "slow": 0.6, "fast": 0.6, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
     # eco: same values as quiet; `autotune eco` adds Auto's validated CO and the fan curve
-    "eco": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
-    "auto": {"ppt": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
-    "performance": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
+    "eco": {"ppt": 0.55, "slow": 0.6, "fast": 0.6, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
+    "auto": {"ppt": 0.88, "slow": 0.88, "fast": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
+    "performance": {"ppt": 1.0, "slow": 1.0, "fast": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
     # boost: same values as performance until `autotune boost` replaces them (pushed CO, limits and
     # FMax at the allowed caps, stability check and measured gain)
-    "boost": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
+    "boost": {"ppt": 1.0, "slow": 1.0, "fast": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
 }
 
 
@@ -1316,8 +1458,8 @@ def preset_lines(name, base):
         raise Err(over)
     eco = dict(zip(("ppt", "tdc", "edc"), family().get("eco_limits", ())))   # AMD's Eco mode: Quiet/Eco in that case
     lines = ["co " + " ".join(str(v) for v in base["co"])] if "co" in base else []   # presets do not touch the CO
-    for key, floor in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
-        if key in base:
+    for key, floor in (("ppt", PPT_MIN), ("slow", APU_MIN_W), ("fast", APU_MIN_W), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
+        if key in base:   # APUs: slow before fast, so that lowering never leaves fast below slow
             v = eco[key] if over and pr[key] < 1 and key in eco else max(floor, round(base[key] * pr[key]))
             lines.append("%s %d" % (key, v))
     if "fmax" in base:
@@ -1326,7 +1468,7 @@ def preset_lines(name, base):
         lines.append("tjmax %d" % (base["tjmax"] if pr["tjmax"] is None else min(base["tjmax"], pr["tjmax"])))
     lines.append("power " + pr["power"])
     if name == "quiet" and "co_set" not in family()["cmd"] and "boost" in base:
-        lines.append("boost off")   # Ryzen 1000–3000: no CO nor FMax, the kernel's boost switch is the lever
+        lines.append("boost off")   # Ryzen 1000–3000 and the APUs: no CO nor FMax, the kernel's boost switch is the lever
     d = fans_dir()
     if d:
         for n in fan_channels(d):
@@ -2525,13 +2667,23 @@ def cmd_resume(ctx, args):
 
 
 def cmd_default(ctx, args):
-    done = apply_lines(profile_lines("baseline"), ctx)
-    rm(marker("active"))
+    """The baseline and no profile. Apply at startup stays as it is (user request: with no profile the boot applies
+    nothing, and the next mode chosen is applied at startup again); after a crash the GUI's "Stay on Default" turns it
+    off itself. On a laptop on the other power source the CPU values are not written (the firmware's limits apply, see
+    source_mismatch): only fans, power profile and boost."""
+    lines, why = profile_lines("baseline"), source_mismatch()
+    done = apply_lines([t for t in lines if t[0] in ("fan", "power", "boost")] if why else lines, ctx)
+    if not why:
+        rm(marker("active"))     # the CPU is at the stock values again (not known on the other source: kept)
+    rm(P(REAPPLY_WANTED))
+    rm(P(REAPPLY_STATE))
     s = load_settings()
-    s["autostart"] = False
     s["profile"] = None          # Default = no profile selected (the GUI derives the mode from here)
     save_settings(s)
-    return {"applied": done, "autostart": False, "profile": None}
+    out = {"applied": done, "autostart": s["autostart"], "profile": None}
+    if why:
+        out["cpu_skipped"] = why
+    return out
 
 
 def cmd_crashed(ctx, args):
@@ -2564,6 +2716,81 @@ def cmd_notify(ctx, args):
                 subprocess.Popen(["ryzen-control"], start_new_session=True, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     return {"crashed": info}
+
+
+# ---- Laptops: the firmware rewrites the limits, the profile's are written again --------------------------------
+# The firmware/EC rewrites the power limits on AC changes, after sleep and on some models periodically; amd-pmf at
+# every platform profile and power supply change. ryzenctl-reapply.timer (every 10 s) and a udev rule (AC changes)
+# run `reapply`, only while REAPPLY_WANTED exists (ConditionPathExists: no cost on desktops).
+REAPPLY_WANTED = RUN + "/reapply-wanted"   # a laptop, Apply at startup, a selected profile that changes a limit
+REAPPLY_STATE = RUN + "/reapply.json"      # corrections, give-up, limits held on the other source (read by the tray)
+
+
+def reapply_state():
+    try:
+        return json.loads(read_text(REAPPLY_STATE))
+    except (OSError, ValueError):
+        return {}
+
+
+def reapply_mark(applied=None):
+    """REAPPLY_WANTED on a laptop with Apply at startup on, while the selected profile (the one just `applied`, if
+    any) sets a limit other than the stock one: an all-stock profile leaves the limits to the firmware."""
+    s = load_settings()
+    want = False
+    if power_source() and s["autostart"] and s["profile"] and applied in (None, s["profile"]):
+        try:
+            base = load_baseline(strict=False)
+            want = any(t[0] in LIMIT_PM and t[0] in base and t[1:] != [str(base[t[0]])] for t in profile_lines(s["profile"]))
+        except Err:
+            pass
+    if want:
+        touch_sync(P(REAPPLY_WANTED))
+    else:
+        reapply_off()
+
+
+def reapply_off():
+    """No more re-applying (a value set by hand, a profile without limits): the flag goes, and with it the note that
+    the profile's limits are held on the other power source."""
+    rm(P(REAPPLY_WANTED))
+    st = reapply_state()
+    if st.pop("held", None):
+        write_atomic(P(REAPPLY_STATE), json.dumps(st))
+
+
+def cmd_reapply(ctx, args):
+    """`reapply`: the limits of the profile applied at startup that the firmware changed (PM table beyond READBACK_TOL)
+    are written again with their setters (write_verify, crash-guard markers); nothing drifted, nothing written and no
+    output. Only on a laptop, with REAPPLY_WANTED, no crash, no calibration and on the baseline's power source (on
+    the other one the profile is "held"). REAPPLY_MAX corrections within REAPPLY_WINDOW s: the firmware keeps
+    overriding them, re-applying stops until the next apply/use or boot."""
+    if args:
+        raise Err(_("usage: reapply"))
+    s, st, src = load_settings(), reapply_state(), power_source()
+    if (not src or not os.path.exists(P(REAPPLY_WANTED)) or not (s["autostart"] and s["profile"]) or st.get("gave_up")
+            or crashed_info() or at_load() or not os.path.exists(P(RUN + "/baseline-done"))):
+        return None
+    held = src if source_mismatch() else None
+    if held != st.get("held"):
+        st["held"] = held
+        write_atomic(P(REAPPLY_STATE), json.dumps(st))
+    if held:
+        return None
+    lim = read_limits()
+    drifted = [t for t in profile_lines(s["profile"])
+               if len(t) == 2 and LIMIT_PM.get(t[0]) in lim and not near(lim[LIMIT_PM[t[0]]], to_int(t[1], t[0]))]
+    if not drifted:
+        return None
+    now = time.time()
+    st["corrections"] = [c for c in st.get("corrections", []) if now - c < REAPPLY_WINDOW] + [now]
+    if len(st["corrections"]) >= REAPPLY_MAX:   # this one is the last (recorded first: a write that fails counts too)
+        st.update(gave_up=time.strftime("%Y-%m-%d %H:%M"), why=_("the firmware keeps overriding the limits"))
+        rm(P(REAPPLY_WANTED))
+    write_atomic(P(REAPPLY_STATE), json.dumps(st))
+    for t in drifted:   # in the profile's order (slow before fast when lowering)
+        run(t, dict(ctx, profile=True))
+    return {"reapplied": [" ".join(t) for t in drifted], "gave_up": st.get("gave_up")}
 
 
 # ---- Fans (nct6775 via hwmon) ----------------------------------------------------------
@@ -2978,7 +3205,10 @@ def cmd_hwtest(ctx, args):
              else ("co", None, _("skipped: %s") % no_co),
              ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])]) if "fmax" in base
              else ("fmax", None, _("skipped: not available on this CPU"))]
-    for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
+    for key, floor, delta in (("ppt", PPT_MIN, 12), ("slow", APU_MIN_W, 3), ("fast", APU_MIN_W, 3), ("tdc", TDC_MIN, 10),
+                              ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
+        if key in ("slow", "fast") and key not in base:   # desktop families: not a function of theirs
+            continue
         if key in base:
             steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
         else:
@@ -3205,12 +3435,14 @@ COMMANDS = {
     "ppt": limit_setter("ppt", "ppt_limit", "ppt_set", "W", PPT_MIN),
     "tdc": limit_setter("tdc", "tdc_limit", "tdc_set", "A", TDC_MIN),
     "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
+    "fast": limit_setter("fast", "fast_limit", "fast_set", "W", APU_MIN_W),
+    "slow": limit_setter("slow", "slow_limit", "slow_set", "W", APU_MIN_W),
     "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
     "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "boost": cmd_boost, "unlock": cmd_unlock,
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart, "trust": cmd_trust,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
-    "fan": cmd_fan, "telemetry": cmd_telemetry, "preset": cmd_preset, "autotune": cmd_autotune,
+    "fan": cmd_fan, "telemetry": cmd_telemetry, "preset": cmd_preset, "autotune": cmd_autotune, "reapply": cmd_reapply,
 }
 FORMAT = {"status": fmt_status, "hwtest": fmt_hwtest, "fan": fmt_fan}
 
@@ -3244,7 +3476,7 @@ def selftest():
     assert shaper_arg(2, -10, -5, 3) == (3 << 24) | (0xFB << 16) | (0xF6 << 8) | 0x80 | 2
     assert shaper_decode(shaper_arg(4, -50, 0, 30)) == [-50, 0, 30]
     # CPU gate
-    FAKE.s["codename"] = 24
+    FAKE.s["codename"] = 25   # Storm Peak (Threadripper 7000): not in FAMILIES
     FAKE.save()
     expect_err(["status"], "unsupported")
     FAKE.s["codename"] = 23
@@ -3252,7 +3484,7 @@ def selftest():
     # status
     st = run(["status"])
     assert st["co"] == [0] * CORES and st["fmax"] == 5225 and st["baseline"] is None
-    assert st["limits"] == {"ppt": 162.0, "tdc": 120.0, "edc": 180.0, "tjmax": 95.0}
+    assert st["limits"] == {"ppt": 162.0, "tdc": 120.0, "edc": 180.0, "tjmax": 95.0, "stapm": None, "fast": None, "slow": None}
     assert "Granite Ridge" in fmt_status(st)
     expect_err(["nope"], "unknown")
     assert FAKE.smu(MP1, 0x10, [0])[0] == 0xFE   # outside the allowlist → UNKNOWN_CMD
@@ -3402,7 +3634,8 @@ def selftest():
     # 4. "Re-enable": applied at once and at every clean boot
     run(["autostart", "on"])
     out = run(["apply", "quiet"])
-    assert out["applied"][-4:] == ["ppt 150", "co all -10", "fmax 5000", "power balanced"] and "tdc 120" in out["applied"], out
+    # power and boost first (amd-pmf rewrites the limits on a laptop), then the stock values, then the profile's own lines
+    assert out["applied"] == ["boost on", "power balanced", "tdc 120", "edc 180", "tjmax 95", "ppt 150", "co all -10", "fmax 5000"], out
     run(["shutdown"])
     reboot()
     out = run(["boot"])
@@ -3426,17 +3659,19 @@ def selftest():
     run(["ppt", "162"])
     assert "crash" in run(["resume"])["errors"]["cpu"] and run(["status"])["limits"]["ppt"] == 162.0
     run(["crashed", "clear"])
-    # 7. default: everything at baseline, active gone, autostart off; a crash afterwards is not our fault
+    # 7. default: everything at baseline, active gone, Apply at startup kept (no profile: the boot applies nothing);
+    # a crash afterwards is not our fault
     run(["apply", "quiet"])
     with open(P(STATE + "/baseline.conf"), "a") as f:   # baseline of an old version with a shaper line
         f.write("shaper 4 0 0 0\n")
     out = run(["default"])
-    assert not out["autostart"] and not exists("active") and run(["status"])["profile"] is None
+    assert out["autostart"] and load_settings()["autostart"] and not exists("active") and run(["status"])["profile"] is None
     st = run(["status"])
     assert st["limits"]["ppt"] == 162.0 and st["co"] == [0] * CORES and st["fmax"] == 5225
     assert st["power"] == run(["baseline", "show"])["power"]
     reboot()
-    assert not run(["boot"])["crashed"]
+    out = run(["boot"])
+    assert not out["crashed"] and out["applied"] == {} and not out["errors"] and run(["status"])["limits"]["ppt"] == 162.0
     # 8. boot does not die if the apply fails (PM table missing): error reported, unit stays active
     run(["use", "quiet"])
     run(["autostart", "on"])
@@ -3977,6 +4212,7 @@ def selftest():
     assert replies[4]["ok"] and replies[4]["data"]["co"][7] == -3
     selftest_watchdog()
     selftest_variants()
+    selftest_laptop()
     print("selftest ok (%s)" % ROOT)
 
 
@@ -3993,11 +4229,18 @@ def selftest_watchdog():
         FAKE.save()
 
     def serve(requests):
+        out = io.StringIO()
+
+        def lines():   # each request after the previous reply: an abort read at once would race `start`, which clears its flag
+            for i, r in enumerate(requests):
+                while out.getvalue().count("\n") < i:
+                    time.sleep(0.005)
+                yield json.dumps(r) + "\n"
         stdin, stdout = sys.stdin, sys.stdout
-        sys.stdin, sys.stdout = io.StringIO("".join(json.dumps(r) + "\n" for r in requests)), io.StringIO()
+        sys.stdin, sys.stdout = lines(), out
         try:
             run(["serve"])
-            return [(json.loads(l).get("data") or {}).get("watchdog") for l in sys.stdout.getvalue().splitlines()]
+            return [(json.loads(l).get("data") or {}).get("watchdog") for l in out.getvalue().splitlines()]
         finally:
             sys.stdin, sys.stdout = stdin, stdout
     import io
@@ -4292,6 +4535,43 @@ def selftest_variants():
     assert "ppt 88" in pl and "tdc 75" in pl and "edc 150" in pl, pl
     expect_err(["preset", "auto", "show"], "motherboard limits")
     expect_err(["autotune", "start", "auto", "step=3"], "motherboard limits")
+    # ---- a laptop: an HX CPU is reported as the desktop family by the driver; refused while a system battery
+    # exists, the battery of a device (a wireless mouse, scope Device) does not count ----
+    for name, files in (("hidpp_battery_0", {"type": "Battery", "scope": "Device"}), ("BAT0", {"type": "Battery"})):
+        os.makedirs(P("/sys/class/power_supply/" + name))
+        for k, v in files.items():
+            with open(P("/sys/class/power_supply/%s/%s" % (name, k)), "w") as fh:
+                fh.write(v + "\n")
+        if name == "hidpp_battery_0":
+            assert run(["status"])["cpu"] == "Granite Ridge"
+    expect_err(["status"], "laptop detected (BAT0)")
+    expect_err(["co", "0", "-5"], "laptop detected")
+    # ---- desktop APUs (Cezanne 5700G, Phoenix 8700G): fast/slow PPT, Tctl, TDC/EDC through MP1, read back from
+    # the PM table; STAPM read only; no CO, no FMax (in a laptop: selftest_laptop) ----
+    for variant, name in (("cezanne", "Cezanne"), ("phoenix", "Phoenix")):
+        ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-%s-" % variant)
+        FAKE = Fake(variant)
+        init_cpu()
+        st = run(["status"])
+        assert st["cpu"] == name and st["co"] is None and st["fmax"] is None and st["limits"]["stapm"] == 65.0, st
+        assert st["limits"]["fast"] == 88.0 and st["limits"]["slow"] == 65.0 and "STAPM 65 W" in fmt_status(st), fmt_status(st)
+        run(["boot"])
+        base = run(["baseline", "show"])
+        assert base["fast"] == 88 and base["slow"] == 65 and not any(k in base for k in ("ppt", "fmax", "stapm")), base
+        assert run(["slow", "40"])["slow"] == 40.0 and run(["fast", "60"])["fast"] == 60.0 and FAKE.s["slow"] == 40.0
+        expect_err(["fast", "89"], "out of range")            # never above the stock value: no unlock on APUs
+        expect_err(["slow", "%d" % (APU_MIN_W - 1)], "out of range")
+        expect_err(["ppt", "50"], "baseline")
+        expect_err(["co", "0", "-5"], "not available")
+        assert run(["tjmax", "85"])["tjmax"] == 85.0
+        pl = run(["preset", "quiet", "show"])["lines"]
+        assert "slow 39" in pl and "fast 53" in pl and pl.index("slow 39") < pl.index("fast 53") and "boost off" in pl, pl
+        r = run(["hwtest"])
+        assert r["slow"].startswith("ok") and r["fast"].startswith("ok") and r["co"].startswith("skipped") and r["esito"] == "ok", r
+        run(["default"])
+        assert FAKE.s["fast"] == 88.0 and FAKE.s["slow"] == 65.0
+        tele = run(["telemetry"])
+        assert tele["ppt"] == 52.0 and tele["ppt_limit"] == 88.0, tele
     # ---- custom calibration: from a base mode, saved under its own name; the mode's profile and the shared
     # CO measurement stay as they are (the user keeps the Auto that works while trying other parameters) ----
     ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-custom-")
@@ -4342,6 +4622,158 @@ def selftest_variants():
     run(["default"])
     run(["unlock", "off"])
     expect_err(["apply", "boost-2"], "requires unlock")
+
+
+def selftest_laptop():
+    """Phase 8: a Phoenix APU in a laptop (fake power supplies). The baseline records the power source and the CPU is
+    written only on that one (Default on the other writes no CPU value); `power` before the limits (a fake amd-pmf
+    resets them at every platform profile change); `reapply` against the firmware's rewrites, with the give-up. A mini
+    PC (no battery) never re-applies."""
+    global ROOT, FAKE
+
+    def supply(name, **files):
+        os.makedirs(P("/sys/class/power_supply/" + name), exist_ok=True)
+        for k, v in files.items():
+            with open(P("/sys/class/power_supply/%s/%s" % (name, k)), "w") as fh:
+                fh.write("%s\n" % v)
+
+    def firmware_reset():   # the EC puts its own limits back (here the stock ones)
+        FAKE.s.pop("fast", None)
+        FAKE.s.pop("slow", None)
+        FAKE.save()
+
+    def writes():
+        return len(FAKE.s["log"])
+
+    def wanted():
+        return os.path.exists(P(REAPPLY_WANTED))
+    # ---- a mini PC: no system battery (a wireless mouse's does not count), no power source, nothing re-applied ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-minipc-")
+    FAKE = Fake("phoenix")
+    init_cpu()
+    supply("hidpp_battery_0", type="Battery", scope="Device")
+    assert power_source() is None
+    run(["boot"])
+    assert baseline_source() is None and "# source" not in read_text(STATE + "/baseline.conf")
+    run(["preset", "quiet"])
+    for argv in (["apply", "quiet"], ["use", "quiet"], ["autostart", "on"]):
+        run(argv)
+    firmware_reset()
+    n = writes()
+    assert not wanted() and run(["reapply"]) is None and writes() == n and "fast" not in FAKE.s
+    assert "Laptop" not in fmt_status(run(["status"]))
+    # ---- the same APU in a laptop, booted on AC ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-laptop-")
+    FAKE = Fake("phoenix")
+    init_cpu()
+    FAKE.s["pmf"] = True
+    FAKE.save()
+    supply("BAT0", type="Battery")
+    supply("ADP1", type="Mains", online=1)
+    supply("hidpp_battery_0", type="Battery", scope="Device")
+    assert power_source() == "ac" and run(["status"])["cpu"] == "Phoenix"     # a mobile family: allowed
+    run(["boot"])
+    assert "\n# source ac\n" in open(P(STATE + "/baseline.conf")).read() and baseline_source() == "ac"
+    st = run(["status"])
+    assert st["power_source"] == st["baseline_source"] == "ac" and st["reapply"] is None and "Laptop  on AC power" in fmt_status(st)
+    # power and boost before the limits: the platform profile change resets them (amd-pmf), the profile's limits stay
+    run(["preset", "quiet"])
+    shown = run(["profile", "show", "quiet"])["lines"]
+    assert shown.index("fast 53") < shown.index("power balanced"), shown
+    out = run(["apply", "quiet"])
+    assert out["applied"][:2] == ["power balanced", "boost off"] and FAKE.s["power"] == "balanced", out
+    assert FAKE.s["slow"] == 39.0 and FAKE.s["fast"] == 53.0, FAKE.s
+    # re-applying only for the selected profile with Apply at startup
+    assert not wanted()
+    run(["use", "quiet"])
+    assert not wanted()
+    run(["autostart", "on"])
+    assert wanted()
+    # nothing drifted: no SMU write at all
+    n = writes()
+    assert run(["reapply"]) is None and writes() == n
+    expect_err(["reapply", "now"], "usage")
+    # the firmware puts its limits back: only the drifted ones written again, with the crash-guard markers
+    firmware_reset()
+    assert run(["reapply"]) == {"reapplied": ["slow 39", "fast 53"], "gave_up": None} and writes() == n + 2
+    assert FAKE.s["slow"] == 39.0 and FAKE.s["fast"] == 53.0 and FAKE.s["log"][-1] == {"dirty": True, "active": True}
+    assert wanted() and len(reapply_state()["corrections"]) == 1
+    # a third correction within two minutes: written, then no more (the firmware keeps overriding the limits)
+    firmware_reset()
+    run(["reapply"])
+    firmware_reset()
+    assert run(["reapply"])["gave_up"] and FAKE.s["fast"] == 53.0 and not wanted()
+    firmware_reset()
+    n = writes()
+    assert run(["reapply"]) is None and writes() == n and "fast" not in FAKE.s
+    st = run(["status"])
+    assert st["reapply"]["gave_up"] and st["reapply"]["why"] == "the firmware keeps overriding the limits", st["reapply"]
+    assert "re-applying stopped" in fmt_status(st) and run(["telemetry"])["reapply"]["gave_up"]
+    # apply (or use) starts over; corrections older than the window do not count
+    run(["apply", "quiet"])
+    assert reapply_state() == {} and wanted()
+    write_atomic(P(REAPPLY_STATE), json.dumps({"gave_up": "x", "why": "y"}))
+    run(["use", "quiet"])
+    assert reapply_state() == {} and wanted()
+    write_atomic(P(REAPPLY_STATE), json.dumps({"corrections": [time.time() - 300, time.time() - 200]}))
+    firmware_reset()
+    assert run(["reapply"])["gave_up"] is None and len(reapply_state()["corrections"]) == 1
+    # a value set by hand: no longer re-applied over it; apply again to resume
+    run(["fast", "60"])
+    firmware_reset()
+    n = writes()
+    assert not wanted() and run(["reapply"]) is None and writes() == n
+    run(["apply", "quiet"])
+    assert wanted()
+    # the selected profile saved again: not written by reapply until it is applied
+    run(["profile", "save", "quiet"] + open(P(ETC + "/profiles/quiet.conf")).read().splitlines()[1:])
+    assert not wanted()
+    run(["apply", "quiet"])
+    assert wanted()
+    # crashed, a calibration in progress or waiting for a choice: nothing written; allowed via serve
+    firmware_reset()
+    n = writes()
+    write_atomic(marker("crashed"), json.dumps({"time": "x", "profile": "quiet"}))
+    assert run(["reapply"]) is None and writes() == n
+    rm(marker("crashed"))
+    at_save({"phase": "done"})
+    assert run(["reapply"]) is None and writes() == n
+    rm(P(AT_PATH))
+    assert serve_one(json.dumps(["reapply"])) == {"ok": True, "data": {"reapplied": ["slow 39", "fast 53"], "gave_up": None}}
+    # ---- unplugged: the baseline is the AC one, the CPU is not written; the profile is held ----
+    supply("ADP1", online=0)
+    assert power_source() == "battery"
+    expect_err(["fast", "60"], "on battery")
+    expect_err(["apply", "quiet"], "on battery")
+    firmware_reset()
+    n = writes()
+    assert run(["reapply"]) is None and writes() == n and reapply_state()["held"] == "battery" and wanted()
+    assert run(["status"])["reapply"]["held"] == "battery" and run(["telemetry"])["reapply"]["held"] == "battery"
+    out = run(["resume"])                                       # the resume unit keeps the rule
+    assert "on battery" in out["errors"]["cpu"] and out["applied"]["fan"] == [] and writes() == n, out
+    # a USB-C charger is AC power: the profile's limits come back
+    supply("ucsi-source-psy-USBC000:001", type="USB", online=1)
+    assert power_source() == "ac" and run(["reapply"])["reapplied"] == ["slow 39", "fast 53"] and not reapply_state()["held"]
+    supply("ucsi-source-psy-USBC000:001", online=0)
+    # Default on battery: profile deselected, Apply at startup kept, no CPU value written (active stays: the CPU may
+    # still run the profile's values), fans/power/boost back to the baseline
+    n, thm = writes(), FAKE.s["thm"]
+    out = run(["default"])
+    assert "on battery" in out["cpu_skipped"] and out["profile"] is None and out["autostart"], out
+    assert out["applied"] == ["power performance", "boost on"] and FAKE.s["power"] == "performance", out
+    assert writes() == n and FAKE.s["thm"] == thm == 80.0   # no SMU write (fast/slow: the fake amd-pmf's, at the profile change)
+    assert os.path.exists(marker("active")) and not wanted() and reapply_state() == {}
+    # ---- booted on battery: the battery's baseline, written on battery, refused on AC ----
+    run(["shutdown"])
+    for f in os.listdir(P(RUN)):
+        os.remove(P(RUN + "/" + f))
+    FAKE.s.update({k: FAKE.default[k] for k in ("tdc", "edc", "thm")})
+    firmware_reset()
+    out = run(["boot"])
+    assert not out["crashed"] and baseline_source() == "battery" and run(["slow", "30"])["slow"] == 30.0
+    supply("ADP1", online=1)
+    expect_err(["slow", "30"], "on AC power")
+    assert "does not record" in source_mismatch(read_text(STATE + "/baseline.conf").replace("# source battery", ""))
 
 
 def main():

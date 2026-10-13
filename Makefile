@@ -1,7 +1,7 @@
 # Ryzen Control — the single source of truth for the installed layout. Packages (RPM, deb, Arch)
 # call `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` /
 # `install-locales` are the pieces.
-VERSION := 0.7.1
+VERSION := 0.8.0
 # DKMS module version: bump ONLY when ryzen_smu/ changes (a new /usr/src directory means a
 # rebuild + dracut, about a minute at upgrade time). Same value as %drv_version in the spec.
 DRV_VERSION := 0.4.1
@@ -12,6 +12,7 @@ DESTDIR ?=
 BIN := $(DESTDIR)$(PREFIX)/bin
 UNITDIR := $(DESTDIR)$(PREFIX)/lib/systemd/system
 PRESETDIR := $(DESTDIR)$(PREFIX)/lib/systemd/system-preset
+UDEVDIR := $(DESTDIR)$(PREFIX)/lib/udev/rules.d
 MODPROBEDIR := $(DESTDIR)$(PREFIX)/lib/modprobe.d
 POLKITDIR := $(DESTDIR)$(PREFIX)/share/polkit-1/actions
 APPDIR := $(DESTDIR)$(PREFIX)/share/applications
@@ -38,8 +39,10 @@ install: install-cli $(if $(wildcard ryzen-control),install-gui) install-dkms-sr
 
 install-cli:
 	install -Dm755 ryzenctl $(BIN)/ryzenctl
-	install -Dm644 -t $(UNITDIR) data/ryzenctl.service data/ryzenctl-resume.service
+	install -Dm644 -t $(UNITDIR) data/ryzenctl.service data/ryzenctl-resume.service data/ryzenctl-reapply.service \
+	  data/ryzenctl-reapply.timer
 	install -Dm644 -t $(PRESETDIR) data/80-ryzen-control.preset
+	install -Dm644 -t $(UDEVDIR) data/60-ryzen-control.rules
 	install -Dm644 data/ryzen-control.modprobe.conf $(MODPROBEDIR)/ryzen-control.conf
 	install -Dm644 -t $(POLKITDIR) data/$(APPID).policy
 	install -Dm644 -t $(AUTOSTARTDIR) data/ryzenctl-notify.desktop
@@ -81,6 +84,7 @@ uninstall:
 	rm -rf $(DKMS_SRC)
 	rm -f $(BIN)/ryzenctl $(BIN)/ryzen-control
 	rm -f $(UNITDIR)/ryzenctl.service $(UNITDIR)/ryzenctl-resume.service $(PRESETDIR)/80-ryzen-control.preset
+	rm -f $(UNITDIR)/ryzenctl-reapply.service $(UNITDIR)/ryzenctl-reapply.timer $(UDEVDIR)/60-ryzen-control.rules
 	rm -f $(MODPROBEDIR)/ryzen-control.conf $(POLKITDIR)/$(APPID).policy $(AUTOSTARTDIR)/ryzenctl-notify.desktop
 	rm -f $(APPDIR)/$(APPID).desktop $(ICONDIR)/$(APPID).svg $(METADIR)/$(APPID).metainfo.xml
 	rm -f $(LOCALEDIR)/*/LC_MESSAGES/ryzenctl.mo $(LOCALEDIR)/*/LC_MESSAGES/ryzen-control.mo
@@ -94,7 +98,9 @@ check: locales
 	python3 ryzenctl selftest
 	rm -rf "$(TMPROOT)" && $(MAKE) install DESTDIR="$(TMPROOT)" >/dev/null
 	cd "$(TMPROOT)" && find . -type f | sort
-	systemd-analyze --root="$(TMPROOT)" verify --recursive-errors=no ryzenctl.service ryzenctl-resume.service
+	systemd-analyze --root="$(TMPROOT)" verify --recursive-errors=no ryzenctl.service ryzenctl-resume.service \
+	  ryzenctl-reapply.service ryzenctl-reapply.timer
+	udevadm verify --resolve-names=never data/60-ryzen-control.rules
 	desktop-file-validate data/ryzenctl-notify.desktop data/$(APPID).desktop
 	-appstreamcli validate --no-net data/$(APPID).metainfo.xml
 	root=$$(mktemp -d) && LANGUAGE=C LC_ALL=C.UTF-8 RYZENCTL_ROOT=$$root timeout 120 python3 ryzen-control --mock --smoke; \

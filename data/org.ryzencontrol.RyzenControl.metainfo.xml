@@ -8,14 +8,14 @@
   <summary xml:lang="it">Curve Optimizer, limiti PBO e ventole per Ryzen</summary>
   <description>
     <p>
-      Ryzen Master-style control for AMD Ryzen desktop processors on Linux (Ryzen 9000
-      verified, Ryzen 1000–7000 expected):
+      Ryzen Master-style control for AMD Ryzen processors on Linux (Ryzen 9000 desktop
+      verified, Ryzen 1000–7000 desktop and the APUs of desktops, mini PCs and laptops expected):
       per-core Curve Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost frequency and
       maximum temperature, power profile and motherboard fans.
     </p>
     <p xml:lang="it">
-      Controllo stile Ryzen Master per processori AMD Ryzen desktop su Linux (Ryzen 9000
-      verificati, Ryzen 1000–7000 attesi):
+      Controllo stile Ryzen Master per processori AMD Ryzen su Linux (Ryzen 9000 desktop
+      verificati, Ryzen 1000–7000 desktop e gli APU di desktop, mini PC e portatili attesi):
       Curve Optimizer e Curve Shaper per core, limiti PPT/TDC/EDC, frequenza di boost e
       temperatura massima, profilo energetico e ventole della scheda madre.
     </p>
@@ -40,6 +40,7 @@
   </developer>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="0.8.0" date="2026-10-13"/>
     <release version="0.7.1" date="2026-10-13"/>
     <release version="0.7.0" date="2026-10-13"/>
     <release version="0.6.0" date="2026-10-13"/>

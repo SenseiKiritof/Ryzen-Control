@@ -1,9 +1,10 @@
 # Ryzen Control
 
-Ryzen Master-style control for AMD Ryzen desktop processors on Linux (Ryzen 9000 verified,
-Ryzen 1000–7000 expected: see [Processors](#processors)): per-core Curve Optimizer and Curve Shaper,
-PPT/TDC/EDC limits, boost frequency (FMax), maximum temperature (Tjmax), power profile and
-motherboard fans. Profiles applied at boot with protection after a crash.
+Ryzen Master-style control for AMD Ryzen processors on Linux (Ryzen 9000 desktop verified; Ryzen
+1000–7000 desktop and the APUs of desktops, mini PCs and laptops expected: see [Processors](#processors)):
+per-core Curve Optimizer and Curve Shaper, PPT/TDC/EDC limits (fast/slow PPT on the APUs), boost frequency
+(FMax), maximum temperature (Tjmax), power profile and motherboard fans. Profiles applied at boot with
+protection after a crash.
 
 > **Warning.** Experimental software that talks directly to the processor's SMU.
 > Developed and tested on a single system: Ryzen 7 9800X3D, ASUS ROG STRIX X870E-H, Fedora 44.
@@ -14,7 +15,7 @@ motherboard fans. Profiles applied at boot with protection after a crash.
 Status: phases 1–7 done — `ryzenctl` helper/CLI, systemd services,
 driver via DKMS, RPM package, fans, GTK4 GUI, calibrations, per-family support for other Ryzen
 CPUs, system tray icon on the development system; deb and Arch packages built and install-tested in
-containers (see `docs/plans/`).
+containers; APUs and laptops (phase 8) tested on simulated hardware only (see `docs/plans/`).
 
 ![Modes page: presets on the left, calibrated modes on the right](docs/screenshots/modes.png)
 
@@ -35,7 +36,9 @@ has written and read back each of its functions; until then it is **expected**: 
 | Ryzen 5000 desktop: 5600X … 5950X, 5800X3D | Vermeer (12) | expected | Curve Optimizer (−30..+30), PPT/TDC/EDC/Tjmax (PM tables 0x3808xx/0x3809xx), all calibrations, Auto on the PPT alone; no FMax (Zen 3 has no command for it); the core positions always come from the fuses; on the 5800X3D the BIOS may lock the power limits (the CO still works) |
 | Ryzen 3000 desktop: 3600 … 3950X | Matisse (4) | expected | PPT/TDC/EDC/Tjmax (PM tables 0x240803/0x240903), Quiet and Performance, Quiet also turns the boost off; no Curve Optimizer, so no calibrated modes |
 | Ryzen 1000/2000 desktop | Summit Ridge (9), Pinnacle Ridge (10) | expected | boost switch, power profile and fans only: no SMU command (no Curve Optimizer, no readable limits); Tdie instead of Tctl on the X models with an offset |
-| APUs and laptops (Ryzen G, mobile, Ryzen AI) | Raven Ridge … Strix Halo | not supported | other limits (STAPM, fast/slow PPT), often no RSMU mailbox |
+| APUs: desktop Ryzen 4000G/5000G/8000G; mini PCs and laptops with Ryzen 4000/5000/6000/7040/8040 U/H/HS, AI 300, AI Max | Renoir (2), Lucienne (17), Cezanne (14), Rembrandt (11), Phoenix (21), Hawk Point (24), Strix Point (22), Strix Halo (26) | expected | fast/slow PPT, Tjmax and TDC/EDC where the PM table is mapped, read back from it; STAPM shown read only; Quiet (60 % of fast/slow, boost off) and Performance. No Curve Optimizer (no verified readback on APUs), no FMax, so no calibrated modes. In a laptop, the [laptop rules](#laptops) |
+| Raven Ridge, Picasso, Dali, Van Gogh (Steam Deck), Krackan… | | not supported | no readable PM table through ryzen_smu, or an unmapped one |
+| HX laptops: 7945HX, 9955HX … | Dragon Range, Fire Range (reported by the driver as Raphael / Granite Ridge) | not supported | refused when the machine has a system battery (a laptop): its firmware and battery limits are not handled |
 | Threadripper, EPYC | — | not supported | other interface (HSMP), out of scope |
 
 Fans depend on the motherboard (Nuvoton nct67xx chip), not on the processor.
@@ -59,6 +62,34 @@ A family that is not in the table is refused before any SMU command (`unsupporte
 N…)`). Adding it needs its command IDs and PM table map from a verified source, a fake variant in
 the selftest (`RYZENCTL_FAKE_FAMILY`) and then the same `hwtest`: open an issue with the codename
 (`cat /sys/kernel/ryzen_smu_drv/codename`) and the PM table version.
+
+### Laptops
+
+A laptop's firmware owns its power limits: it has its own for AC and for battery, and amd-pmf or the
+embedded controller rewrites them at every platform profile or power supply change, after sleep and on
+some models periodically. Only the APUs above are accepted in a laptop (a system battery is present);
+then:
+
+- The baseline records the power source of the boot (`# source ac` or `battery`) and CPU values are
+  written only on that source. On the other one the firmware's limits apply until you are back on it or
+  reboot: CPU writes and `apply` are refused with the reason, and Default only resets fans, power profile
+  and boost and deselects the mode (the CPU values are not written).
+- A mode's power profile and boost are applied before its limits, so the platform profile change does not
+  wipe them.
+- With "Apply at startup" on and a mode that changes a limit, `ryzenctl reapply` runs every 10 s
+  (`ryzenctl-reapply.timer`) and when an AC adapter or a USB-C charger is plugged or unplugged (udev rule):
+  the limits the firmware changed are written again, with the usual readback and crash-guard markers;
+  nothing is written when nothing changed. Three corrections within two minutes mean the firmware keeps
+  overriding them: re-applying stops (Monitor, tray tooltip, `ryzenctl status`) until the mode is applied
+  again or the next boot. A limit set by hand, or a new save of the selected mode's profile, stops it too
+  until the next apply. On a desktop or a mini PC the timer finds no flag file and starts nothing.
+
+Limits: the stock values are those of the platform profile active at boot, so Performance is capped at
+them; a mode holds fixed numbers, so one created on AC may exceed the battery's stock values and be
+refused on a boot on battery (Regenerate it there). Nobody has tried it on a real laptop yet: after a boot
+on AC and one on battery run `sudo ryzenctl hwtest`; then, with a mode applied at startup, plug and
+unplug the charger and look at `cat /run/ryzenctl/reapply.json` and
+`systemctl status ryzenctl-reapply.service`.
 
 ## Installation
 
@@ -113,7 +144,7 @@ The package is attached to every release, or:
 ```sh
 make arch                                  # in an Arch container with podman → dist/ryzen-control-<version>-1-any.pkg.tar.zst
 sudo pacman -U dist/ryzen-control-*.pkg.tar.zst
-sudo systemctl enable --now ryzenctl.service ryzenctl-resume.service
+sudo systemctl enable --now ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer
 ```
 
 On Arch itself `packaging/PKGBUILD` builds the GitHub tag (`makepkg -si` in `packaging/`). The DKMS
@@ -130,7 +161,7 @@ With `dkms`, the kernel headers, `python3 >= 3.9`, PyGObject, GTK 4, libadwaita 
 
 ```sh
 sudo make install && sudo make dkms
-sudo systemctl enable --now ryzenctl.service ryzenctl-resume.service
+sudo systemctl enable --now ryzenctl.service ryzenctl-resume.service ryzenctl-reapply.timer
 ```
 
 To remove: `sudo make uninstall`.
@@ -182,7 +213,8 @@ state is remembered.
 ![Fans page](docs/screenshots/fans.png)
 
 **Preferences** — "Apply at startup" re-applies the selected profile at every boot and resume,
-never after a crash; "Start Ryzen Control at login" opens the window at every login; "Stop asking
+never after a crash; choosing Default leaves it on (nothing is applied until you pick another mode), the
+crash warning's "Stay on Default" turns it off; "Start Ryzen Control at login" opens the window at every login; "Stop asking
 for the password" writes the polkit rule described in "Safety"; "Allow beyond the stock values"
 raises the PPT/TDC/EDC and FMax ceilings (unlock); "Hardware check" writes and reads back one
 value per command, then restores the baseline.
@@ -211,11 +243,13 @@ the previous mode's fans or limits behind. The pump is never part of a mode.
 sudo ryzenctl status                 # current state and baseline
 sudo ryzenctl co 7 -15               # Curve Optimizer of core 7; `co all -10`; `co v0 … v7`
 sudo ryzenctl ppt 120                # limits: ppt (W), tdc (A), edc (A)
+sudo ryzenctl slow 20                # APUs: sustained (slow) and short-term (fast) PPT, W
 sudo ryzenctl fmax 5000              # maximum boost frequency (MHz)
 sudo ryzenctl tjmax 85               # maximum temperature (°C), never above the baseline
 sudo ryzenctl power balanced         # power-saver | balanced | performance
 sudo ryzenctl boost off              # Precision Boost through the kernel (cpufreq), no SMU: on | off
-sudo ryzenctl default                # everything back to the base (BIOS) values, autostart off
+sudo ryzenctl default                # everything back to the base (BIOS) values, no mode selected
+sudo ryzenctl reapply                # laptops: the limits the firmware changed, written again (the timer runs it)
 sudo ryzenctl trust on|off|status    # polkit rule: your user starts Ryzen Control without a password
 sudo ryzenctl hwtest                 # reversible test of every command with readback
 ```
@@ -405,6 +439,9 @@ the BIOS.
 - Total escape hatch: at boot, in GRUB, press `e` and add `ryzenctl.off` to the kernel line:
   the service does not start and the module is not loaded (it is blacklisted, only the service
   loads it).
+- Laptops: CPU values are written only on the power source the baseline was captured on (the firmware's
+  limits for battery and AC differ); the profile's limits are written again after the firmware's rewrites,
+  and no longer once it keeps overriding them ([Laptops](#laptops)).
 - Everything is volatile: a reboot returns to the BIOS values.
 
 ## Hardware verification (phase 1 checklist)

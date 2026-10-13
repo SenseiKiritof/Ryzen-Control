@@ -146,8 +146,8 @@ msgstr "  (sperimentale, non verificato)"
 
 #: ryzenctl
 #, python-format
-msgid "Limits  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s"
-msgstr "Limiti  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s"
+msgid "Limits  "
+msgstr "Limiti  "
 
 #: ryzenctl
 #, python-format
@@ -593,3 +593,41 @@ msgstr "systemd non può gestirlo (RuntimeWatchdogUSec)"
 
 msgid "systemd did not take the watchdog"
 msgstr "systemd non ha preso il watchdog"
+
+msgid "laptop detected (%s): the driver reports this processor as the desktop %s, a laptop part (Ryzen HX) that is not supported: only the laptop APUs are"
+msgstr "rilevato un portatile (%s): il driver presenta questo processore come il desktop %s, un modello per portatili (Ryzen HX) non supportato: lo sono solo gli APU per portatili"
+
+msgid "fast PPT"
+msgstr "PPT fast"
+
+msgid "slow PPT"
+msgstr "PPT slow"
+
+msgid "the baseline does not record the power source: CPU writes refused until the next boot"
+msgstr "la baseline non indica la fonte di alimentazione: scritture sulla CPU rifiutate fino al prossimo avvio"
+
+msgid "on battery: the firmware's limits apply until AC power is back or the next boot (the baseline was captured on AC power: CPU writes refused)"
+msgstr "a batteria: valgono i limiti del firmware finché non torna l'alimentatore o fino al prossimo avvio (la baseline è stata letta con l'alimentatore: scritture sulla CPU rifiutate)"
+
+msgid "on AC power: the firmware's limits apply until back on battery or the next boot (the baseline was captured on battery: CPU writes refused)"
+msgstr "con l'alimentatore: valgono i limiti del firmware finché non si torna a batteria o fino al prossimo avvio (la baseline è stata letta a batteria: scritture sulla CPU rifiutate)"
+
+msgid "AC power"
+msgstr "alimentatore"
+
+msgid "battery"
+msgstr "batteria"
+
+#, python-format
+msgid "Laptop  on %s, baseline captured on %s"
+msgstr "Portatile  su %s, baseline letta su %s"
+
+#, python-format
+msgid "; re-applying stopped %s: %s"
+msgstr "; riapplicazione interrotta %s: %s"
+
+msgid "usage: reapply"
+msgstr "uso: reapply"
+
+msgid "the firmware keeps overriding the limits"
+msgstr "il firmware continua a sovrascrivere i limiti"
