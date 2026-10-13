@@ -14,7 +14,7 @@ jobs:
     steps:
       - name: Build dependencies
         run: dnf install -y git make rpm-build rpmdevtools systemd-rpm-macros python3
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Tag matches VERSION
         run: |
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
@@ -25,7 +25,7 @@ jobs:
       - name: RPM
         run: make rpm
       - name: Release with the RPM attached
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.rpm
@@ -37,11 +37,11 @@ jobs:
     runs-on: ubuntu-latest
     container: debian:trixie
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and check the .deb (lintian)
         run: sh packaging/build-deb.sh dist
       - name: Attach to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.deb
   arch:
@@ -49,10 +49,10 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Build and check the Arch package (makepkg, namcap)
         run: sh packaging/build-arch.sh dist
       - name: Attach to the release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: dist/*.pkg.tar.zst
