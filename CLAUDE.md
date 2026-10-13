@@ -90,7 +90,9 @@ containers by `packaging/build-deb.sh` / `build-arch.sh` (`make deb`, `make arch
 of the release workflow): lintian clean, namcap warnings expected (empty state dirs, the python3 shebang,
 runtime-only deps); installed, selftest and removed in Debian 13, Ubuntu 24.04 and Arch containers; not used
 on real Debian/Ubuntu/Arch hardware. `make check` fails if VERSION differs in the spec, debian/changelog or
-PKGBUILD.
+PKGBUILD. The repository's GitHub releases are immutable (no asset can be added after publishing): the
+workflow builds the three packages in parallel as artifacts and one `release` job publishes them together
+(v0.7.0 has the RPM only; v0.7.1 is the first with all three).
 
 Lessons from the hardware: the PM table reflects a new limit after tens of ms → readback with
 a wait (`READBACK_WAIT`); the baseline is recaptured only at boot, so after an update that
