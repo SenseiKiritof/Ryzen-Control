@@ -593,3 +593,6 @@ msgstr "systemd non può gestirlo (RuntimeWatchdogUSec)"
 
 msgid "systemd did not take the watchdog"
 msgstr "systemd non ha preso il watchdog"
+
+msgid "laptop detected (%s): laptop processors are not supported yet, even when the driver reports them as the desktop %s"
+msgstr "rilevato un portatile (%s): i processori per portatili non sono ancora supportati, anche quando il driver li presenta come il desktop %s"

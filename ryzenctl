@@ -560,7 +560,28 @@ def family():
             code, ", ".join("%s %d" % (f["name"], c) for c, f in sorted(FAMILIES.items()))))
     if not CORES:
         raise Err(_("CPU topology not readable (/sys/devices/system/cpu)"))
+    if not FAMILIES[code].get("mobile") and system_battery():
+        # the driver reports the HX laptop CPUs as desktops (Dragon Range as Raphael, Fire Range as Granite
+        # Ridge: same CPUID model): firmware, EC and battery limits of a laptop are not handled
+        raise Err(_("laptop detected (%s): laptop processors are not supported yet, even when the driver reports "
+                    "them as the desktop %s") % (system_battery(), FAMILIES[code]["name"]))
     return FAMILIES[code]
+
+
+def system_battery():
+    """The name of a battery that powers the machine (a laptop), or None; the batteries of devices (a wireless
+    mouse: scope "Device") do not count."""
+    d = P("/sys/class/power_supply")
+    for n in sorted(os.listdir(d) if os.path.isdir(d) else []):
+        try:
+            if read_text("/sys/class/power_supply/%s/type" % n) != "Battery":
+                continue
+            scope = read_text("/sys/class/power_supply/%s/scope" % n) if os.path.exists("%s/%s/scope" % (d, n)) else "System"
+        except OSError:
+            continue
+        if scope != "Device":
+            return n
+    return None
 
 
 def smu(name, *args):
@@ -4292,6 +4313,17 @@ def selftest_variants():
     assert "ppt 88" in pl and "tdc 75" in pl and "edc 150" in pl, pl
     expect_err(["preset", "auto", "show"], "motherboard limits")
     expect_err(["autotune", "start", "auto", "step=3"], "motherboard limits")
+    # ---- a laptop: an HX CPU is reported as the desktop family by the driver; refused while a system battery
+    # exists, the battery of a device (a wireless mouse, scope Device) does not count ----
+    for name, files in (("hidpp_battery_0", {"type": "Battery", "scope": "Device"}), ("BAT0", {"type": "Battery"})):
+        os.makedirs(P("/sys/class/power_supply/" + name))
+        for k, v in files.items():
+            with open(P("/sys/class/power_supply/%s/%s" % (name, k)), "w") as fh:
+                fh.write(v + "\n")
+        if name == "hidpp_battery_0":
+            assert run(["status"])["cpu"] == "Granite Ridge"
+    expect_err(["status"], "laptop detected (BAT0)")
+    expect_err(["co", "0", "-5"], "laptop detected")
     # ---- custom calibration: from a base mode, saved under its own name; the mode's profile and the shared
     # CO measurement stay as they are (the user keeps the Auto that works while trying other parameters) ----
     ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-custom-")

@@ -242,6 +242,9 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   0x10 (turns off the display); on Zen 2/3 never RSMU 0x58 (PBO scalar), 0x5A–0x5D (OC mode,
   PROCHOT, OC frequency), 0x61 (OC VID). Never voltage commands, OC mode (RSMU 0x5D), fixed VID (0x61),
   PBO scalar (0x5B), `smn` writes, FCLK/memory.
+- Laptops: a system battery (`system_battery`, power_supply type Battery whose scope is not Device: a wireless
+  mouse does not count) refuses every family not marked `mobile` — the driver reports Dragon Range and Fire
+  Range (HX laptops) as Raphael and Granite Ridge.
 - Gate: the driver's `codename` must be a key of `FAMILIES` (23 Granite Ridge verified; 20 Raphael,
   12 Vermeer, 4 Matisse, 10 Pinnacle Ridge, 9 Summit Ridge not verified), otherwise total refusal
   (`family()`); no readable CPU topology → refusal too. `boost` and `power` are kernel switches

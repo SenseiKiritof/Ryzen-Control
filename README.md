@@ -36,6 +36,7 @@ has written and read back each of its functions; until then it is **expected**: 
 | Ryzen 3000 desktop: 3600 … 3950X | Matisse (4) | expected | PPT/TDC/EDC/Tjmax (PM tables 0x240803/0x240903), Quiet and Performance, Quiet also turns the boost off; no Curve Optimizer, so no calibrated modes |
 | Ryzen 1000/2000 desktop | Summit Ridge (9), Pinnacle Ridge (10) | expected | boost switch, power profile and fans only: no SMU command (no Curve Optimizer, no readable limits); Tdie instead of Tctl on the X models with an offset |
 | APUs and laptops (Ryzen G, mobile, Ryzen AI) | Raven Ridge … Strix Halo | not supported | other limits (STAPM, fast/slow PPT), often no RSMU mailbox |
+| HX laptops: 7945HX, 9955HX … | Dragon Range, Fire Range (reported by the driver as Raphael / Granite Ridge) | not supported | refused when the machine has a system battery (a laptop): its firmware and battery limits are not handled |
 | Threadripper, EPYC | — | not supported | other interface (HSMP), out of scope |
 
 Fans depend on the motherboard (Nuvoton nct67xx chip), not on the processor.
