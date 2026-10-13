@@ -4226,11 +4226,18 @@ def selftest_watchdog():
         FAKE.save()
 
     def serve(requests):
+        out = io.StringIO()
+
+        def lines():   # each request after the previous reply: an abort read at once would race `start`, which clears its flag
+            for i, r in enumerate(requests):
+                while out.getvalue().count("\n") < i:
+                    time.sleep(0.005)
+                yield json.dumps(r) + "\n"
         stdin, stdout = sys.stdin, sys.stdout
-        sys.stdin, sys.stdout = io.StringIO("".join(json.dumps(r) + "\n" for r in requests)), io.StringIO()
+        sys.stdin, sys.stdout = lines(), out
         try:
             run(["serve"])
-            return [(json.loads(l).get("data") or {}).get("watchdog") for l in sys.stdout.getvalue().splitlines()]
+            return [(json.loads(l).get("data") or {}).get("watchdog") for l in out.getvalue().splitlines()]
         finally:
             sys.stdin, sys.stdout = stdin, stdout
     import io
