@@ -305,14 +305,16 @@ retry them. After a forced reboot the interrupted step is marked unstable as soo
 development 9800X3D: with the heaviest method in the search the per-core limit is −35 (−40 froze
 the system), and the final pass at −29 on all cores is stable; one CO step is worth ≈ 3.4 mV.
 
-**Hardware watchdog**: while a calibration or a verification runs from the GUI, `ryzenctl serve` arms
-the motherboard watchdog (e.g. the SP5100 TCO timer, 60 s) and keeps it alive every 10 s. On Ryzen 9000
-a too-negative CO freezes the PC instead of rebooting it: with the watchdog the board resets by itself
-within the timeout, and the calibration resumes with that step marked unstable. It is never armed if it
-could not be stopped again (`nowayout`), if the system already uses it (systemd `RuntimeWatchdogSec`),
-without "magic close", or with `watchdog=0`; the calibration window shows its state. Every way out
-(end, Stop, window closed, logout) stops it with the magic close and checks that it stopped. If the
-helper is killed with SIGKILL during a calibration, the PC resets after the timeout (handled as a crash).
+**Hardware watchdog**: while a calibration or a verification runs from the GUI, `ryzenctl serve` hands
+the motherboard watchdog (e.g. the SP5100 TCO timer) to systemd for the duration of the run
+(`RuntimeWatchdogUSec` = 60 s): PID 1 pings it as long as the system lives. On Ryzen 9000 a
+too-negative CO freezes the PC instead of rebooting it: with the watchdog the board resets by itself
+within 60 s, and the calibration resumes with that step marked unstable (proven on the development
+board). If only Ryzen Control dies or is killed, nothing resets: the step it was running counts as a
+crash when it starts again, the CO under test goes back to the stock value, and the watchdog it left
+with systemd is released. It is never taken if it could not be stopped again (`nowayout`), if systemd
+already drives it (`RuntimeWatchdogSec` set by you: the PC is protected anyway), if another program
+holds it, or with `watchdog=0`; the calibration window shows its state.
 
 **Warning**: an unstable CO can reboot the PC during the calibration (no damage, unsaved work
 lost). The state is on disk: at reboot the interrupted step is marked unstable and the

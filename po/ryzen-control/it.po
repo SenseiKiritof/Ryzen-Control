@@ -990,8 +990,8 @@ msgstr "core %s +%d"
 msgid ", single-core test of core %s"
 msgstr ", test single-core del core %s"
 
-msgid "During a calibration or a verification ryzenctl keeps the motherboard watchdog armed: if the PC freezes, it restarts by itself after the timeout and the run resumes from where it was, with that step recorded as unstable."
-msgstr "Durante una calibrazione o una verifica ryzenctl tiene armato il watchdog della scheda madre: se il PC si blocca, si riavvia da solo allo scadere del timeout e la prova riprende da dove era, con quel passo registrato come instabile."
+msgid "During a calibration or a verification the motherboard watchdog is handed to systemd: if the PC freezes, it restarts by itself after the timeout and the run resumes from where it was, with that step recorded as unstable. If only Ryzen Control closes or crashes, nothing restarts: the step counts as a crash when it opens again."
+msgstr "Durante una calibrazione o una verifica il watchdog della scheda madre viene affidato a systemd: se il PC si blocca, si riavvia da solo allo scadere del tempo e la prova riprende da dov'era, con quel passo registrato come instabile. Se si chiude o va in crash solo Ryzen Control, non si riavvia nulla: alla riapertura il passo conta come crash."
 
 #, python-format
 msgid "Hardware watchdog: %s"

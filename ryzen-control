@@ -103,8 +103,9 @@ AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimiz
 AT_PARALLEL_SUB = _("Off: one core at a time, slower (%s) but attributes even a reboot with certainty")
 AT_SINGLE_SUB = _("One thread alone on each core, from idle to the highest boost: catches the CO instability that all-core "
                   "loads miss. A core that fails is raised alone. Adds %s")
-WD_TIP = _("During a calibration or a verification ryzenctl keeps the motherboard watchdog armed: if the PC freezes, it "
-           "restarts by itself after the timeout and the run resumes from where it was, with that step recorded as unstable.")
+WD_TIP = _("During a calibration or a verification the motherboard watchdog is handed to systemd: if the PC freezes, it restarts "
+           "by itself after the timeout and the run resumes from where it was, with that step recorded as unstable. If only "
+           "Ryzen Control closes or crashes, nothing restarts: the step counts as a crash when it opens again.")
 VERIFY_TEXT = _("The saved profile is applied, then every core is tested alone (one thread, from idle to the highest boost) and "
                 "then all cores together, over and over until the time is up; CO and limits are never changed during the run. "
                 "A core that fails is reported and the proposal raises only that core (+3, less negative). An unstable CO can "

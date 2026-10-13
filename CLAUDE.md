@@ -230,10 +230,12 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   the core fuses, read through the driver's `smn` file (4-byte write = read; **never** the 8-byte
   write) only at the fuse addresses of the family entry, and only if they match the sysfs topology;
   otherwise CO, calibrations and the CO step of `hwtest` are refused/skipped.
-- Hardware watchdog (`Watchdog`): armed only by `serve` while a calibration/verification runs, never
-  with `nowayout`, when already active, without magic close or with `watchdog=0`; every exit path
-  (done, abort, error, EOF, SIGTERM/SIGHUP/SIGINT) does the magic close and checks the sysfs state; a
-  timer that keeps running is reopened and kept alive, never left armed without a keepalive.
+- Hardware watchdog (`Watchdog`): handed to systemd (`RuntimeWatchdogUSec` via busctl, `WD_SEC`) only by
+  `serve` while a calibration/verification runs, never with `nowayout`, when systemd already drives it,
+  when another program holds it, or with `watchdog=0`; released (property back to 0) at done, abort,
+  error, end of input. A `serve` that dies leaves it with systemd (PID 1 keeps pinging: no reset); the
+  next ryzenctl releases it (`wd_cleanup`, owner pid in `/run/ryzenctl/watchdog`) and the step of a dead
+  process counts as a crash (`in_progress` carries the pid; same boot → baseline CPU applied first).
 - Every SMU transaction under `flock(/run/ryzenctl/lock)` (the driver's `smu_args` is global).
 - Every write is followed by a readback; mismatch → one retry → restore of the baseline value →
   error. No automatic fallback to other IDs.
