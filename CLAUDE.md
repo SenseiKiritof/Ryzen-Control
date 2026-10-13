@@ -100,8 +100,9 @@ agent, reviewed): the APU entries are `mobile`, the baseline records the power s
 that `reapply_mark` keeps only on a laptop with autostart and a profile changing a limit) writes back the
 drifted limits and gives up after `REAPPLY_MAX` corrections in `REAPPLY_WINDOW` s (state `/run/ryzenctl/reapply.json`,
 read by the Monitor and the tray); a limit set by hand (`limit_setter` outside a profile) or a save of the
-selected profile stops it until the next apply. Version 0.8.0 (the RPM's `%triggerun` presets the new timer on
-upgrades from < 0.8.0).
+selected profile stops it until the next apply. **Phase 8 closed, tag `v0.8.0`** (2026-10-13) after the regression
+check on the 9800X3D: `hwtest` ok, a mode and Default applied, the timer enabled by the RPM's `%triggerun` on the
+upgrade from 0.7.1, firing every 10 s and silent in the journal (no flag on a desktop).
 The repository's GitHub releases are immutable (no asset can be added after publishing): the
 workflow builds the three packages in parallel as artifacts and one `release` job publishes them together
 (v0.7.0 has the RPM only; v0.7.1 is the first with all three).
