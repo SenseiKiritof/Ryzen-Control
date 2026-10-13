@@ -318,6 +318,12 @@ def crash_story(st, cores):
     span = AutotuneDialog.co_span
     crashed = [u["value"] for u in (st.get("unstable") or {}).values() if u.get("why") == "crash"]
     fails = [f for f in (st.get("final_failures") or []) if f.get("why") == "crash"]
+    if (st.get("params") or {}).get("retry"):   # custom "retry": the measurement's lockup is ignored, as the user chose
+        if not fails:                            # (its +3 is not added), only a lockup of this run tells a story
+            return _("The lockup of the measurement at CO %s is ignored, as you chose: the final pass starts from the last "
+                     "stable value + margin, at CO %s.") % (AutotuneDialog.co_span(crashed), AutotuneDialog.co_span(
+                         AutotuneDialog.final_values(st, cores))) if crashed else ""
+        crashed = []
     if not crashed and not fails:
         return ""
     last = fails[-1] if fails else {}
@@ -1178,7 +1184,7 @@ class AutotuneDialog(Adw.Window):
         if st.get("error"):
             self.result.append(label(st["error"], ["warning"], wrap=True))
         tries = st.get("final_tries", 0)
-        crashed = any(u.get("why") == "crash" for u in (st.get("unstable") or {}).values())
+        crashed = any(u.get("why") == "crash" for u in (st.get("unstable") or {}).values()) and not st.get("params", {}).get("retry")
         if (tries or crashed) and st.get("final") and not self.verify:
             why = []
             if tries:
@@ -2499,6 +2505,11 @@ class App(Adw.Application):
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
                             "results": {str(c): -35 for c in range(win.status["cores"])}, "unstable": {"0": {"value": -40, "why": "crash"}}})
+            measured = {"mode": "auto", "phase": "final", "params": {"margin": 3, "retry": 1}, "final_margin": 3,
+                        "results": {str(c): -35 for c in range(win.status["cores"])}, "unstable": {"0": {"value": -40, "why": "crash"}}}
+            assert crash_story(measured, win.status["cores"]) == _(
+                "The lockup of the measurement at CO %s is ignored, as you chose: the final pass starts from the last stable value + margin, "
+                "at CO %s.") % ("-40", "-32"), "retry: the measurement's lockup must be told as ignored"
             win.ask_resume({"mode": "auto", "phase": "final", "single": 1, "started": "today", "params": {"margin": 3}, "final_margin": 3,
                             "core_margin": {"1": 3}, "results": {str(c): -35 for c in range(win.status["cores"])}, "unstable": {},
                             "final_failures": [{"values": [-32] * win.status["cores"], "why": "crash", "core": 1}]})

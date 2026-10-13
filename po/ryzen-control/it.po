@@ -1152,3 +1152,6 @@ msgstr "Il crash della misura viene ignorato: il passaggio finale riparte dall'u
 
 msgid "When the reused measurement ended with a crash (or a final pass failed), the final pass normally starts 3 steps further away and skips what failed. On: from the last stable value + margin again; a freeze is possible (the watchdog resets the PC, the crash is recorded)."
 msgstr "Quando la misura riusata è finita con un crash (o un passaggio finale è fallito), di norma il passaggio finale parte 3 passi più lontano e salta ciò che è fallito. Attivo: riparte dall'ultimo valore stabile + margine; un blocco è possibile (il watchdog riavvia il PC, il crash viene registrato)."
+
+msgid "The lockup of the measurement at CO %s is ignored, as you chose: the final pass starts from the last stable value + margin, at CO %s."
+msgstr "Il blocco della misura a CO %s viene ignorato, come hai scelto: il passaggio finale parte dall'ultimo valore stabile + margine, a CO %s."
