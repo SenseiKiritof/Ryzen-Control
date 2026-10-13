@@ -301,12 +301,17 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
 
 ## Workflow
 
-- Local git repo, branches `main` (init only) and `dev` (development), no remote until the user
-  names one.
+- Branches `dev` (development) and `main` (releases only); remote `origin` =
+  https://github.com/SenseiKiritof/Ryzen-Control (public). The user pushes (`git push origin main dev vX.Y.Z`),
+  never push from here.
 - Step-by-step development following the plan's "Phases and commits" table: one commit per step,
   **only after verifying** the step (`make check` at least). Failed verification → fix it, no commit.
 - Conventional prefix (`feat/fix/build/docs/chore/test`), message in English prose,
   `Co-Authored-By` line required by the environment.
 - Tags `v0.1.0`, `v0.2.0`, … at the end of every phase verified on hardware; the tag version is
-  the one of `VERSION` in the Makefile and of the RPM spec (keep them aligned).
+  the one of `VERSION` in the Makefile and of the RPM spec (keep them aligned). Release: `main` gets a
+  `--no-ff` merge of `dev` titled "Version X.Y.Z: …" and the annotated tag `vX.Y.Z` ("Ryzen Control X.Y.Z").
+  Before the push the user may ask to move them (rebuild the merge on the old `main`, `git tag -f -a`); once
+  pushed, never: the tag starts the release workflow and GitHub releases are immutable. `gh` is not
+  installed: check the run and the assets with curl on api.github.com.
 - Deliberate simplifications with a known ceiling are marked with a `# ponytail:` comment.
