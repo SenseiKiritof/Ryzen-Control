@@ -65,7 +65,11 @@ default on), hardware watchdog during a calibration, `autotune verify` — done 
 custom calibrations, `autotune start <mode> name=<profile>`: saved under their own name, never over
 eco/auto/boost, and their CO search never written over the shared `co_limits.json`; listed in
 `settings.calibrated` (status `calibrated`) with the base mode; GUI "Custom" row in the Calibrated
-column; `retry=1` (custom only) ignores the reused measurement's crash margin and recorded failures. Tag `v0.5.0` after the hardware checks of the watchdog and the single-core phase.
+column; `retry=1` (custom only) ignores the reused measurement's crash margin and recorded failures.
+**Phase 5 closed, tag `v0.5.0`** (2026-10-13), on the 9800X3D: `hwtest` ok, watchdog armed and
+disarmed by `serve` (the forced-reset test was skipped: whether this board resets on the TCO timer is
+unproven), a custom calibration from Auto with the single-core test passed at −29 on every core
+(PPT 114 W, FMax 4750).
 Next: phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
