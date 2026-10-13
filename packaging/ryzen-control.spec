@@ -2,11 +2,12 @@ Name:           ryzen-control
 # DKMS module version: changes only with the source in ryzen_smu/ (= DRV_VERSION in the Makefile);
 # this way an app release does not rebuild the module.
 %global drv_version 0.4.1
-Version:        0.4.5
-Release:        1%{?dist}
-Summary:        Curve Optimizer, PBO limits, boost and fans for Ryzen 9000 (Granite Ridge)
+Version:        0.5.0
+Release:        3%{?dist}
+Summary:        Curve Optimizer, PBO limits, boost and fans for AMD Ryzen desktop CPUs
 # App GPL-3.0-or-later; bundled ryzen_smu driver (ryzen_smu/) GPL-2.0-only.
 License:        GPL-3.0-or-later AND GPL-2.0-only
+URL:            https://github.com/SenseiKiritof/Ryzen-Control
 Source0:        %{name}-%{version}.tar.gz
 BuildArch:      noarch
 
@@ -32,7 +33,8 @@ Provides:       ryzen-smu-dkms = %{version}-%{release}
 %{?systemd_requires}
 
 %description
-Ryzen Master-style control for AMD Ryzen 9000 (Granite Ridge) on Linux:
+Ryzen Master-style control for AMD Ryzen desktop processors on Linux
+(Ryzen 9000 verified, Ryzen 1000-7000 expected):
 per-core Curve Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost
 frequency and maximum temperature, power profile and motherboard fans.
 Profiles applied at boot with protection after a crash: the profile is
@@ -122,6 +124,32 @@ dkms remove -m ryzen_smu -v %{drv_version} -q --all --rpm_safe_upgrade || :
 %ghost %config(noreplace) %{_sysconfdir}/dkms/framework.conf.d/ryzen-smu-akmods.conf
 
 %changelog
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-3
+- Custom calibrations can retry from the last stable value, ignoring the crash of the measurement
+- The single-core test is chosen in the first calibration dialog, at every start
+
+* Tue Oct 13 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-2
+- Ryzen 5000 (Curve Optimizer -30..+30, limits), Ryzen 3000 (limits) and Ryzen 1000/2000 (boost,
+  power, fans) recognised, not verified yet; FMax optional; boost on/off through the kernel; Tdie on
+  the X parts with an offset; motherboard limits in the BIOS: Quiet/Eco on AMD's Eco mode values
+- Calibration: each core alone in the final pass (choice, on by default), hardware watchdog while a
+  calibration runs from the GUI, Verify of a saved profile, custom calibrations saved under their
+  own name (Eco/Auto/Boost and their measurement untouched)
+- Fixes: second-CCD presence bit in the fuse map, per-core PM table values by physical slot
+
+* Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.5.0-1
+- Other Ryzen CPUs: per-family SMU allowlist (Granite Ridge verified, other Ryzen 9000 and
+  Raphael expected), cores from the system topology, core fuses for CCDs with disabled cores;
+  README table of the processors and the hwtest procedure to verify a new one
+
+* Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.4.5-3
+- Per-core Curve Optimizer also on CPUs with disabled cores (physical positions from the core
+  fuses, read-only); the GUI shows and uses only the active cores and the CPU family
+
+* Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.4.5-2
+- Raphael (Ryzen 7000) recognised, not verified yet: Curve Optimizer and FMax; per-core Curve
+  Optimizer refused on CPUs with disabled cores (the physical core is not known)
+
 * Mon Oct 12 2026 senseikiritof <tonifede98@gmail.com> - 0.4.5-1
 - Groundwork for other Ryzen CPUs: per-family SMU allowlist and PM table, cores from the system
   topology, Curve Optimizer mask with the CCD; nothing changes on the 9800X3D

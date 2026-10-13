@@ -346,8 +346,8 @@ msgstr "Tempo rimanente stimato: %s"
 msgid "Every channel with rpm > 0 is brought to a reduced PWM for about 30 seconds under load (stress-ng), with Tctl monitored: a pump is recognised by the rise in temperature. Duration: about 30 s per channel. At the end the channels go back to how they were."
 msgstr "Ogni canale con giri > 0 viene portato a un PWM ridotto per circa 30 secondi sotto carico (stress-ng), con Tctl sorvegliata: una pompa si riconosce dall'aumento di temperatura. Durata: circa 30 s per canale. Al termine i canali tornano come erano."
 
-msgid "Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays stable, then a final pass on all cores; finally, for Auto the performance/watt knee, for Boost the measurement of the gain (MT and ST) over stock, while Eco takes the reduced limits of its preset. The CO limit search is shared by Eco, Auto and Boost and later calibrations reuse it; Eco also reuses a final pass already passed at the same CO (for example Auto's) without any load test. An unstable CO can reboot the PC without warning: save everything before starting. The machine stays usable but slowed down; the calibration resumes from where it was."
-msgstr "Ogni core viene portato a CO (Curve Optimizer) sempre più negativo sotto carico (stress-ng) finché resta stabile, poi una passata finale su tutti i core; infine, per Auto il ginocchio prestazioni/watt, per Boost la misura del guadagno (MT e ST) rispetto alla fabbrica, mentre Eco prende i limiti ridotti del suo preset. La ricerca del limite CO è unica per Eco, Auto e Boost e le calibrazioni successive la riusano; Eco riusa anche una passata finale già superata allo stesso CO (per esempio quella di Auto) senza alcun test di carico. Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. La macchina resta usabile ma rallentata; la calibrazione riprende da dove era."
+msgid "Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays stable, then a final pass on all cores and on each core alone; finally, for Auto the performance/watt knee, for Boost the measurement of the gain (MT and ST) over stock, while Eco takes the reduced limits of its preset. The CO limit search is shared by Eco, Auto and Boost and later calibrations reuse it; Eco also reuses a final pass already passed at the same CO (for example Auto's) without any load test. An unstable CO can reboot the PC without warning: save everything before starting. The machine stays usable but slowed down; the calibration resumes from where it was."
+msgstr "Ogni core viene portato a CO (Curve Optimizer) sempre più negativo sotto carico (stress-ng) finché resta stabile, poi una passata finale su tutti i core e su ogni core da solo; infine, per Auto il ginocchio prestazioni/watt, per Boost la misura del guadagno (MT e ST) rispetto alla fabbrica, mentre Eco prende i limiti ridotti del suo preset. La ricerca del limite CO è unica per Eco, Auto e Boost e le calibrazioni successive la riusano; Eco riusa anche una passata finale già superata allo stesso CO (per esempio quella di Auto) senza alcun test di carico. Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. La macchina resta usabile ma rallentata; la calibrazione riprende da dove era."
 
 msgid "FMax"
 msgstr "FMax"
@@ -515,8 +515,17 @@ msgid "Performance"
 msgstr "Performance"
 
 #, python-format
-msgid "Performance/watt knee: PPT %d W, FMax %d MHz (maximum loss %d %%)"
-msgstr "Ginocchio prestazioni/watt: PPT %d W, FMax %d MHz (perdita massima %d %%)"
+msgid "Performance/watt knee: PPT %d W%s (maximum loss %d %%)"
+msgstr "Ginocchio prestazioni/watt: PPT %d W%s (perdita massima %d %%)"
+
+msgid ", FMax %d MHz"
+msgstr ", FMax %d MHz"
+
+msgid "Calibrated modes measure the per-core Curve Optimizer, not available on this CPU: %s"
+msgstr "Le modalità calibrate misurano il Curve Optimizer per core, non disponibile su questa CPU: %s"
+
+msgid "Precision Boost (kernel switch): off keeps the clock at the base frequency, the frequency lever of CPUs without FMax"
+msgstr "Precision Boost (interruttore del kernel): spento tiene la frequenza base, la leva sulla frequenza delle CPU senza FMax"
 
 msgid "Polkit rule for your user, only for Ryzen Control in the local session: the password is needed once to write it, then never again"
 msgstr "Regola polkit per il tuo utente, solo per Ryzen Control nella sessione locale: la prima volta la password serve per scriverla, poi mai più"
@@ -939,3 +948,207 @@ msgstr "Silenziose: salita 10 s, discesa 5 s, minimo fino a Tctl obiettivo −10
 
 msgid "Also in automatic mode: how much the mode touches the fans (only the channels recognised as fans)"
 msgstr "Anche in automatico: quanto la modalità tocca le ventole (solo i canali riconosciuti come ventola)"
+
+msgid "Curve Optimizer not available on this CPU: %s"
+msgstr "Curve Optimizer non disponibile su questa CPU: %s"
+
+#, python-format
+msgid "%s · %d cores"
+msgstr "%s · %d core"
+
+msgid "Family not verified on hardware yet: run the Hardware check in Preferences"
+msgstr "Famiglia non ancora verificata sull'hardware: esegui la Verifica hardware nelle Preferenze"
+
+#, python-format
+msgid "One thread alone on each core, from idle to the highest boost: catches the CO instability that all-core loads miss. A core that fails is raised alone. Adds %s"
+msgstr "Un solo thread su ogni core, da inattivo al boost massimo: scopre l'instabilità del CO che i carichi su tutti i core non vedono. Un core che fallisce viene alzato da solo. Aggiunge %s"
+
+msgid "Single-core test in the final pass"
+msgstr "Test single-core nella passata finale"
+
+#, python-format
+msgid "in the single-core test of core %d at CO %d"
+msgstr "nel test single-core del core %d a CO %d"
+
+#, python-format
+msgid "Final pass, single-core test: core %d alone at CO %d (%d of %d)…"
+msgstr "Passata finale, test single-core: core %d da solo a CO %d (%d di %d)…"
+
+#, python-format
+msgid "Core %d failed alone at CO %d (%s): +3 on that core only and a new final pass"
+msgstr "Il core %d è fallito da solo a CO %d (%s): +3 solo su quel core e una nuova passata finale"
+
+#, python-format
+msgid "Raised alone after failing the single-core test: %s"
+msgstr "Alzati da soli dopo aver fallito il test single-core: %s"
+
+#, python-format
+msgid "core %s +%d"
+msgstr "core %s +%d"
+
+#, python-format
+msgid ", single-core test of core %s"
+msgstr ", test single-core del core %s"
+
+msgid "During a calibration or a verification ryzenctl keeps the motherboard watchdog armed: if the PC freezes, it restarts by itself after the timeout and the run resumes from where it was, with that step recorded as unstable."
+msgstr "Durante una calibrazione o una verifica ryzenctl tiene armato il watchdog della scheda madre: se il PC si blocca, si riavvia da solo allo scadere del timeout e la prova riprende da dove era, con quel passo registrato come instabile."
+
+#, python-format
+msgid "Hardware watchdog: %s"
+msgstr "Watchdog hardware: %s"
+
+msgid "The saved profile is applied, then every core is tested alone (one thread, from idle to the highest boost) and then all cores together, over and over until the time is up; CO and limits are never changed during the run. A core that fails is reported and the proposal raises only that core (+3, less negative). An unstable CO can reboot the PC without warning: save everything before starting. At the end the CPU goes back to the stock values."
+msgstr "Il profilo salvato viene applicato, poi ogni core viene provato da solo (un thread, da inattivo al boost massimo) e poi tutti i core insieme, a ripetizione fino allo scadere del tempo; CO e limiti non vengono mai cambiati durante la prova. Un core che fallisce viene segnalato e la proposta alza solo quel core (+3, meno negativo). Un CO instabile può riavviare il PC all'improvviso: salva tutto prima di iniziare. Al termine la CPU torna ai valori di fabbrica."
+
+msgid "30 min"
+msgstr "30 min"
+
+msgid "1 h"
+msgstr "1 h"
+
+msgid "3 h"
+msgstr "3 h"
+
+msgid "8 h"
+msgstr "8 h"
+
+msgid "verification"
+msgstr "verifica"
+
+#, python-format
+msgid "%s verification"
+msgstr "Verifica %s"
+
+msgid "The system rebooted during the test of a core: that core is recorded as failed (crash) and no longer tested; after a reboot the profile is applied again."
+msgstr "Il sistema si è riavviato durante la prova di un core: quel core è registrato come fallito (crash) e non viene più provato; dopo un riavvio il profilo viene applicato di nuovo."
+
+#, python-format
+msgid "Verifying core %d alone at CO %d (iteration %d of %d)…"
+msgstr "Verifica del core %d da solo a CO %d (iterazione %d di %d)…"
+
+#, python-format
+msgid "Verifying all cores together (iteration %d of %d)…"
+msgstr "Verifica di tutti i core insieme (iterazione %d di %d)…"
+
+#, python-format
+msgid "Failed: %s. The proposal raises only those cores by +3 (less negative)."
+msgstr "Falliti: %s. La proposta alza solo quei core di +3 (meno negativo)."
+
+#, python-format
+msgid "core %s at CO %d (%s)"
+msgstr "core %s a CO %d (%s)"
+
+#, python-format
+msgid "No core failed (iterations completed: %d of %d; every core alone, then all together)."
+msgstr "Nessun core è fallito (iterazioni completate: %d di %d; ogni core da solo, poi tutti insieme)."
+
+#, python-format
+msgid "%s profile: stock → proposed"
+msgstr "Profilo %s: fabbrica → proposto"
+
+msgid "Verification complete: discard the proposal, save it, or save and apply?"
+msgstr "Verifica completata: annullare la proposta, salvarla o salvarla e applicarla?"
+
+msgid "Verification passed: nothing to change"
+msgstr "Verifica superata: niente da cambiare"
+
+msgid "Apply the profile"
+msgstr "Applica il profilo"
+
+msgid "Ends the verification now: result and proposal from the tests done so far"
+msgstr "Termina subito la verifica: risultato e proposta dalle prove fatte finora"
+
+msgid "Verification discarded, CPU at baseline"
+msgstr "Verifica annullata, CPU a baseline"
+
+msgid "Verify…: long stability test of the saved profile (each core alone, then all together)"
+msgstr "Verifica…: lunga prova di stabilità del profilo salvato (ogni core da solo, poi tutti insieme)"
+
+msgid "Duration"
+msgstr "Durata"
+
+#, python-format
+msgid "Verify the %s profile?"
+msgstr "Verificare il profilo %s?"
+
+msgid "none"
+msgstr "nessuno"
+
+msgid "Verification interrupted"
+msgstr "Verifica interrotta"
+
+#, python-format
+msgid "The verification of the %s profile started on %s was left halfway (iteration %d of %d). Failed so far: %s. A core that locked up the system is recorded as failed and no longer tested. Continue the verification, see the result now, or discard it and stay on the stock values?"
+msgstr "La verifica del profilo %s iniziata il %s è rimasta a metà (iterazione %d di %d). Falliti finora: %s. Un core che ha bloccato il sistema è registrato come fallito e non viene più provato. Continuare la verifica, vedere subito il risultato o annullarla restando ai valori di fabbrica?"
+
+msgid "Show the result"
+msgstr "Mostra il risultato"
+
+msgid "Continue verification"
+msgstr "Continua la verifica"
+
+msgid "Verification stopped early: no core failed in the tests done"
+msgstr "Verifica fermata prima del termine: nessun core è fallito nelle prove fatte"
+
+msgid "'%s' exists: it is replaced when you save the result"
+msgstr "'%s' esiste: viene sostituito quando salvi il risultato"
+
+msgid "; it is the active mode: the stock values are applied"
+msgstr "; è la modalità attiva: vengono applicati i valori di fabbrica"
+
+msgid "Boost as a base needs \"Allow beyond the stock values\" (Preferences)."
+msgstr "Boost come base richiede «Consenti oltre i valori di fabbrica» (Preferenze)."
+
+msgid "Calibrations from Eco, Auto or Boost with your parameters, each saved as a new profile: the three modes stay as they are"
+msgstr "Calibrazioni da Eco, Auto o Boost con i tuoi parametri, ognuna salvata come nuovo profilo: le tre modalità restano come sono"
+
+msgid "Continue…"
+msgstr "Continua…"
+
+msgid "Custom calibration"
+msgstr "Calibrazione personalizzata"
+
+msgid "Custom calibration '%s' deleted"
+msgstr "Calibrazione personalizzata '%s' eliminata"
+
+msgid "Custom calibration from %s → %s"
+msgstr "Calibrazione personalizzata da %s → %s"
+
+msgid "Delete"
+msgstr "Elimina"
+
+msgid "Delete '%s'?"
+msgstr "Eliminare '%s'?"
+
+msgid "Delete this custom calibration"
+msgstr "Elimina questa calibrazione personalizzata"
+
+msgid "Name of the new profile"
+msgstr "Nome del nuovo profilo"
+
+msgid "Only a-z 0-9 - _, and not the name of a mode"
+msgstr "Solo a-z 0-9 - _, e non il nome di una modalità"
+
+msgid "Pick the base mode and the name of the new profile, then the usual parameters"
+msgstr "Scegli la modalità di partenza e il nome del nuovo profilo, poi i soliti parametri"
+
+msgid "Starting from"
+msgstr "Partendo da"
+
+msgid "The profile of this custom calibration is deleted"
+msgstr "Il profilo di questa calibrazione personalizzata viene eliminato"
+
+msgid "The result is saved as a new profile: Eco, Auto and Boost stay as they are, and a new search of the CO limit does not replace their measurement."
+msgstr "Il risultato viene salvato come nuovo profilo: Eco, Auto e Boost restano come sono, e una nuova ricerca del limite del CO non sostituisce la loro misura."
+
+msgid "from %s, %s"
+msgstr "da %s, %s"
+
+msgid "Retry from the last stable value, ignoring the crash"
+msgstr "Riprova dall'ultimo valore stabile, ignorando il crash"
+
+msgid "The crash of the measurement is ignored: the final pass starts again from the last stable value + margin."
+msgstr "Il crash della misura viene ignorato: il passaggio finale riparte dall'ultimo valore stabile + margine."
+
+msgid "When the reused measurement ended with a crash (or a final pass failed), the final pass normally starts 3 steps further away and skips what failed. On: from the last stable value + margin again; a freeze is possible (the watchdog resets the PC, the crash is recorded)."
+msgstr "Quando la misura riusata è finita con un crash (o un passaggio finale è fallito), di norma il passaggio finale parte 3 passi più lontano e salta ciò che è fallito. Attivo: riparte dall'ultimo valore stabile + margine; un blocco è possibile (il watchdog riavvia il PC, il crash viene registrato)."

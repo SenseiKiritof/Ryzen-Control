@@ -1,5 +1,5 @@
 #!/usr/bin/python3
-"""ryzenctl — privileged helper of Ryzen Control (Ryzen 7 9800X3D, Granite Ridge).
+"""ryzenctl — privileged helper of Ryzen Control (AMD Ryzen desktop; developed on a Ryzen 7 9800X3D).
 
 The only component that talks to the SMU (ryzen_smu driver) and to the fans. Same command
 grammar for the CLI, the profile files and the `serve` protocol. With RYZENCTL_ROOT set it
@@ -58,6 +58,7 @@ POWER_PROFILES = ("power-saver", "balanced", "performance")
 ROOT = os.environ.get("RYZENCTL_ROOT", "")
 SMU_DIR = "/sys/kernel/ryzen_smu_drv"
 HWMON = "/sys/class/hwmon"
+CPUFREQ = "/sys/devices/system/cpu/cpufreq"
 ETC = "/etc/ryzenctl"
 STATE = "/var/lib/ryzenctl"
 RUN = "/run/ryzenctl"
@@ -71,7 +72,10 @@ def P(path):
 # Indexed by the codename of the ryzen_smu driver; a codename that is not here is refused in full
 # (fail closed). A family without a key does not have that function (the command is refused, its
 # ID is never sent). Entries come from ZenStates-Core/ryzen_smu and count as supported only after
-# a `hwtest` on real hardware (phase 5).
+# a `hwtest` on real hardware (phase 5). PM table: limits read only for a version whose prefix
+# (version >> 16) is `pm_prefix` or that is listed in `pm_versions`. `eco_limits`: AMD's 65 W Eco mode
+# (PPT W, TDC A, EDC A), used by Quiet/Eco when the BIOS reports motherboard limits instead of the
+# CPU's (see board_limits). `co_range`: Curve Optimizer range of the family (default CO_MIN..CO_MAX).
 MP1, RSMU = "mp1_smu_cmd", "rsmu_cmd"
 FAMILIES = {
     23: {"name": "Granite Ridge",     # Ryzen 9000 (Zen 5): hwtest ok on the 9800X3D, SMU 98.81.0
@@ -93,8 +97,52 @@ FAMILIES = {
                 "thm_limit": 10, "tctl": 11, "edc_limit": 63},   # float indices in the PM table
          # per-core arrays (first index of core 0), only for versions with a verified layout
          "pm_cores": {0x620105: {"volt": 309, "temp": 317, "mhz": 325}},   # gnr-smu, CONFIRMED
-         "tjmax_max": 95},
+         # core fuses (ZenStates-Core GetTopologyFuses), read only on CCDs with disabled cores
+         "fuses": {"ccd": (0x5D3BC, 0x5D3C0), "core": 0x304A03DC, "stride": 1 << 25},
+         "eco_limits": (88, 75, 150), "tjmax_max": 95, "verified": True},
+    20: {"name": "Raphael",           # Ryzen 7000 (Zen 4): not verified on hardware yet
+         # ZenStates-Core Zen4Settings: the same IDs that Zen5Settings inherits and that are verified on
+         # Granite Ridge above; no Curve Shaper (Zen 5 only)
+         "cmd": {"co_set": (MP1, 0x35), "co_get": (RSMU, 0xD5),
+                 "ppt_set": (MP1, 0x3E), "tdc_set": (MP1, 0x3C), "edc_set": (MP1, 0x3D),
+                 "fmax_set": (RSMU, 0x70), "fmax_get": (RSMU, 0x6E), "tjmax_set": (RSMU, 0x59)},
+         # no verified map of the limits in its PM table (0x54xxxx; ZenStates-Core has only clocks and
+         # voltages): PPT/TDC/EDC/Tjmax have no readback, so they are refused (fail closed)
+         "pm_prefix": None, "pm": None, "pm_cores": {},
+         "fuses": {"ccd": (0x5D3BC, 0x5D3C0), "core": 0x30081CD0, "stride": 1 << 25},
+         "eco_limits": (88, 75, 150), "tjmax_max": 95, "verified": False},
+    12: {"name": "Vermeer",           # Ryzen 5000 (Zen 3): not verified on hardware yet
+         # CO: MP1 0x35/0x48 as used on real 5800X3D/5600X by Linux tools (svenlange2 ruv.py,
+         # linux-corecycler), from PBO2 Tuner's author via ZenStates-Core 4678b3a (ZenStates now reads
+         # with RSMU 0x7C, marked "Not sure": not used). Range −30..+30. Limits: RSMU 0x53–0x56 as sent
+         # by Ryzen Master (ryzen_smu docs/rsmu_commands.md, ZenStates-Core): the MP1 numbering differs
+         # from Zen 4/5 (MP1 0x3E is Tjmax here, PPT there). No FMax set command on Zen 3.
+         "cmd": {"co_set": (MP1, 0x35), "co_get": (MP1, 0x48),
+                 "ppt_set": (RSMU, 0x53), "tdc_set": (RSMU, 0x54), "edc_set": (RSMU, 0x55), "tjmax_set": (RSMU, 0x56)},
+         # header of the four tables (ryzen_monitor pm_tables.c; 0x3808xx tested on a 5900X): limits only;
+         # the per-core arrays are by physical slot, their offsets are not verified
+         "pm_prefix": None, "pm_versions": (0x380804, 0x380805, 0x380904, 0x380905),
+         "pm": {"ppt_limit": 0, "ppt": 1, "tdc_limit": 2, "tdc": 3, "thm_limit": 4, "tctl": 5, "edc_limit": 8},
+         "pm_cores": {},
+         # Zen 3 CCD fuses (ZenStates-Core CCD_FUSE_ZEN2, CcdMapFromDown): the enabled CCDs come from the
+         # "down" bits only, and an 8-core part can sit on the second CCD of a two-CCD package, so the
+         # fuses are always read (no shortcut for complete CCDs)
+         "fuses": {"ccd": (0x5D218, 0x5D21C), "core": 0x30081D98, "stride": 1 << 25, "map_from_down": True},
+         "co_range": (-30, 30), "eco_limits": (88, 60, 90), "tjmax_max": 95, "verified": False},
+    4: {"name": "Matisse",            # Ryzen 3000 (Zen 2): no Curve Optimizer, no FMax; limits only
+        "cmd": {"ppt_set": (RSMU, 0x53), "tdc_set": (RSMU, 0x54), "edc_set": (RSMU, 0x55), "tjmax_set": (RSMU, 0x56)},
+        # the two versions with a header map checked on real CPUs (0x240903 leogx9r monitor_cpu on a
+        # 3700X/3800X, 0x240803 ryzen_monitor from 3950X dumps); MP1 is never used on Zen 2 (disputed numbering)
+        "pm_prefix": None, "pm_versions": (0x240803, 0x240903),
+        "pm": {"ppt_limit": 0, "ppt": 1, "tdc_limit": 2, "tdc": 3, "thm_limit": 4, "tctl": 5, "edc_limit": 8},
+        "pm_cores": {}, "eco_limits": (88, 60, 90), "tjmax_max": 95, "verified": False},
+    # Ryzen 1000/2000 (Zen, Zen+): no Curve Optimizer, no FMax, and ryzen_smu has no PM table for them
+    # (no readback of the limits): no SMU command at all, only boost, power profile and fans
+    10: {"name": "Pinnacle Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
+    9: {"name": "Summit Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
 }
+# Never in any entry (sources above): voltage/VID, OC mode, PBO scalar, SMN writes. Dangerous neighbours
+# of the allowed IDs on Zen 2/3: RSMU 0x58 PBO scalar, 0x5A–0x5D OC mode/frequency, 0x61 OC VID.
 SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
               0xFD: "REJECTED_PREREQ", 0xFC: "BUSY", 0xFB: "TIMEOUT", 0xFA: "INVALID_ARG",
               0xF9: "UNSUPPORTED_PLATFORM", 0xF8: "BUFFER", 0xF7: "MMAP", 0xF6: "PCI"}
@@ -114,12 +162,88 @@ def s16(v):
 
 
 def co_mask(core):
-    """SMU mask of physical core `core` (index in TOPO): ((ccd << 8) | (ccx << 4) | core in the CCX) << 20,
-    as ZenStates-Core builds it. ponytail: CCD = sysfs core_id // 8 and one CCX per CCD (Zen 3 and
-    later); only 1 CCD is verified on hardware, more CCDs rely on the 0xD5 readback (a wrong mask is
-    answered OK and does nothing, so the readback fails and the value is restored)."""
-    cid = TOPO[core][0]
-    return ((cid // 8) << 8 | cid % 8) << 20
+    """SMU mask of active core `core` (index in TOPO): (physical CCD << 28) | (slot in the CCD << 20), as
+    ZenStates-Core's MakeCoreMask (one CCX per CCD from Zen 3 on). The slot is the physical position of
+    the core among the 8 of its CCD, from core_map()."""
+    ccd, slot = core_map()[core]
+    return (ccd << 28) | (slot << 20)
+
+
+_CORE_MAP = []   # computed once per process: [(physical ccd, slot)] per active core, or None
+
+
+def core_map():
+    """Physical (CCD, slot) of every active core, or None when it cannot be known for sure.
+    Linux lists only the enabled cores, in the order of their slots, grouped by CCD (sysfs core_id // 8).
+    With every CCD complete (8 cores) the slots are 0–7 in order and no register is read (9800X3D,
+    9950X). With disabled cores the firmware skips their slots, so the enabled slots come from the
+    core fuses read through SMN (read-only, addresses of the family entry), and the result is used
+    only if the fuses agree with the topology (same CCD count, same cores per CCD)."""
+    if _CORE_MAP:
+        return _CORE_MAP[0]
+    groups = {}
+    for i, (cid, _cpus) in enumerate(TOPO):
+        groups.setdefault(cid // 8, []).append(i)
+    fz = family().get("fuses") or {}
+    if not fz.get("map_from_down") and all(len(g) == 8 for g in groups.values()) and sorted(groups) == list(range(len(groups))):
+        result = [None] * CORES
+        for ccd, idxs in groups.items():
+            for i in idxs:
+                result[i] = (ccd, TOPO[i][0] % 8)
+    else:
+        result = fused_core_map(groups)
+    _CORE_MAP.append(result)
+    return result
+
+
+def fused_core_map(groups):
+    """Core map of CCDs with disabled cores from the CCD and core fuses (ZenStates-Core layout), or None."""
+    fz = family().get("fuses")
+    if not fz:
+        return None
+    try:
+        present, down = smn_read(fz["ccd"][0]), smn_read(fz["ccd"][1])
+        if present == 0xFFFFFFFF:
+            return None
+        ccd_down = ((present >> 30) & 3) | ((down & 0x3F) << 2)
+        # Zen 3: enabled = not down (ZenStates CcdMapFromDown); Zen 4/5: present (bits 22–23) and not down
+        enabled = (~ccd_down & 0xFF) if fz.get("map_from_down") else ((present >> 22) & 3) & ~ccd_down
+        physical = [b for b in range(8) if enabled >> b & 1]
+        if physical[-1:] > [1]:   # desktop packages have at most two CCDs: an unexpected layout
+            return None
+        if len(physical) != len(groups):
+            return None
+        result = [None] * CORES
+        for (_lccd, idxs), pccd in zip(sorted(groups.items()), physical):
+            disabled = smn_read(fz["core"] + fz["stride"] * pccd) & 0xFF
+            slots = [s for s in range(8) if not disabled >> s & 1]
+            if len(slots) != len(idxs):
+                return None
+            for i, slot in zip(sorted(idxs, key=lambda i: TOPO[i][0]), slots):
+                result[i] = (pccd, slot)
+        return result
+    except (OSError, struct.error):
+        return None
+
+
+def smn_read(addr):
+    """One SMN register read through the driver: writing 4 bytes (the address) reads it, 8 bytes would
+    write it and are never sent. Only the fuse addresses of the family entry are allowed."""
+    fz = family().get("fuses") or {}
+    allowed = set(fz.get("ccd", ())) | {fz["core"] + fz["stride"] * c for c in range(2)} if fz else set()
+    if addr not in allowed:
+        raise Err(_("SMN read of 0x%08X not allowed") % addr)
+    if FAKE:
+        return FAKE.smn(addr)
+    fd = _lock()
+    try:
+        with open(P(SMU_DIR + "/smn"), "wb", buffering=0) as f:
+            if f.write(struct.pack("<I", addr)) != 4:
+                raise OSError("short SMN write")
+        with open(P(SMU_DIR + "/smn"), "rb") as f:
+            return struct.unpack("<I", f.read(4))[0]
+    finally:
+        os.close(fd)
 
 
 def co_arg(core, margin):
@@ -190,13 +314,30 @@ class Fake:
 
     VARIANTS = {"granite": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0x620105},      # 9800X3D
                 "granite16": {"codename": 23, "cores": 16, "ccds": 2, "pm_version": 0x620205},   # 9950X: 2 CCDs
-                "nopm": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0}}               # no PM table
+                "nopm": {"codename": 23, "cores": 8, "ccds": 1, "pm_version": 0},               # no PM table
+                "granite6": {"codename": 23, "cores": 6, "ccds": 1, "pm_version": 0x620105,     # 9600X: 1 CCD × 6
+                             "disabled": [[2, 5]]},
+                "granite12": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205,   # 9900X: 2 CCDs × 6
+                              "disabled": [[2, 5], [0, 7]]},   # disabled slots of each CCD (core fuses)
+                "fusebad": {"codename": 23, "cores": 12, "ccds": 2, "pm_version": 0x620205,    # fuses that contradict
+                            "disabled": [[2], [0, 7]]},   # the topology (7 + 6 slots for 6 + 6 cores): no per-core CO
+                "raphael": {"codename": 20, "cores": 8, "ccds": 1, "pm_version": 0x540104},     # 7700X
+                "vermeer": {"codename": 12, "cores": 12, "ccds": 2, "pm_version": 0x380805,    # 5900X: 2 CCDs × 6
+                            "disabled": [[1, 6], [0, 3]]},
+                "vermeer8": {"codename": 12, "cores": 8, "ccds": 1, "pm_version": 0x380905,    # 5800X sitting on the
+                             "phys": [1]},                                                 # second CCD of the package
+                "matisse": {"codename": 4, "cores": 8, "ccds": 1, "pm_version": 0x240903},     # 3700X: no CO, no FMax
+                "pinnacle": {"codename": 10, "cores": 8, "ccds": 1, "pm_version": 0}}          # 2700X: no SMU command
     FAN_DIR = HWMON + "/hwmon0"
 
     def __init__(self, variant=None):
         v = self.VARIANTS[variant or os.environ.get("RYZENCTL_FAKE_FAMILY") or "granite"]
         per = v["cores"] // v["ccds"]
         self.cids = [(c // per) * 8 + c % per for c in range(v["cores"])]   # sysfs core_id: CCD n starts at 8n
+        self.disabled = v.get("disabled", [[] for _ccd in range(v["ccds"])])
+        self.phys = v.get("phys", list(range(v["ccds"])))   # physical position of each CCD in the package
+        # physical (ccd, slot) of each core: the firmware skips the disabled slots, Linux numbers the rest in order
+        self.slots = [(p, s) for p, dis in zip(self.phys, self.disabled) for s in range(8) if s not in dis]
         self.default = {"codename": v["codename"], "co": [0] * v["cores"], "fmax": 5225,
                         "ppt": 162.0, "tdc": 120.0, "edc": 180.0, "thm": 95.0,
                         "shaper": [0x80 | t for t in range(5)], "tctl": 52.0, "power": "performance",
@@ -217,13 +358,26 @@ class Fake:
                     os.makedirs(d, exist_ok=True)
                     with open(d + "/core_id", "w") as fh:
                         fh.write(str(cid))
+            os.makedirs(P(CPUFREQ), exist_ok=True)
+            with open(P(CPUFREQ + "/boost"), "w") as fh:   # the kernel's boost switch (acpi-cpufreq style)
+                fh.write("1")
 
     def core(self, mask):
-        """Core index addressed by an SMU core mask, or None: a wrong mask (e.g. 8 << 20 on two CCDs)
-        is answered OK by a real SMU and does nothing."""
-        ccd, ccx, core = (mask >> 28) & 0xF, (mask >> 24) & 0xF, (mask >> 20) & 0xF
-        cid = ccd * 8 + core
-        return self.cids.index(cid) if ccx == 0 and core < 8 and cid in self.cids else None
+        """Core index addressed by an SMU core mask, or None: a wrong mask (8 << 20 on two CCDs, the slot
+        of a disabled core) is answered OK by a real SMU and does nothing."""
+        ccd, ccx, slot = (mask >> 28) & 0xF, (mask >> 24) & 0xF, (mask >> 20) & 0xF
+        return self.slots.index((ccd, slot)) if ccx == 0 and (ccd, slot) in self.slots else None
+
+    def smn(self, addr):
+        """The CCD and core fuse registers of the family (ZenStates-Core layout)."""
+        fz = FAMILIES[self.s["codename"]]["fuses"]
+        if addr in fz["ccd"]:
+            if fz.get("map_from_down"):   # Zen 3: CCD0/1 down in bits 31:30, CCDs 2–7 down in the second word
+                down = sum(1 << c for c in range(8) if c not in self.phys)
+                return ((down & 3) << 30) | (1 << 22) if addr == fz["ccd"][0] else down >> 2
+            return sum(1 << p for p in self.phys) << 22 if addr == fz["ccd"][0] else 0   # Zen 4/5: present, none down
+        ccd = (addr - fz["core"]) // fz["stride"]
+        return sum(1 << s for s in self.disabled[self.phys.index(ccd)]) if ccd in self.phys else 0xFFFFFFFF
 
     def _make_hwmon(self):
         d = P(self.FAN_DIR)
@@ -279,25 +433,24 @@ class Fake:
     def smu(self, mailbox, cmd, args):
         a = args[0] if args else 0
         s = self.s
-        CMD = FAMILIES[s["codename"]]["cmd"]
-        if (mailbox, cmd) == CMD["co_set"]:
+        name = {v: k for k, v in FAMILIES[s["codename"]]["cmd"].items()}.get((mailbox, cmd))   # by this family's IDs
+        if name == "co_set":
             c = self.core(a)
             self._write(lambda: c is not None and s["co"].__setitem__(c, s16(a)))
-        elif (mailbox, cmd) in (CMD["ppt_set"], CMD["tdc_set"], CMD["edc_set"]):
-            key = {CMD["ppt_set"]: "ppt", CMD["tdc_set"]: "tdc", CMD["edc_set"]: "edc"}[(mailbox, cmd)]
-            self._write(lambda: s.__setitem__(key, a / 1000.0))
-        elif (mailbox, cmd) == CMD["co_get"]:
+        elif name in ("ppt_set", "tdc_set", "edc_set"):
+            self._write(lambda: s.__setitem__(name[:3], a / 1000.0))
+        elif name == "co_get":
             c = self.core(a)
             return 1, [(s["co"][c] if c is not None else 0) & 0xFFFFFFFF, 0, 0, 0, 0, 0]
-        elif (mailbox, cmd) == CMD["fmax_set"]:
+        elif name == "fmax_set":
             self._write(lambda: s.__setitem__("fmax", a & 0xFFFFF))
-        elif (mailbox, cmd) == CMD["fmax_get"]:
+        elif name == "fmax_get":
             return 1, [s["fmax"], 0, 0, 0, 0, 0]
-        elif (mailbox, cmd) == CMD["tjmax_set"]:
+        elif name == "tjmax_set":
             self._write(lambda: s.__setitem__("thm", float(a)))
-        elif (mailbox, cmd) == CMD["shaper_set"]:
+        elif name == "shaper_set":
             self._write(lambda: s["shaper"].__setitem__(a & 0x7F, a))
-        elif (mailbox, cmd) == CMD["shaper_get"]:
+        elif name == "shaper_get":
             return 1, list(s["shaper"]) + [0]
         else:
             return 0xFE, [0] * 6
@@ -305,12 +458,52 @@ class Fake:
 
     def load_ok(self, args):
         """Simulated load: fails if a tested core is below its stability threshold;
-        with `combined_stricter` the load on all cores needs 3 more steps of margin."""
+        with `combined_stricter` the load on all cores needs 3 more steps of margin; one thread alone on a
+        core (`--cpu 1`) also needs its `single_limits` (CoreCycler: what only a lone thread at full boost shows)."""
+        limit = lambda key, c: self.s.get(key, {}).get(str(c), -100)
         if "--taskset" in args:
-            cores, extra = [int(args[args.index("--taskset") + 1].split(",")[0])], 0
-        else:
-            cores, extra = range(CORES), self.s.get("combined_stricter", 0)
-        return all(self.s["co"][c] >= self.s.get("co_limits", {}).get(str(c), -100) + extra for c in cores)
+            c = int(args[args.index("--taskset") + 1].split(",")[0])
+            alone = "--cpu" in args and args[args.index("--cpu") + 1] == "1"
+            return self.s["co"][c] >= max(limit("co_limits", c), limit("single_limits", c) if alone else -100)
+        extra = self.s.get("combined_stricter", 0)
+        return all(self.s["co"][c] >= limit("co_limits", c) + extra for c in range(CORES))
+
+    # Simulated hardware watchdog (an SP5100 TCO with timeout 60): sysfs attributes and device as regular files under
+    # ROOT; the device file is the transcript of what was written ("\0" keepalive, "V" magic) with a "C" at each close.
+    # wd_busy: held by another program (EBUSY); wd_no_magic: driver without magic close; wd_deaf: never stops.
+    WD_SYS, WD_DEV = "/sys/class/watchdog/watchdog0", "/dev/watchdog0"
+
+    def wd_files(self):
+        if not os.path.exists(P(self.WD_SYS + "/state")):
+            os.makedirs(P(self.WD_SYS), exist_ok=True)
+            os.makedirs(P("/dev"), exist_ok=True)
+            for name, v in (("identity", "SP5100 TCO timer"), ("state", "inactive"), ("timeout", "60"), ("nowayout", "0")):
+                with open(P(self.WD_SYS + "/" + name), "w") as fh:
+                    fh.write(v + "\n")
+            open(P(self.WD_DEV), "wb").close()
+
+    def wd_open(self, dev):
+        """open(2): EBUSY while another program holds the device, otherwise the timer starts."""
+        import errno
+        if self.s.get("wd_busy"):
+            raise OSError(errno.EBUSY, os.strerror(errno.EBUSY))
+        with open(P(self.WD_SYS + "/state"), "w") as fh:
+            fh.write("active\n")
+        return os.open(P(dev), os.O_WRONLY | os.O_APPEND)
+
+    def wd_options(self):
+        """WDIOC_GETSUPPORT options."""
+        return 0x8080 if self.s.get("wd_no_magic") else 0x8180
+
+    def wd_close(self, fd):
+        """close(2): the kernel stops the timer after a "V" (magic close), or at any close without magic close."""
+        os.close(fd)
+        with open(P(self.WD_DEV), "rb+") as f:
+            stops = (f.read().endswith(b"V") or self.s.get("wd_no_magic")) and not self.s.get("wd_deaf")
+            f.write(b"C")
+        if stops:
+            with open(P(self.WD_SYS + "/state"), "w") as fh:
+                fh.write("inactive\n")
 
     def bench(self, threads):
         """Simulated (bogo-ops/s, W): multi-thread saturates with the PPT, single-thread follows FMax."""
@@ -324,6 +517,8 @@ class Fake:
         fam = FAMILIES.get(s["codename"])
         if not s["pm_version"] or not fam:
             return None, None
+        if not fam["pm"]:   # a table this program cannot read: only its version
+            return s["pm_version"], [0.0] * 457
         PM = fam["pm"]
         t = [0.0] * 457
         t[PM["ppt_limit"]], t[PM["ppt"]] = s["ppt"], 61.0
@@ -331,8 +526,11 @@ class Fake:
         t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
         t[PM["edc_limit"]] = s["edc"]
         layout = fam["pm_cores"].get(s["pm_version"])
-        for c in range(len(self.cids) if layout else 0):   # per-core temperatures, a few degrees apart like a real idle CPU
-            t[layout["temp"] + c] = s["tctl"] - 6.0 + c % 3
+        for c, (ccd, slot) in enumerate(self.slots if layout else []):   # by physical slot, like the real arrays
+            i = 8 * ccd + slot
+            t[layout["temp"] + i] = s["tctl"] - 6.0 + slot % 3      # a few degrees apart, like a real idle CPU
+            t[layout["volt"] + i] = round(1.25 + s["co"][c] * 0.003, 3)   # a negative CO lowers the voltage
+            t[layout["mhz"] + i] = s["fmax"] - 50
         return s["pm_version"], t
 
 
@@ -341,7 +539,8 @@ FAKE = Fake() if ROOT else None
 
 def read_topology():
     """Physical cores in order: [(core_id, "cpu,cpu")] from sysfs, both SMT threads of each core.
-    On Zen the core_id carries the CCD (core_id // 8) and leaves gaps for fused-off cores."""
+    On Zen the core_id carries the CCD (core_id // 8); inside a CCD it does not tell the physical slot
+    of a core when some are disabled (see core_map)."""
     cores = {}
     base = P("/sys/devices/system/cpu")
     for name in os.listdir(base) if os.path.isdir(base) else []:
@@ -359,6 +558,7 @@ def init_cpu():
     global TOPO, CORES
     TOPO = read_topology()
     CORES = len(TOPO)
+    _CORE_MAP.clear()
 
 
 init_cpu()
@@ -392,11 +592,12 @@ def smu(name, *args):
 
 def pm_table():
     try:
-        prefix = family()["pm_prefix"]
+        fam = family()
     except Err:
         return None, None
     version, t = FAKE.pm() if FAKE else pm_raw()
-    if version is None or (version >> 16) != prefix:
+    prefix = fam.get("pm_prefix")
+    if version is None or not ((prefix is not None and version >> 16 == prefix) or version in fam.get("pm_versions", ())):
         return None, None
     return version, t
 
@@ -405,13 +606,28 @@ def check_cpu():
     return family()
 
 
+def co_range():
+    return family().get("co_range", (CO_MIN, CO_MAX))
+
+
+def co_support():
+    """None if the per-core Curve Optimizer can be used on this CPU, otherwise the reason."""
+    if not {"co_set", "co_get"} <= set(family()["cmd"]):
+        return _("no verified Curve Optimizer commands for this CPU family")
+    if core_map() is None:
+        return _("the physical position of the cores is unknown (core fuses unreadable or not matching the topology)")
+    return None
+
+
 def tctl():
     if FAKE:
         return FAKE.s["tctl"]
     for d in sorted(os.listdir(P(HWMON))):
         try:
             if read_text("%s/%s/name" % (HWMON, d)) == "k10temp":
-                return int(read_text("%s/%s/temp1_input" % (HWMON, d))) / 1000.0
+                # 1600X/1700X/1800X/2700X: Tctl carries a +20/+10 °C offset, k10temp adds the real Tdie as temp2
+                t = 2 if os.path.exists(P("%s/%s/temp2_label" % (HWMON, d))) and read_text("%s/%s/temp2_label" % (HWMON, d)) == "Tdie" else 1
+                return int(read_text("%s/%s/temp%d_input" % (HWMON, d, t))) / 1000.0
         except OSError:
             pass
     return None
@@ -449,6 +665,38 @@ def power_set(profile):
         if d.startswith("cpu") and d[3:].isdigit() and os.path.exists(f):
             with open(f, "w") as fh:
                 fh.write(epp)
+
+
+def boost_files():
+    """The kernel's Precision Boost switch: global (acpi-cpufreq, amd-pstate passive/guided) or per policy."""
+    if os.path.exists(P(CPUFREQ + "/boost")):
+        return [CPUFREQ + "/boost"]
+    d = P(CPUFREQ)
+    return ["%s/%s/boost" % (CPUFREQ, n) for n in sorted(os.listdir(d) if os.path.isdir(d) else [])
+            if n.startswith("policy") and os.path.exists("%s/%s/boost" % (d, n))]
+
+
+def boost_get():
+    """Switch state: "on", "off", or None without a switch (or with policies that disagree)."""
+    vals = {read_text(f) for f in boost_files()}
+    return {frozenset({"1"}): "on", frozenset({"0"}): "off"}.get(frozenset(vals))
+
+
+def cmd_boost(ctx, args):
+    """`boost on|off`: Precision Boost through the kernel (cpufreq), no SMU; read back from the same files.
+    The only frequency lever on CPUs without an FMax command (Ryzen 1000–3000)."""
+    if args not in (["on"], ["off"]):
+        raise Err(_("usage: boost on|off"))
+    files = boost_files()
+    if not files:
+        raise Err(_("boost switch not available (no cpufreq boost control)"))
+    if not ctx.get("dry"):
+        for f in files:
+            with open(P(f), "w") as fh:
+                fh.write("1" if args == ["on"] else "0")
+        if boost_get() != args[0]:
+            raise Err(_("boost: wrote %s but read back %s") % (args[0], boost_get()))
+    return {"boost": args[0]}
 
 
 # ---- State files (atomic writes) -----------------------------------------------------
@@ -504,21 +752,27 @@ def values_from_lines(lines):
             v[t[0]] = int(t[1])
         elif t[0] == "shaper" and len(t) == 5:
             v["shaper"][int(t[1])] = [int(x) for x in t[2:]]
-        elif t[0] == "power" and len(t) == 2:
-            v["power"] = t[1]
+        elif t[0] in ("power", "boost") and len(t) == 2:
+            v[t[0]] = t[1]
     return v
 
 
 # ---- CPU state reads -----------------------------------------------------------------
 def read_co():
+    """CO per core, or None where it cannot be used safely (co_support)."""
+    if co_support():
+        return None
     return [s16(smu("co_get", co_mask(core))[0]) for core in range(CORES)]
 
 
 def read_fmax():
-    return smu("fmax_get")[0]
+    """FMax in MHz, or None on families without the command (Zen 3 and older)."""
+    return smu("fmax_get")[0] if "fmax_get" in family()["cmd"] else None
 
 
 def read_shaper():
+    if "shaper_get" not in family()["cmd"]:
+        return None
     return [shaper_decode(w) for w in smu("shaper_get")[:5]]
 
 
@@ -533,15 +787,18 @@ def read_limits():
 def capture_lines():
     """Current state in profile format (the baseline is a profile like any other)."""
     lim = read_limits()
-    lines = ["co " + " ".join(str(v) for v in read_co()), "fmax %d" % read_fmax()]
+    co, fmax = read_co(), read_fmax()
+    lines = (["co " + " ".join(str(v) for v in co)] if co is not None else []) + (["fmax %d" % fmax] if fmax is not None else [])
     for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
         if pm_key in lim:
             lines.append("%s %d" % (key, round(lim[pm_key])))
     # Curve Shaper excluded: on the 9800X3D (SMU 98.81.0) 0xA6 replies OK but 0x84 does not change,
     # so it cannot be verified; it remains only as an experimental command (`shaper probe`).
-    power = power_get()
+    power, boost = power_get(), boost_get()
     if power:
         lines.append("power " + power)
+    if boost:
+        lines.append("boost " + boost)
     lines += fan_capture_lines()   # only channels already classified "ventola" (fan)
     return lines
 
@@ -655,9 +912,12 @@ def cmd_co(ctx, args):
         wanted = {core: to_int(args[1], "co")}
     else:
         raise Err(_("usage: co <core|all> <value> | co v0 … v%d") % (CORES - 1))
-    for v in wanted.values():
-        check_range("co", v, CO_MIN, CO_MAX)
     check_cpu()
+    for v in wanted.values():
+        check_range("co", v, *co_range())
+    why = co_support()
+    if why:
+        raise Err(_("Curve Optimizer not available on this CPU: %s") % why)
     base = load_baseline()
     for core, v in wanted.items():
         write_verify(ctx, "co core %d" % core, v, lambda x, c=core: smu("co_set", co_arg(c, x)),
@@ -669,7 +929,8 @@ def cmd_fmax(ctx, args):
     if len(args) != 1:
         raise Err(_("usage: fmax <MHz>"))
     v = to_int(args[0], "fmax")
-    check_cpu()
+    if "fmax_set" not in check_cpu()["cmd"]:
+        raise Err(_("FMax is not available on this CPU (no SMU command for it): use `boost off` to cap the clock"))
     base = load_baseline()
     check_range("fmax", v, FMAX_MIN, cap_of(base, "fmax", load_settings()["unlock"]), " MHz")
     return {"fmax": write_verify(ctx, "fmax", v, lambda x: smu("fmax_set", x & 0xFFFFF), read_fmax, base["fmax"])}
@@ -720,7 +981,7 @@ def cmd_unlock(ctx, args):
     if args not in (["on"], ["off"]):
         raise Err(_("usage: unlock on|off"))
     s = load_settings()
-    if args == ["off"] and s["profile"] == "boost":   # it would stay applied (and reapplied at boot) without unlock
+    if args == ["off"] and is_boost(s["profile"], s):   # it would stay applied (and reapplied at boot) without unlock
         raise Err(_("Boost is the selected mode and requires unlock: switch to another mode first"))
     s["unlock"] = args == ["on"]
     save_settings(s)
@@ -730,10 +991,16 @@ def cmd_unlock(ctx, args):
     return _("limits back to the factory caps")
 
 
+def is_boost(name, s):
+    """Boost, or a custom calibration based on it."""
+    return name == "boost" or s.get("calibrated", {}).get(name, {}).get("base") == "boost"
+
+
 def check_boost(name):
     """Boost puts limits and FMax at the unlock ceilings by design: creating, calibrating, selecting
     or applying it (also at boot) is refused while unlock is off."""
-    if name == "boost" and not load_settings()["unlock"]:
+    s = load_settings()
+    if is_boost(name, s) and not s["unlock"]:
         raise Err(_("Boost requires unlock (ryzenctl unlock on; in the GUI: Preferences, \"Allow beyond the stock values\")"))
 
 
@@ -798,16 +1065,17 @@ def cmd_status(ctx, args):
         base = None
     return {
         "cpu": fam["name"], "cores": CORES, "ccds": len({cid // 8 for cid, _cpus in TOPO}),
+        "verified": fam["verified"], "co_unavailable": co_support(),
         "smu_version": _("fake") if FAKE else read_text(SMU_DIR + "/version"),
         "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
         "co": read_co(), "fmax": read_fmax(), "shaper": read_shaper(),
         "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"),
                    "edc": lim.get("edc_limit"), "tjmax": lim.get("thm_limit")},
         "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
-        "power": power_get(),
+        "power": power_get(), "boost": boost_get(),
         "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
         "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
-        "trusted": trust_user() in trust_users(),
+        "trusted": trust_user() in trust_users(), "calibrated": s.get("calibrated", {}),
         "crashed": crashed_info(), "caps": caps(base, s["unlock"]) if base else None,
         "active": os.path.exists(marker("active")),
     }
@@ -815,7 +1083,7 @@ def cmd_status(ctx, args):
 
 def caps(base, unlock):
     """Allowed ranges (min, max) for the GUI: same logic as cap_of."""
-    out = {"co": [CO_MIN, CO_MAX], "fan_step_ms": [0, FAN_STEP_MAX_MS], "fan_step_tol_ms": FAN_STEP_TOL_MS}
+    out = {"co": list(co_range()), "fan_step_ms": [0, FAN_STEP_MAX_MS], "fan_step_tol_ms": FAN_STEP_TOL_MS}
     for key, lo in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN), ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
         if key in base:
             out[key] = [lo, cap_of(base, key, unlock)]
@@ -823,22 +1091,25 @@ def caps(base, unlock):
 
 
 def pm_cores(version, t):
-    """Per-core offsets of the PM table for this version, only for a verified layout that has room
-    for every core; otherwise None."""
+    """Per-core indices of the PM table for this version, {"volt": [index of each core], ...}, only for a
+    verified layout; otherwise None. The arrays are by physical slot (8 per CCD, disabled slots included),
+    so on CPUs with disabled cores the core map decides which entry is which core."""
     layout = family()["pm_cores"].get(version) if t is not None else None
-    return layout if layout and len(t) > max(layout.values()) + CORES else None
+    phys = core_map() if layout else None
+    if not phys:
+        return None
+    idx = {k: [base + 8 * ccd + slot for ccd, slot in phys] for k, base in layout.items()}
+    return idx if max(max(v) for v in idx.values()) < len(t) else None
 
 
 def sample_cores():
     """Voltage (V) and frequency (MHz) per core from the PM table (verified layouts only); otherwise None."""
-    if FAKE:
-        return {"volt": [round(1.25 + c * 0.003, 3) for c in FAKE.s["co"]], "mhz": [FAKE.s["fmax"] - 50] * CORES}
     version, t = pm_table()
     m = pm_cores(version, t)
     if not m:
         return None
-    return {"volt": [round(t[m["volt"] + c], 3) for c in range(CORES)],
-            "mhz": [int(t[m["mhz"] + c] * 1000) if t[m["mhz"] + c] < 100 else int(t[m["mhz"] + c]) for c in range(CORES)]}
+    return {"volt": [round(t[i], 3) for i in m["volt"]],
+            "mhz": [int(t[i] * 1000) if t[i] < 100 else int(t[i]) for i in m["mhz"]]}
 
 
 def cmd_telemetry(ctx, args):
@@ -853,12 +1124,12 @@ def cmd_telemetry(ctx, args):
             mhz = int(read_text("/sys/devices/system/cpu/cpu%s/cpufreq/scaling_cur_freq" % first_cpu(c))) // 1000
         except (OSError, ValueError):
             mhz = 3000 + c * 100 if FAKE else None
-        temp = round(t[m["temp"] + c], 1) if m else None
+        temp = round(t[m["temp"][c]], 1) if m else None
         cores.append({"mhz": mhz, "temp": temp})
     co = read_co()
     sample = sample_cores()
     for c in range(CORES):
-        cores[c]["co"] = co[c]
+        cores[c]["co"] = co[c] if co else None
         cores[c]["volt"] = sample["volt"][c] if sample else None
     tccd = None
     if FAKE:
@@ -889,15 +1160,18 @@ def fmt_status(st):
     b = st["baseline"] or {}
     bl = lambda k, u="": (" (base %s)" % f(b.get(k), u)) if k in b else ""
     lines = [
-        _("CPU %s, %d cores, SMU %s, PM table %s") % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"]),
-        "CO      " + " ".join("%+d" % v for v in st["co"]) + ("  (base %s)" % " ".join("%+d" % v for v in b["co"]) if "co" in b else ""),
-        "Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + _("  (experimental, not verified)"),
+        _("CPU %s, %d cores, SMU %s, PM table %s") % (st["cpu"], st["cores"], st["smu_version"], st["pm_version"])
+        + ("" if st["verified"] else _("  (family not verified on hardware yet: run hwtest)")),
+        ("CO      " + " ".join("%+d" % v for v in st["co"]) + ("  (base %s)" % " ".join("%+d" % v for v in b["co"]) if "co" in b else ""))
+        if st["co"] is not None else _("CO      n/a: %s") % st["co_unavailable"],
+        ("Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + _("  (experimental, not verified)"))
+        if st["shaper"] is not None else _("Shaper  n/a on this CPU"),
         "FMax    %s MHz%s" % (f(st["fmax"]), bl("fmax", " MHz")),
         _("Limits  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s") % (
             f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
             f(st["limits"]["edc"], " A"), bl("edc", " A"), f(st["limits"]["tjmax"], " °C"), bl("tjmax", " °C")),
         _("Now     PPT %s  TDC %s  Tctl %s") % (f(st["now"]["ppt"], " W"), f(st["now"]["tdc"], " A"), f(st["now"]["tctl"], " °C")),
-        _("Power   %s%s") % (st["power"] or _("n/a"), bl("power")),
+        _("Power   %s%s, boost %s%s") % (st["power"] or _("n/a"), bl("power"), st["boost"] or _("n/a"), bl("boost")),
         _("Baseline %s, unlock %s, autostart %s, profile %s") % (
             _("of this boot") if st["baseline_fresh"] else (_("stale") if b else _("missing")),
             "ON" if st["unlock"] else "off", "ON" if st["autostart"] else "off", st["profile"] or "-"),
@@ -906,7 +1180,7 @@ def fmt_status(st):
 
 
 # ---- Profiles ----------------------------------------------------------------------------
-PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "fan"}  # shaper: experimental, excluded
+PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "boost", "fan"}  # shaper: experimental, excluded
 FAN_PROFILE_SUBCMDS = ("step", "curve", "pump")   # `fan <N> step …` | `fan <N> curve …` | `fan <N> pump auto|<pct>`
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
@@ -995,9 +1269,10 @@ def cmd_profile(ctx, args):
         if args[1] == "baseline" or not os.path.exists(path):
             raise Err(_("profile '%s' does not exist or is reserved") % args[1])
         os.remove(path)
+        s.get("calibrated", {}).pop(args[1], None)
         if s["profile"] == args[1]:
             s["profile"] = None
-            save_settings(s)
+        save_settings(s)
         return {"deleted": args[1]}
     raise Err(_("usage: profile list | show <name> | save <name> <line>… | delete <name>"))
 
@@ -1039,17 +1314,34 @@ PRESETS = {
 }
 
 
+def board_limits(base):
+    """The reason when the BIOS limits are the motherboard's (PBO "Enabled": PPT 1000 W and the like) rather
+    than the CPU's stock ones, otherwise None: ratios of them mean nothing (Quiet would be 550 W, the Auto knee
+    would sweep 1000 → 500 W). No stock desktop Ryzen goes beyond the unlock ceilings."""
+    over = ["%s %d" % (k.upper(), base[k]) for k, cap in (("ppt", UNLOCK_PPT), ("tdc", UNLOCK_TDC), ("edc", UNLOCK_EDC))
+            if base.get(k, 0) > cap]
+    return _("the BIOS reports motherboard limits (%s), not the CPU's stock ones: set PBO to Auto or Disabled in "
+             "the BIOS, or Advanced with your own limits") % ", ".join(over) if over else None
+
+
 def preset_lines(name, base):
     pr = PRESETS[name]
-    lines = ["co " + " ".join(str(v) for v in base.get("co", [0] * CORES))]   # presets do not touch the CO
+    over = board_limits(base)
+    if over and name == "auto":   # 88 % of the stock limits: with motherboard limits there is nothing to scale
+        raise Err(over)
+    eco = dict(zip(("ppt", "tdc", "edc"), family().get("eco_limits", ())))   # AMD's Eco mode: Quiet/Eco in that case
+    lines = ["co " + " ".join(str(v) for v in base["co"])] if "co" in base else []   # presets do not touch the CO
     for key, floor in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
         if key in base:
-            lines.append("%s %d" % (key, max(floor, round(base[key] * pr[key]))))
+            v = eco[key] if over and pr[key] < 1 and key in eco else max(floor, round(base[key] * pr[key]))
+            lines.append("%s %d" % (key, v))
     if "fmax" in base:
         lines.append("fmax %d" % max(FMAX_MIN, base["fmax"] + pr["fmax"]))
     if "tjmax" in base:
         lines.append("tjmax %d" % (base["tjmax"] if pr["tjmax"] is None else min(base["tjmax"], pr["tjmax"])))
     lines.append("power " + pr["power"])
+    if name == "quiet" and "co_set" not in family()["cmd"] and "boost" in base:
+        lines.append("boost off")   # Ryzen 1000–3000: no CO nor FMax, the kernel's boost switch is the lever
     d = fans_dir()
     if d:
         for n in fan_channels(d):
@@ -1081,9 +1373,12 @@ AT_PATH = STATE + "/autotune.json"
 # passes (final_failures: never retried; final_passed: Eco reuses them without load tests). Every
 # mode applies the same margin +3: Eco = Auto's undervolt with the quiet limits. reuse=1 reuses the
 # previous measurement; `target` only places the quiet fan curve (fans=2: minimum up to target−10 °C).
-AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2},
-               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1},
-               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1}}   # no target: the fans use eco's
+AT_DEFAULTS = {"eco": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 2, "single": 1, "watchdog": 1, "retry": 0},
+               "auto": {"target": 70, "colimit": -40, "margin": 3, "step": 90, "loss": 10, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1, "retry": 0},
+               "boost": {"colimit": -40, "margin": 3, "step": 90, "parallel": 1, "reuse": 1, "fans": 1, "single": 1, "watchdog": 1, "retry": 0}}   # no target: the fans use eco's
+# single=1: the final pass ends with each core tested alone (see SINGLE_SEC); watchdog=1: under `serve` the hardware
+# watchdog stays armed for the whole calibration (Watchdog); retry=1 (custom calibrations only): the reused
+# measurement's crash margin and recorded failures are ignored, the final pass starts from the last stable + margin
 # fans: 0 = BIOS (baseline steps and curves); 1 = moderate: rise 3 s / fall 2 s and the BIOS curve raised
 # by 10 % with 100 % at 100 °C (the BIOS curves reach 100 % only at 125 °C, so under load the fans hardly
 # react; this is the curve tuned by hand on the 9800X3D); 2 = quiet: 10 s / 5 s, BIOS minimum up to
@@ -1098,6 +1393,12 @@ AT_PPT_TESTS_EST, AT_FKNEE_TESTS_EST = 5, 6   # for the duration estimates
 PPT_SWEEP_STEP, PPT_SWEEP_MIN, BENCH_SEC, FMAX_KNEE_SPAN = 0.10, 0.50, 15, 800   # Auto: performance/W knee
 CO_STEP, FINAL_SEC, FINAL_RETRIES = 5, 300, 3
 FINAL_HEAVY_SEC = 60   # final pass: first the heaviest method at full load (fft on 16 threads locked up the 9800X3D at −37)
+# Final pass, single-core part (CoreCycler: all-core loads miss the CO instability that one thread alone at the highest
+# boost shows): per core one worker on one hardware thread, busy slices with short idle gaps, then SINGLE_GAP s idle
+SINGLE_SEC, SINGLE_GAP = 45, 2
+CORE_RAISE = 3   # a core that failed alone (single-core test, verify): +3 on that core only, like a failed final pass on all
+VERIFY_MINUTES, VERIFY_MIN, VERIFY_MAX = 60, 10, 1440   # autotune verify: default and allowed duration (min)
+VERIFY_PAR_SEC = 60   # verify: the all-core pass that closes each iteration (co_test_parallel)
 FMAX_STEP = 100   # Auto: FMax knee sweep
 
 
@@ -1223,6 +1524,20 @@ def co_test_final(method, seconds):
     return co_test(list(range(CORES)), seconds)
 
 
+def single_sec():
+    """Duration of the single-core test of every core (final pass, one verify iteration)."""
+    return CORES * (SINGLE_SEC + SINGLE_GAP)
+
+
+def co_test_single(c):
+    """Core c alone, from idle: one worker on one hardware thread (the highest single-core boost), all methods with
+    result verification, in busy slices of random length up to 0.5 s each followed by an idle gap of 1/9 of it
+    (--cpu-load 90 --cpu-load-slice 0): many idle↔load transitions. run_load checks the exit code and the MCEs."""
+    pause(SINGLE_GAP)
+    return run_load(["--cpu", "1", "--taskset", first_cpu(c), "--cpu-method", "all", "--verify",
+                     "--cpu-load", "90", "--cpu-load-slice", "0"], SINGLE_SEC)
+
+
 def co_test_sampled(cores, seconds, method="all"):
     """One core at a time: heaviest method at full load (sampling voltage and MHz halfway through:
     it is the measurement of "what a CO step corresponds to"), then mixed methods at full load, 50 %, 10 %.
@@ -1303,6 +1618,7 @@ def at_total_estimate(mode, p):
     levels = max(1, (-p["colimit"]) // CO_STEP)
     t = (0 if reused else levels * p["step"] * (1 if p.get("parallel", 1) else CORES))
     t += len(BENCH_METHODS) * 6 + FINAL_HEAVY_SEC + FINAL_SEC       # method probe + final pass
+    t += single_sec() if p.get("single", 1) else 0                  # its single-core part
     if mode == "auto":
         t += AT_PPT_TESTS_EST * (5 + BENCH_SEC) + AT_FKNEE_TESTS_EST * (3 + BENCH_SEC)
     elif mode == "boost":
@@ -1313,6 +1629,12 @@ def at_total_estimate(mode, p):
 def at_estimate(st):
     """{total_s, remaining_s}: estimated remaining time from the current phase."""
     p, ph = st["params"], st["phase"]
+    if st.get("verify"):   # ponytail: failed cores still counted, the bursts closing co_test_parallel (~3 s per core) not
+        rem = 0
+        if ph == "verify":   # the rest of this iteration, then the iterations left
+            rem = (CORES - st["core"]) * (SINGLE_SEC + SINGLE_GAP) + VERIFY_PAR_SEC
+            rem += (st["iterations"] - st["iteration"]) * (single_sec() + VERIFY_PAR_SEC)
+        return {"total_s": st["eta_total"], "remaining_s": int(rem)}
     levels = max(1, (-p["colimit"]) // CO_STEP)
     rem = 0
     if ph == "co":
@@ -1321,8 +1643,11 @@ def at_estimate(st):
             rem += (levels - level_idx) * p["step"]
         else:
             rem += ((CORES - st["core"] - 1) * levels + (levels - level_idx)) * p["step"]
-    if ph in ("co", "final"):
+    if ph == "final" and st.get("single") is not None:     # single-core part: the cores still to test
+        rem += (CORES - st["single"]) * (SINGLE_SEC + SINGLE_GAP)
+    elif ph in ("co", "final"):
         rem += FINAL_SEC + FINAL_HEAVY_SEC + (0 if st.get("method") else len(BENCH_METHODS) * 6)
+        rem += single_sec() if p.get("single", 1) else 0
     if st["mode"] == "boost" and ph in ("co", "final", "bench"):
         rem += BOOST_BENCHES * (5 + BENCH_SEC)
     if st["mode"] == "auto" and ph in ("co", "final", "ppt", "fmax_knee"):
@@ -1356,6 +1681,8 @@ def co_limits_reusable(params):
 
 
 def co_limits_save(st):
+    if st.get("save_as"):   # custom calibration: its search stays in its own state, Eco/Auto/Boost keep the shared one
+        return
     write_atomic(P(CO_LIMITS_PATH), json.dumps({"results": st["results"], "unstable": st["unstable"],
                                                 "colimit": st["params"]["colimit"], "samples": st.get("samples", {}),
                                                 "method": st.get("method"), "cores": CORES,
@@ -1379,12 +1706,16 @@ def at_params(mode, kvs):
             raise Err(_("unknown parameter '%s' (%s)") % (k, ", ".join(params)))
         params[k] = to_int(v, k)
     check_range("colimit", params["colimit"], CO_MIN, 0)
+    params["colimit"] = max(params["colimit"], co_range()[0])   # Zen 3: −30 at most
     check_range("margin", params["margin"], 0, 20)
     check_range("step", params["step"], 3, 3600, " s")
     if "target" in params:
         check_range("target", params["target"], 50, 90, " °C")
     check_range("parallel", params["parallel"], 0, 1)
     check_range("reuse", params["reuse"], 0, 1)
+    check_range("single", params["single"], 0, 1)
+    check_range("watchdog", params["watchdog"], 0, 1)
+    check_range("retry", params["retry"], 0, 1)
     check_range("fans", params["fans"], 0, 2)
     if "loss" in params:
         check_range("loss", params["loss"], 1, 50, " %")
@@ -1507,6 +1838,9 @@ def at_knee_step(ctx, st, base):
         for key in ("ppt", "tdc", "edc"):
             if lim[key] is not None:
                 run([key, str(lim[key])], ctx)
+        if "fmax" not in base:   # no FMax command (Zen 3): the knee is the PPT alone
+            at_finish_auto(ctx, st, base)
+            return
         st["phase"] = "fmax_knee"
         k["fmax"]["current"] = base["fmax"]
         return
@@ -1564,7 +1898,8 @@ def at_finish_auto(ctx, st, base):
     lim = at_scaled_limits(base, k["ppt"]["chosen"])
     co = "co " + " ".join(str(v) for v in st["final"])
     lines = [co] + ["%s %d" % (key, lim[key]) for key in ("ppt", "tdc", "edc") if lim[key] is not None]
-    lines.append("fmax %d" % k["fmax"]["chosen"])
+    if k["fmax"]["chosen"] is not None:
+        lines.append("fmax %d" % k["fmax"]["chosen"])
     lines += [l for l in preset_lines("auto", base) if l.split()[0] not in ("co", "ppt", "tdc", "edc", "fmax", "fan")]
     at_done(ctx, st, lines + at_fan_lines(st, base))
 
@@ -1579,9 +1914,28 @@ def at_done(ctx, st, lines):
 
 
 def at_known_bad(st, vals):
-    """Has this CO combination already proved unstable (or is it more aggressive than an
-    unstable one on every core)?"""
-    return any(all(v <= f for v, f in zip(vals, ff["values"])) for ff in st.get("final_failures", []))
+    """The recorded failure that already rules this CO combination out, or None: a failed combination rules out
+    every combination at least as aggressive on every core; a core that failed alone (single-core test, "core")
+    every combination at least as aggressive on that core."""
+    for ff in st.get("final_failures", []):
+        c = ff.get("core")
+        if all(v <= f for v, f in zip(vals, ff["values"])) if c is None else vals[c] <= ff["values"][c]:
+            return ff
+    return None
+
+
+def at_raise(st, core=None):
+    """+3 after a failed final pass: on every core, or only on `core` when it failed alone."""
+    if core is None:
+        st["final_tries"] += 1
+    else:
+        cm = st.setdefault("core_margin", {})
+        cm[str(core)] = cm.get(str(core), 0) + CORE_RAISE
+
+
+def at_spent(st):
+    """Every +3 used: FINAL_RETRIES failed passes on all cores, or as many failures of one core alone."""
+    return st["final_tries"] >= FINAL_RETRIES or any(m >= CORE_RAISE * FINAL_RETRIES for m in st.get("core_margin", {}).values())
 
 
 CRASH_MARGIN = 3   # the search ended with a system lock-up: the "stable" level below was one step from the crash
@@ -1590,30 +1944,35 @@ CRASH_MARGIN = 3   # the search ended with a system lock-up: the "stable" level 
 def at_margin(st):
     """Margin over the measured limit: the mode's own, +3 for each failed final pass, +3 if
     the search ended with a crash (the stable level was tried only for `step` seconds)."""
-    crashed = any(u.get("why") == "crash" for u in st.get("unstable", {}).values())
+    crashed = any(u.get("why") == "crash" for u in st.get("unstable", {}).values()) and not st["params"].get("retry")
     return st["params"]["margin"] + 3 * st.get("final_tries", 0) + (CRASH_MARGIN if crashed else 0)
 
 
 def at_final_values(st):
-    m = at_margin(st)
-    return [min(0, st["results"].get(str(c), 0) + m) for c in range(CORES)]
+    m, cm = at_margin(st), st.get("core_margin", {})   # core_margin: cores raised alone (single-core test)
+    return [min(0, st["results"].get(str(c), 0) + m + cm.get(str(c), 0)) for c in range(CORES)]
 
 
 def at_reused(mode, params):
     """Fields of a calibration that reuses the saved CO limit ({} if not reusable): final pass from
     the first margin not failed yet; for Eco also `eco_from`, the date of a recorded final pass at
-    least as negative on every core (and not contradicted by a failure): already validated."""
+    least as negative on every core (and not contradicted by a failure): already validated — with
+    single=1 only a pass that included the single-core test."""
     saved = co_limits_reusable(params)
     if not saved:
         return {}
     st = {"params": params, "phase": "final", "results": saved["results"], "unstable": saved["unstable"],
           "samples": saved.get("samples") or {}, "co_reused": saved["time"], "active_cores": [], "final_tries": 0,
-          "final_failures": list(saved.get("final_failures", []))}
-    while st["final_tries"] < FINAL_RETRIES and at_known_bad(st, at_final_values(st)):   # already failed (even with a crash): +3
-        st["final_tries"] += 1
+          "core_margin": {}, "final_failures": [] if params.get("retry") else list(saved.get("final_failures", []))}
+    while not at_spent(st):                    # already failed (even with a crash): +3, on the core that failed alone
+        ff = at_known_bad(st, at_final_values(st))
+        if not ff:
+            break
+        at_raise(st, ff.get("core"))
     vals = at_final_values(st)
     for ps in saved.get("final_passed", []) if mode == "eco" else []:
-        if all(v <= e for v, e in zip(ps["values"], vals)) and not at_known_bad(st, ps["values"]):
+        if all(v <= e for v, e in zip(ps["values"], vals)) and not at_known_bad(st, ps["values"]) \
+                and (ps.get("single") or not params.get("single", 1)):
             st["eco_from"] = ps["time"]
     return st
 
@@ -1621,8 +1980,8 @@ def at_reused(mode, params):
 def at_mv_per_step(st):
     """Median of the slopes (V0 − Vlevel)/|level| over the cores tried at each level: robust
     to a sample taken under different conditions (frequency/temperature)."""
-    smp = st.get("samples", {})
-    ref = smp.get("0", {}).get("volt")
+    smp = st.get("samples") or {}
+    ref = (smp.get("0") or {}).get("volt")
     if not ref:
         return None
     slopes = []
@@ -1631,24 +1990,37 @@ def at_mv_per_step(st):
         if v >= 0:
             continue
         for c in range(CORES):
-            if sm["volt"][c] is not None and ref[c] is not None:
+            if sm and sm["volt"][c] is not None and ref[c] is not None:
                 slopes.append((ref[c] - sm["volt"][c]) * 1000.0 / -v)
     return round(median(slopes), 1) if slopes else None
 
 
 def cmd_autotune(ctx, args):
-    """autotune start eco|auto|boost [key=value…] | step | status | abort | save [apply] | estimate eco|auto|boost [key=value…]"""
-    st = _autotune(ctx, args)
+    """autotune start eco|auto|boost [key=value…] | verify <profile> [minutes=N watchdog=1] | step | status | abort |
+    finish | save [apply] | estimate eco|auto|boost [key=value…]. Under `serve` the hardware watchdog follows the run."""
+    if WD and args[:1] == ["step"]:
+        WD.follow(at_load())                   # (re)armed before the step: a resumed run is protected too
+    try:
+        st = _autotune(ctx, args)
+    except Exception:
+        if WD and args[:1] in (["start"], ["verify"], ["step"]):
+            WD.disarm()                        # the run stops here (the GUI shows the error and discards it)
+        raise
     if isinstance(st, dict) and st.get("phase"):
         st["eta"] = at_estimate(st)
-        st["mv_per_step"] = at_mv_per_step(st)
-        st["final_margin"] = at_margin(st)
+        if not st.get("verify"):
+            st["mv_per_step"] = at_mv_per_step(st)
+            st["final_margin"] = at_margin(st)
+    if WD and isinstance(st, dict) and "phase" in st:
+        WD.follow(st, arm=args[0] in ("start", "verify"))
+        if WD.status:
+            st["watchdog"] = WD.status
     return st
 
 
 def _autotune(ctx, args):
     if not args:
-        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"))
+        raise Err(_("usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1 watchdog=1] | verify <profile> [minutes=60] | step | status | abort | finish | save [apply] | estimate eco|auto|boost […]"))
     if args[0] == "status":
         return at_load() or {"phase": None}
     if args[0] == "estimate":
@@ -1659,7 +2031,19 @@ def _autotune(ctx, args):
         return {"total_s": at_total_estimate(args[1], p),
                 "parallel_total_s": at_total_estimate(args[1], dict(p, parallel=1)),
                 "sequential_total_s": at_total_estimate(args[1], dict(p, parallel=0)), "params": p,
-                "co_reuse": reused.get("co_reused"), "eco_from": reused.get("eco_from")}
+                "single_s": single_sec(), "co_reuse": reused.get("co_reused"), "eco_from": reused.get("eco_from")}
+    if args[0] == "verify":
+        return at_verify_start(ctx, args[1:])
+    if args[0] == "finish":                            # verify: stop now and keep what was tested
+        rm(P(AT_ABORT_FLAG))                           # raised by serve to interrupt the test in progress
+        st = at_load()
+        if not st or not st.get("verify") or st["phase"] != "verify":
+            raise Err(_("no verification in progress"))
+        at_attribute_crash(st)
+        st.pop("interrupted", None)
+        at_verify_done(ctx, st)
+        at_save(st)
+        return st
     if args[0] == "abort":
         st = at_load()
         if st:
@@ -1676,41 +2060,61 @@ def _autotune(ctx, args):
             raise Err(_("no completed calibration to save"))
         if args[1:] not in ([], ["apply"]):
             raise Err(_("usage: autotune save [apply]"))
-        cmd_profile(ctx, ["save", st["mode"]] + st["profile_lines"])
+        name = st.get("save_as") or st["mode"]
+        cmd_profile(ctx, ["save", name] + st["profile_lines"])
+        if st.get("save_as"):   # custom calibration: remembered with its base mode (GUI list, Boost's unlock rule)
+            s = load_settings()
+            s.setdefault("calibrated", {})[name] = {"base": st["mode"], "time": time.strftime("%Y-%m-%d %H:%M")}
+            save_settings(s)
         if args[1:]:
-            run(["apply", st["mode"]], ctx)
-            run(["use", st["mode"]], ctx)
+            run(["apply", name], ctx)
+            run(["use", name], ctx)
         rm(P(AT_PATH))
-        return {"phase": None, "saved": st["mode"], "applied": bool(args[1:])}
+        return {"phase": None, "saved": name, "applied": bool(args[1:])}
     if args[0] == "start":
         if len(args) < 2 or args[1] not in AT_DEFAULTS:
-            raise Err(_("usage: autotune start eco|auto [key=value…]"))
+            raise Err(_("usage: autotune start eco|auto|boost [name=<profile>] [key=value…]"))
         check_boost(args[1])
         check_cpu()
+        why = co_support()
+        if why:   # every calibration measures the CO
+            raise Err(_("Curve Optimizer not available on this CPU: %s") % why)
         base = load_baseline()
-        params = at_params(args[1], args[2:])
+        if args[1] == "auto" and "ppt" not in base:   # the knee sweeps the PPT, which needs the PM table
+            raise Err(_("Auto needs the power limits of the PM table, not readable on this CPU: use Eco or Boost"))
+        if args[1] == "auto" and board_limits(base):   # the knee would sweep the motherboard's limits
+            raise Err(board_limits(base))
+        name = next((a[5:] for a in args[2:] if a.startswith("name=")), None)   # custom: saved under its own name
+        if name is not None:
+            profile_path(name)                          # valid characters
+            if name in PRESETS or name in ("baseline", "default", "custom"):
+                raise Err(_("'%s' is a mode of its own: a custom calibration needs another name") % name)
+        params = at_params(args[1], [a for a in args[2:] if not a.startswith("name=")])
+        if params["retry"] and not name:   # it retries what already crashed: never over a mode's own profile
+            raise Err(_("retry=1 only for a custom calibration (name=<profile>): it retries what already crashed"))
         rm(P(AT_ABORT_FLAG))
         st = {"mode": args[1], "params": params, "phase": "co", "core": 0, "value": -CO_STEP,
               "parallel": bool(params["parallel"]), "active_cores": list(range(CORES)),
               "results": {}, "unstable": {}, "in_progress": None, "final_tries": 0,
               "started": time.strftime("%Y-%m-%d %H:%M"), "resumed_after_crash": False,
-              "eta_total": at_total_estimate(args[1], params)}   # fixed at start (afterwards the reuse would lower it)
+              "eta_total": at_total_estimate(args[1], params),   # fixed at start (afterwards the reuse would lower it)
+              "save_as": name}
         st.update(at_reused(args[1], params))       # limit already measured: only the final pass with this mode's margin
         if st.get("eco_from"):                      # Eco: these values already passed a final pass, no load test
             st["final"] = at_final_values(st)
             at_finish_eco(ctx, st, base)
-        elif st["final_tries"] >= FINAL_RETRIES:
+        elif at_spent(st):
             raise Err(_("the combined CO already proved unstable up to margin +%d: raise margin or repeat the search with reuse=0")
                       % (params["margin"] + 3 * (FINAL_RETRIES - 1)))
         else:
             apply_lines(profile_lines("baseline"), ctx, "cpu")      # all cores at baseline
             st["method"] = heaviest_method()                        # probed at factory CO: used in the search, final pass and knee
             _failed, ref = co_test_parallel(list(range(CORES)), 9, st["method"])   # reference: voltages at factory CO, same load
-            st["samples"] = st.get("samples") or {"0": ref}
+            st["samples"] = st.get("samples") or ({"0": ref} if ref else {})   # no per-core PM layout: no voltages
         at_save(st)
         return st
     if args[0] != "step":
-        raise Err(_("usage: autotune start|step|status|abort|save|estimate"))
+        raise Err(_("usage: autotune start|verify|step|status|abort|finish|save|estimate"))
     st = at_load()
     if not st or st["phase"] == "done":
         raise Err(_("no calibration in progress (autotune start eco|auto|boost)"))
@@ -1750,8 +2154,10 @@ def at_attribute_crash(st):
         st["active_cores"] = []
         st["phase"] = "final"
         co_limits_save(st)
-    elif ip["kind"] == "final":
-        at_final_failed(st, "crash")
+    elif ip["kind"] == "final":                        # with "core": the single-core test of that core alone
+        at_final_failed(st, "crash", ip.get("core"))
+    elif ip["kind"] == "verify":                       # the core under test; in the all-core pass every core tested
+        at_verify_record(st, [ip["core"]] if ip.get("core") is not None else ip["cores"], "crash")
     else:                                              # post: final CO applied, unstable combination
         at_post_failed(st, "crash")
     return True
@@ -1762,6 +2168,8 @@ def at_step(ctx, st, base):
     if at_attribute_crash(st):
         at_save(st)
         return st
+    if st.get("verify"):
+        return at_verify_step(ctx, st)
     if st["phase"] == "co" and st.get("parallel"):
         v, cores = st["value"], st["active_cores"]
         st["in_progress"] = {"kind": "co_par", "cores": cores, "value": v, "boot_id": boot_id()}
@@ -1811,21 +2219,33 @@ def at_step(ctx, st, base):
         at_save(st)
         return st
     if st["phase"] == "final":
-        vals = at_final_values(st)
+        # one step for the all-core part, then (single=1) one step per core alone: st["single"] = the next core
+        vals, c = at_final_values(st), st.get("single")
         st["in_progress"] = {"kind": "final", "boot_id": boot_id()}
+        if c is not None:
+            st["in_progress"]["core"] = c            # a crash here raises only this core
         at_save(st)
         run(["co"] + [str(v) for v in vals], ctx)
         try:
-            if "method" not in st:          # probed with the final CO applied: it is already part of the test
-                st["method"] = heaviest_method()
-            ok = co_test_final(st["method"], FINAL_SEC)
+            if c is not None:
+                ok = co_test_single(c)
+            else:
+                if "method" not in st:          # probed with the final CO applied: it is already part of the test
+                    st["method"] = heaviest_method()
+                ok = co_test_final(st["method"], FINAL_SEC)
         except Unstable as e:
             LAST_FAIL["why"] = str(e)
             ok = False
         st["in_progress"] = None
-        if ok:
+        if not ok:
+            at_final_failed(st, core=c)
+        elif st["params"].get("single", 1) and (c is None or c + 1 < CORES):
+            st["single"] = 0 if c is None else c + 1
+        else:
+            st.pop("single", None)
             st["final"] = vals
-            co_limits_note(st, "final_passed", {"values": vals, "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"]})
+            co_limits_note(st, "final_passed", {"values": vals, "time": time.strftime("%Y-%m-%d %H:%M"), "mode": st["mode"],
+                                                "single": st["params"].get("single", 1)})
             if st["mode"] == "eco":
                 at_finish_eco(ctx, st, base)
             elif st["mode"] == "boost":
@@ -1834,8 +2254,6 @@ def at_step(ctx, st, base):
                 st["phase"] = "ppt"
                 st["knee"] = {"method": st["method"], "ppt": {"current": base["ppt"], "tests": [], "chosen": None},
                               "fmax": {"current": None, "tests": [], "chosen": None}}
-        else:
-            at_final_failed(st)
         at_save(st)
         return st
     if st["phase"] in ("ppt", "fmax_knee", "bench"):
@@ -1879,14 +2297,17 @@ def at_next_core(st, base):
         co_limits_save(st)
 
 
-def at_final_failed(st, why=None):
-    """The combined pass failed: it is recorded and retried with +3 on all cores
-    (the measured per-core limits stay unchanged)."""
+def at_final_failed(st, why=None, core=None):
+    """The combined pass failed: it is recorded and the final pass starts over with +3 on all cores, or only
+    on `core` when it failed alone in the single-core test (the measured per-core limits stay unchanged)."""
     entry = {"values": at_final_values(st), "why": why or LAST_FAIL["why"] or "crash"}
+    if core is not None:
+        entry["core"] = core
     st.setdefault("final_failures", []).append(entry)
     co_limits_note(st, "final_failures", entry)
-    st["final_tries"] += 1
-    if st["final_tries"] >= FINAL_RETRIES:
+    st.pop("single", None)
+    at_raise(st, core)
+    if at_spent(st):
         st["phase"] = "done"
         st["error"] = _("final pass unstable even with the increased margin: CO left at baseline")
         run(["apply", "baseline", "cpu"], {})
@@ -1933,6 +2354,105 @@ def at_finish_eco(ctx, st, base):
     lines = ["co " + " ".join(str(v) for v in st["final"])]
     lines += [l for l in preset_lines("eco", base) if l.split()[0] not in ("co", "fan")]
     at_done(ctx, st, lines + at_fan_lines(st, base))
+
+
+# ---- autotune verify: long check of a saved profile (CoreCycler iterations, Ryzen Master "Validate Offset") --
+def at_verify_start(ctx, args):
+    """`autotune verify <profile> [minutes=N watchdog=1]`: the profile is applied with the normal `apply` (CPU part),
+    then only loads run, one test per step: every core alone (the single-core test of the final pass), then all
+    cores together (co_test_parallel), in iterations until the time is up. CO and limits are never written during
+    the run (the profile is applied again only after a reboot, when the CPU is back at stock)."""
+    if not args or "=" in args[0]:
+        raise Err(_("usage: autotune verify <profile> [minutes=%d]") % VERIFY_MINUTES)
+    name, p = args[0], {"minutes": VERIFY_MINUTES, "watchdog": 1}
+    for kv in args[1:]:
+        k, _sep, v = kv.partition("=")
+        if k not in p:
+            raise Err(_("unknown parameter '%s' (%s)") % (k, ", ".join(p)))
+        p[k] = to_int(v, k)
+    check_range("minutes", p["minutes"], VERIFY_MIN, VERIFY_MAX, " min")
+    check_range("watchdog", p["watchdog"], 0, 1)
+    if name == "baseline":
+        raise Err(_("'baseline' is reserved"))
+    try:
+        own = parse_lines(open(profile_path(name)).read())
+    except OSError:
+        raise Err(_("profile '%s' does not exist") % name)
+    if not any(t[0] == "co" for t in own):
+        raise Err(_("profile '%s' has no co line: nothing to verify") % name)
+    check_boost(name)
+    check_cpu()
+    why = co_support()
+    if why:
+        raise Err(_("Curve Optimizer not available on this CPU: %s") % why)
+    if at_load():
+        raise Err(_("a calibration or verification is already in progress or waiting for a choice: finish or discard it first"))
+    rm(P(AT_ABORT_FLAG))
+    apply_lines(profile_lines("baseline"), ctx, "cpu")             # the method probe, if needed, runs at stock
+    method = (co_limits_load() or {}).get("method") or heaviest_method()
+    run(["apply", name, "cpu"], ctx)
+    per = single_sec() + VERIFY_PAR_SEC
+    n = max(1, int(p["minutes"] * 60.0 / per + 0.5))
+    st = {"mode": name, "verify": True, "params": p, "phase": "verify", "core": 0, "iteration": 1, "iterations": n,
+          "final": read_co(), "lines": [" ".join(t) for t in own], "results": {}, "unstable": {}, "in_progress": None,
+          "method": method, "applied_boot": boot_id(), "started": time.strftime("%Y-%m-%d %H:%M"),
+          "resumed_after_crash": False, "eta_total": n * per}
+    at_save(st)
+    return st
+
+
+def at_verify_over(st):
+    return st["iteration"] > st["iterations"] or len(st["unstable"]) >= CORES
+
+
+def at_verify_step(ctx, st):
+    """One test of the verification: core st["core"] alone, or (st["core"] == CORES) all the cores not failed yet."""
+    if not at_verify_over(st):
+        if st.get("applied_boot") != boot_id():          # rebooted meanwhile (crash or not): the CPU is at stock again
+            run(["apply", st["mode"], "cpu"], ctx)
+            st["applied_boot"] = boot_id()
+        c, alive = st["core"], [k for k in range(CORES) if str(k) not in st["unstable"]]
+        st["in_progress"] = {"kind": "verify", "core": c if c < CORES else None, "cores": alive, "boot_id": boot_id()}
+        at_save(st)
+        if c < CORES:
+            failed, why = (set(), None) if co_test_single(c) else ({c}, LAST_FAIL["why"])
+        else:
+            failed, why = co_test_parallel(alive, VERIFY_PAR_SEC, st["method"])[0], _("load died or MCE error with all cores loaded")
+        st["in_progress"] = None
+        at_verify_record(st, failed, why)
+    if at_verify_over(st):
+        at_verify_done(ctx, st)
+    at_save(st)
+    return st
+
+
+def at_verify_record(st, failed, why):
+    """Outcome of the test in st["core"] (CORES: the all-core pass): the failed cores are recorded with the reason
+    and no longer tested, the others passed; then the next test: next core, all-core pass, next iteration.
+    State only (`boot` attributes a crash with it)."""
+    c = st["core"]
+    for k in failed:
+        st["unstable"][str(k)] = {"value": st["final"][k], "why": why}
+    for k in [c] if c < CORES else range(CORES):
+        if str(k) not in st["unstable"]:
+            st["results"][str(k)] = st["final"][k]
+    alive = [k for k in range(CORES) if str(k) not in st["unstable"]]
+    if c < CORES:
+        st["core"] = ([k for k in alive if k > c] + [CORES])[0]    # the all-core pass closes the iteration
+    else:
+        st["iteration"] += 1
+        st["core"] = (alive + [CORES])[0]
+
+
+def at_verify_done(ctx, st):
+    """End of the verification: CPU back at baseline (at_done). Proposal: the same profile with only the failed
+    cores raised by CORE_RAISE (towards 0, never above it); nothing when every core held."""
+    failed = {int(k) for k in st["unstable"]}
+    lines = []
+    if failed:
+        st["final"] = [max(v, min(0, v + CORE_RAISE)) if c in failed else v for c, v in enumerate(st["final"])]
+        lines = ["co " + " ".join(str(v) for v in st["final"])] + [l for l in st["lines"] if l.split()[0] != "co"]
+    at_done(ctx, st, lines)
 
 
 # ---- Crash guard: dirty / active / crashed markers -----------------------------------------
@@ -2463,17 +2983,22 @@ def cmd_hwtest(ctx, args):
     check_cpu()
     base = load_baseline()
     last = CORES - 1   # the last core (7 on 8 cores)
-    steps = [("co", [str(last), str(max(CO_MIN, base["co"][last] - 3))], [str(last), str(base["co"][last])]),
-             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])])]
+    no_co = co_support()
+    steps = [("co", [str(last), str(max(CO_MIN, base["co"][last] - 3))], [str(last), str(base["co"][last])]) if not no_co
+             else ("co", None, _("skipped: %s") % no_co),
+             ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])]) if "fmax" in base
+             else ("fmax", None, _("skipped: not available on this CPU"))]
     for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
         if key in base:
             steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
         else:
-            steps.append((key, None, None))
+            steps.append((key, None, _("skipped: no baseline (PM table missing)")))
+    if "boost" in base:   # the kernel switch (no SMU): the other value, then back
+        steps.append(("boost", ["off" if base["boost"] == "on" else "on"], [base["boost"]]))
     results, failed = {}, False
     for key, test, restore in steps:
         if test is None:
-            results[key] = _("skipped: no baseline (PM table missing)")
+            results[key] = restore   # the reason of the skip
             continue
         try:
             run([key] + test, ctx)
@@ -2497,6 +3022,150 @@ def fmt_hwtest(r):
     return "\n".join("%-9s %s" % (k, v) for k, v in r.items())
 
 
+# ---- Hardware watchdog during a calibration (serve only) ----------------------------------
+# On Ryzen 9000 a too negative CO can freeze the machine instead of resetting it. While a calibration or a
+# verification runs under `serve` (the GUI), the first /sys/class/watchdog device stays armed and kept alive:
+# a freeze becomes a reset after its timeout, then the crash-guard and the resume of the run take over. The
+# CLI (one process per step) never arms it. Residual risk: if `serve` is killed with SIGKILL mid-run nothing
+# sends the magic close, the machine resets after the timeout and the next boot treats it as a crash
+# (conservative: the step in progress is recorded as unstable).
+WD_CLASS = "/sys/class/watchdog"
+WD_PET_SEC = 10                   # keepalive interval; arming needs a timeout of at least twice as much
+WDIOC_GETSUPPORT = 0x80285700     # _IOR('W', 0, struct watchdog_info {u32 options, firmware_version; u8 identity[32]})
+WDIOF_MAGICCLOSE = 0x0100
+WD = None                         # the Watchdog of this `serve` process; None under the CLI
+
+
+class Watchdog:
+    """Armed = the device is open (opening starts the timer) and a daemon thread writes a keepalive every
+    WD_PET_SEC; disarmed only by the magic close ("V", then close) checked on the sysfs state. `status` is
+    the text that `autotune …` reports under serve."""
+
+    def __init__(self):
+        import threading
+        self.lock = threading.Lock()
+        self.fd = self.stop = self.sys = self.dev = self.status = None
+        self.timeout, self.closed = 0, False     # closed: serve is exiting, never armed again
+
+    def follow(self, st, arm=True):
+        """Armed while a run is in progress (unless watchdog=0), disarmed as soon as it is done, aborted or gone."""
+        if not st or st.get("phase") in (None, "done"):
+            self.disarm()
+        elif not st["params"].get("watchdog", 1):
+            self.status = _("unavailable: %s") % _("disabled (watchdog=0)")
+        elif arm:
+            self.arm()
+
+    def why_not(self):
+        """Why the first watchdog must not be armed (fail closed: whatever could not surely be stopped), or None."""
+        if FAKE:
+            FAKE.wd_files()
+        base = P(WD_CLASS)
+        names = sorted((n for n in (os.listdir(base) if os.path.isdir(base) else []) if re.fullmatch(r"watchdog\d+", n)),
+                       key=lambda n: int(n[8:]))
+        if not names:
+            return _("no hardware watchdog (%s)") % WD_CLASS
+        self.sys, self.dev = WD_CLASS + "/" + names[0], "/dev/" + names[0]
+        try:
+            nowayout, state = read_text(self.sys + "/nowayout"), read_text(self.sys + "/state")
+            self.timeout = int(read_text(self.sys + "/timeout"))
+        except (OSError, ValueError):
+            return _("%s does not report nowayout, state and timeout") % names[0]
+        try:
+            param = read_text(self.sys + "/device/driver/module/parameters/nowayout")   # most drivers hide it
+        except OSError:
+            param = "N"
+        if nowayout != "0" or param in ("Y", "1"):
+            return _("nowayout is set: once armed it could never be stopped")
+        if state != "inactive":
+            return _("already active (used by the system or by another program)")
+        if self.timeout < 2 * WD_PET_SEC:
+            return _("timeout of %d s shorter than twice the keepalive interval (%d s)") % (self.timeout, WD_PET_SEC)
+        return None
+
+    def open(self):
+        return FAKE.wd_open(self.dev) if FAKE else os.open(P(self.dev), os.O_WRONLY)
+
+    def arm(self):
+        import errno
+        with self.lock:
+            if self.fd is not None or self.closed:
+                return
+            why = self.why_not()
+            if not why:
+                try:
+                    self.fd = self.open()
+                except OSError as e:
+                    why = _("in use by another program (systemd RuntimeWatchdogSec?)") if e.errno == errno.EBUSY else e.strerror
+            if why:
+                self.status = _("unavailable: %s") % why
+                return
+            try:   # open = running: from here on only a verified magic close stops it
+                opts = FAKE.wd_options() if FAKE else struct.unpack_from("I", fcntl.ioctl(self.fd, WDIOC_GETSUPPORT, bytes(40)))[0]
+            except OSError:
+                opts = 0
+            if not opts & WDIOF_MAGICCLOSE:
+                if self.release():   # without magic close any close stops it
+                    self.status = _("unavailable: %s") % _("the driver has no magic close")
+                return
+            self.keepalive()
+            self.status = _("armed (%d s)") % self.timeout
+
+    def keepalive(self):
+        """Daemon thread writing a keepalive every WD_PET_SEC (lock held by the caller)."""
+        import threading
+        stop = self.stop = threading.Event()
+
+        def pet():
+            while not stop.wait(WD_PET_SEC):
+                with self.lock:
+                    if stop.is_set():
+                        return                     # the magic "V" must be the last write before the close
+                    try:
+                        os.write(self.fd, b"\0")
+                    except OSError as e:
+                        self.status = _("ERROR: keepalive failed (%s): the PC resets within %d s") % (e.strerror, self.timeout)
+        threading.Thread(target=pet, daemon=True).start()
+
+    def release(self):
+        """Magic close, then the sysfs state must say inactive (lock held). If the timer still runs it is reopened
+        and kept alive, never left armed without a keepalive. True if stopped."""
+        if self.stop:
+            self.stop.set()
+        fd, self.fd = self.fd, None
+        try:
+            os.write(fd, b"V")
+        except OSError:
+            pass
+        if FAKE:
+            FAKE.wd_close(fd)
+        else:
+            os.close(fd)
+        try:
+            if read_text(self.sys + "/state") == "inactive":
+                return True
+        except OSError:
+            pass
+        try:
+            self.fd = self.open()
+            self.keepalive()
+            self.status = _("ERROR: still running after the magic close, kept alive: the PC resets %d s after Ryzen Control closes") % self.timeout
+        except OSError as e:
+            self.status = _("ERROR: still running after the magic close and not reopened (%s): the PC resets within %d s") % (e.strerror, self.timeout)
+        return False
+
+    def disarm(self, final=False):
+        """Magic close if armed; final (serve exiting): never armed again. False if the timer still runs (kept alive)."""
+        with self.lock:
+            self.closed = self.closed or final
+            if self.fd is None:
+                return True
+            stopped = self.release()
+            if stopped:
+                self.status = _("disarmed")
+            return stopped
+
+
 # ---- serve: protocol for the GUI (one JSON line per request and per reply) ---------
 SERVE_DENY = {"serve", "boot", "shutdown", "resume", "selftest"}   # autotune step is allowed: the GUI drives it
 
@@ -2517,9 +3186,13 @@ def serve_one(line):
 
 def cmd_serve(ctx, args):
     """Requests run in order on a single thread (serialized SMU); the reader stays
-    free so that `autotune abort` interrupts a long step at once (flag + stress-ng terminated)."""
+    free so that `autotune abort` interrupts a long step at once (flag + stress-ng terminated).
+    A calibration keeps the hardware watchdog armed (Watchdog): magic close on every way out."""
     import queue
+    import signal
     import threading
+    global WD
+    WD = Watchdog()
     q = queue.Queue()
 
     def worker():
@@ -2529,20 +3202,35 @@ def cmd_serve(ctx, args):
                 return
             sys.stdout.write(json.dumps(serve_one(line), ensure_ascii=False) + "\n")
             sys.stdout.flush()
+
+    def on_signal(signum, _frame):   # logout, shutdown, Ctrl-C: the magic close first, then out at once
+        WD.disarm(final=True)
+        os._exit(128 + signum)
+    sigs = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
+    old = {s: signal.signal(s, on_signal) for s in sigs}
     t = threading.Thread(target=worker, daemon=True)
     t.start()
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            if json.loads(line) == ["autotune", "abort"]:
-                at_request_abort()
-        except ValueError:
-            pass
-        q.put(line)
-    q.put(None)
-    t.join()
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                if json.loads(line) in (["autotune", "abort"], ["autotune", "finish"]):
+                    at_request_abort()
+            except ValueError:
+                pass
+            q.put(line)
+        q.put(None)
+        t.join()                         # the step in progress ends first (armed meanwhile)
+    finally:   # end of input (GUI closed) or an exception: no signal handler may interrupt this magic close
+        for s in sigs:
+            signal.signal(s, signal.SIG_IGN)
+        while not WD.disarm(final=True):   # the timer still runs after the magic close: kept alive, retried
+            time.sleep(WD_PET_SEC)
+        for s, h in old.items():
+            signal.signal(s, signal.SIG_DFL if h is None else h)   # None: a handler installed outside Python
+        WD = None
 
 
 # ---- Dispatcher ------------------------------------------------------------------------
@@ -2552,7 +3240,7 @@ COMMANDS = {
     "tdc": limit_setter("tdc", "tdc_limit", "tdc_set", "A", TDC_MIN),
     "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
     "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
-    "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "unlock": cmd_unlock,
+    "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "boost": cmd_boost, "unlock": cmd_unlock,
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart, "trust": cmd_trust,
     "default": cmd_default, "boot": cmd_boot, "shutdown": cmd_shutdown, "resume": cmd_resume,
     "crashed": cmd_crashed, "notify": cmd_notify, "serve": cmd_serve, "hwtest": cmd_hwtest,
@@ -2912,29 +3600,46 @@ def selftest():
     run(["profile", "delete", "boost"])
 
     # ---- autotune eco: Auto's CO (fresh install: search from scratch + final pass), eco preset values ----
+    def final_pass():
+        """One final pass: the all-core step, then (single=1) one step per core alone; the state after it."""
+        st = run(["autotune", "step"])
+        while st["phase"] == "final" and st.get("single") is not None:
+            st = run(["autotune", "step"])
+        return st
+    S = single_sec()                                   # the single-core part of the final pass: 8 × (45 + 2) s
+    assert S == 8 * 47
     expect_err(["autotune", "step"], "no calibration")
     expect_err(["autotune", "start", "eco", "colimit=5"], "out of range")
     est = run(["autotune", "estimate", "eco"])
-    assert est["parallel_total_s"] == 8 * 90 + 24 + 60 + 300 and est["sequential_total_s"] == 8 * 8 * 90 + 24 + 60 + 300, est
-    assert est["co_reuse"] is None and est["eco_from"] is None, est
+    assert est["parallel_total_s"] == 8 * 90 + 24 + 60 + 300 + S and est["sequential_total_s"] == 8 * 8 * 90 + 24 + 60 + 300 + S, est
+    assert est["co_reuse"] is None and est["eco_from"] is None and est["single_s"] == S, est
+    assert run(["autotune", "estimate", "eco", "single=0"])["total_s"] == est["total_s"] - S   # the single-core part costs S
     expect_err(["autotune", "estimate", "eco", "parallel=2"], "out of range")
+    expect_err(["autotune", "estimate", "eco", "single=2"], "out of range")
+    expect_err(["autotune", "estimate", "eco", "watchdog=-1"], "out of range")
     rm(P(CO_LIMITS_PATH))
     st = run(["autotune", "start", "eco", "step=9"])
     assert st["phase"] == "co" and st["params"]["colimit"] == -40 and st["params"]["margin"] == 3 and st["params"]["step"] == 9 and st["parallel"]
-    assert st["eta"]["remaining_s"] == 8 * 9 + 60 + 300 and st["eta"]["total_s"] == 8 * 9 + 24 + 60 + 300, st["eta"]
-    steps = 0
+    assert st["params"]["single"] == 1 and st["params"]["watchdog"] == 1 and "watchdog" not in st   # the CLI never arms it
+    assert st["eta"]["remaining_s"] == 8 * 9 + 60 + 300 + S and st["eta"]["total_s"] == 8 * 9 + 24 + 60 + 300 + S, st["eta"]
+    steps, singles = 0, []
     for _i in range(200):
         st = run(["autotune", "step"])
         steps += 1
+        singles.append(st.get("single"))
+        if st["phase"] == "final" and st.get("single") is not None:   # each core alone: only the cores still to test remain
+            assert st["eta"]["remaining_s"] == (8 - st["single"]) * 47, st["eta"]
         if st["phase"] == "done":
             break
-    assert steps == 8 + 1 and st["eta"]["remaining_s"] == 0, steps   # 8 levels in parallel, final pass, nothing else
+    assert steps == 8 + 1 + 8 and st["eta"]["remaining_s"] == 0, steps   # 8 levels in parallel, final pass on all cores, then each alone
+    assert singles[8:16] == list(range(8)) and "single" not in st, singles
     eco_co = "co -37 -37 -37 -22 -37 -37 -37 -12"
     eco_lines = [eco_co] + [l for l in preset_lines("eco", load_baseline()) if l.split()[0] not in ("co", "fan")] + [
         "fan 1 step 10000 5000", "fan 1 curve 60:77 75:255"]   # eco preset with the CO and the quiet fans (curve from target −10)
     assert st["profile_lines"] == eco_lines and "fmax 4825" in eco_lines and "ppt 89" in eco_lines, st["profile_lines"]
     passed = json.loads(read_text(CO_LIMITS_PATH))["final_passed"]       # the successful final pass is remembered
     assert len(passed) == 1 and passed[0]["values"] == st["final"] and passed[0]["mode"] == "eco" and passed[0]["time"], passed
+    assert passed[0]["single"] == 1, passed                              # …with its single-core part
     assert st["samples"]["0"]["volt"][0] == 1.25 and st["samples"]["-20"]["volt"][0] == 1.19, st["samples"]   # −20 ≈ −60 mV in the fake
     assert st["samples"]["-25"]["volt"][7] is None and st["samples"]["-25"]["volt"][0] == 1.175   # core 7 out of the test at −25
     assert run(["telemetry"])["cores"][0]["volt"] is not None
@@ -2957,10 +3662,10 @@ def selftest():
     # limits measured but no recorded pass (measurement from an older version): final pass only, then remembered
     write_atomic(P(CO_LIMITS_PATH), json.dumps(dict(json.loads(read_text(CO_LIMITS_PATH)), final_passed=[])))
     est = run(["autotune", "estimate", "eco"])
-    assert est["co_reuse"] and est["eco_from"] is None and est["parallel_total_s"] == 24 + 60 + 300, est
+    assert est["co_reuse"] and est["eco_from"] is None and est["parallel_total_s"] == 24 + 60 + 300 + S, est
     st = run(["autotune", "start", "eco", "step=9"])
-    assert st["phase"] == "final" and st["co_reused"] and st["eta"]["total_s"] == 24 + 60 + 300, st
-    st = run(["autotune", "step"])
+    assert st["phase"] == "final" and st["co_reused"] and st["eta"]["total_s"] == 24 + 60 + 300 + S, st
+    st = final_pass()
     assert st["phase"] == "done" and st["profile_lines"] == eco_lines, st
     assert json.loads(read_text(CO_LIMITS_PATH))["final_passed"][0]["values"] == st["final"]
     run(["autotune", "abort"])
@@ -2975,7 +3680,7 @@ def selftest():
     run(["autotune", "abort"])
     # resume after a crash (core by core): the step in progress becomes unstable, move on to the next core
     st = run(["autotune", "start", "auto", "step=9", "parallel=0", "reuse=0"])
-    assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 60 + 300 + 5 * 20 + 6 * 18, st["eta"]
+    assert not st["parallel"] and st["eta"]["remaining_s"] == 8 * 8 * 9 + 60 + 300 + S + 5 * 20 + 6 * 18, st["eta"]
     assert core_cpus(3) == "3,11" and core_load_args(3)[:4] == ["--cpu", "2", "--taskset", "3,11"]
     run(["autotune", "step"])                          # core 0 at -5: ok
     st = run(["autotune", "status"])
@@ -3012,14 +3717,14 @@ def selftest():
     FAKE.save()
     run(["unlock", "on"])                                       # Boost only with unlock
     st = run(["autotune", "start", "boost", "step=3"])          # reuses the eco limits
-    assert st["phase"] == "final" and st["eta"]["total_s"] == 300 + 60 + 4 * 6 + 4 * 20
-    for _i in range(20):
+    assert st["phase"] == "final" and st["eta"]["total_s"] == 300 + 60 + 4 * 6 + S + 4 * 20
+    for _i in range(40):
         st = run(["autotune", "step"])
         if st["phase"] == "done":
             break
     assert st["final_tries"] == 1 and st["final_failures"][0]["why"] == "simulato", st
     assert st["results"]["0"] == -40 and st["final"][0] == -34 and st["final"][7] == -9, (st["results"], st["final"])
-    assert st["eta"]["total_s"] == 300 + 60 + 4 * 6 + 4 * 20     # total fixed at start
+    assert st["eta"]["total_s"] == 300 + 60 + 4 * 6 + S + 4 * 20     # total fixed at start
     run(["autotune", "abort"])                                   # discards the proposal: no profile written
     assert "boost" not in run(["profile", "list"])["profiles"]
     run(["unlock", "off"])
@@ -3030,7 +3735,7 @@ def selftest():
     assert saved["results"]["7"] == -15 and saved["colimit"] == -40 and saved["method"] == "matrixprod", saved
     assert run(["autotune", "estimate", "auto", "colimit=-45"])["co_reuse"] is None   # shallower than requested: new search
     est = run(["autotune", "estimate", "auto"])
-    assert est["co_reuse"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + 5 * 20 + 6 * 18, est
+    assert est["co_reuse"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + S + 5 * 20 + 6 * 18, est
     st = run(["autotune", "start", "auto", "step=3"])
     assert st["phase"] == "final" and st["co_reused"] and st["results"]["7"] == -15
     # the combination failed by boost (margin 3) is remembered: auto already starts from +6
@@ -3070,7 +3775,7 @@ def selftest():
     run(["profile", "delete", "auto"])
     # ---- autotune boost: pushed CO + limits/FMax at the caps + measured gain ----
     est = run(["autotune", "estimate", "boost"])
-    assert "target" not in est["params"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + 4 * 20 and est["co_reuse"], est
+    assert "target" not in est["params"] and est["parallel_total_s"] == 300 + 60 + 4 * 6 + S + 4 * 20 and est["co_reuse"], est
     run(["unlock", "on"])                                   # Boost only with unlock: limits and FMax at the unlock ceilings
     st = run(["autotune", "start", "boost", "step=3"])      # reuses the limit measured by auto (−40 → −37)
     assert st["phase"] == "final" and st["co_reused"]
@@ -3091,7 +3796,7 @@ def selftest():
     # ---- instability after the final pass: crash or dead benchmark → unstable combination, final pass repeated with +3 ----
     st = run(["autotune", "start", "auto", "step=3"])          # reuses −40: starts from the final pass at −37
     assert st["phase"] == "final" and st["final_tries"] == 0
-    st = run(["autotune", "step"])                            # final pass ok → knee
+    st = final_pass()                                         # final pass ok → knee
     assert st["phase"] == "ppt" and st["final"] == [-37] * CORES and st["method"] == "matrixprod" and st["knee"]["method"] == "matrixprod"
     st["in_progress"] = {"kind": "post", "boot_id": "other-boot"}   # crash during the sweep
     at_save(st)
@@ -3099,7 +3804,7 @@ def selftest():
     assert st["resumed_after_crash"] and st["phase"] == "final" and st["final_tries"] == 1 and "knee" not in st, st
     assert st["final_failures"][-1] == {"values": [-37] * CORES, "why": "crash"}
     assert json.loads(open(P(CO_LIMITS_PATH)).read())["final_failures"][-1]["values"] == [-37] * CORES   # remembered
-    st = run(["autotune", "step"])                            # final pass at −34 ok → knee
+    st = final_pass()                                         # final pass at −34 ok → knee
     assert st["phase"] == "ppt" and st["final"] == [-34] * CORES
     FAKE.s["bench_fail"] = True                               # stress-ng dies with the final CO applied
     FAKE.save()
@@ -3126,7 +3831,7 @@ def selftest():
     saved["final_failures"] = saved["final_failures"][:2]        # two failures again for the `boot` test
     write_atomic(P(CO_LIMITS_PATH), json.dumps(saved))
     st = run(["autotune", "start", "auto", "step=3"])
-    st = run(["autotune", "step"])                            # final pass at −31 ok → knee
+    st = final_pass()                                         # final pass at −31 ok → knee
     assert st["phase"] == "ppt"
     st["in_progress"] = {"kind": "post", "boot_id": "other-boot"}
     at_save(st)
@@ -3146,6 +3851,123 @@ def selftest():
     assert run(["autotune", "status"])["phase"] is None
     rm(P(CO_LIMITS_PATH))
     FAKE.s["co_limits"] = {"7": -15, "3": -25}
+    FAKE.save()
+
+    # ---- single-core test in the final pass (CoreCycler): a core stable with all cores loaded fails alone ----
+    FAKE.s["single_limits"] = {"5": -33}          # core 5: −37 holds with all cores loaded, alone it needs −33
+    FAKE.save()
+    eco_final = [-37, -37, -37, -22, -37, -37, -37, -12]
+    st = run(["autotune", "start", "eco", "step=3", "reuse=0", "single=0"])   # without the single-core part: as before
+    for _i in range(100):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["final"] == eco_final and "core_margin" not in st and st["final_tries"] == 0, st
+    assert json.loads(read_text(CO_LIMITS_PATH))["final_passed"][-1]["single"] == 0
+    run(["autotune", "abort"])
+    # a pass without the single-core part (or from an older version) does not validate Eco when single=1
+    assert run(["autotune", "estimate", "eco"])["eco_from"] is None and run(["autotune", "estimate", "eco", "single=0"])["eco_from"]
+    st = run(["autotune", "start", "eco", "step=3"])          # reuses the limits: final pass, now with each core alone
+    assert st["phase"] == "final" and not st.get("eco_from")
+    st = final_pass()                                         # all cores together ok, core 5 alone at −37: failed
+    assert st["phase"] == "final" and st["core_margin"] == {"5": CORE_RAISE} and st["final_tries"] == 0, st
+    assert st["final_failures"][-1] == {"values": eco_final, "why": "simulato", "core": 5}, st["final_failures"]
+    assert at_final_values(st) == [-37, -37, -37, -22, -37, -34, -37, -12] and st["final_margin"] == 3   # only core 5 raised
+    assert at_known_bad(st, [0] * 4 + [-50, -37, 0, 0]) and not at_known_bad(st, [-50] * 5 + [-34, -50, -50])   # that core only
+    # a crash while a core runs alone: only that core is raised, the final pass starts over
+    st = run(["autotune", "step"])                            # all cores together at the new values: ok
+    assert st["single"] == 0, st
+    st["in_progress"] = {"kind": "final", "core": 2, "boot_id": "other-boot"}
+    at_save(st)
+    st = run(["autotune", "step"])
+    assert st["resumed_after_crash"] and st["core_margin"] == {"5": 3, "2": 3} and st["final_tries"] == 0 and "single" not in st, st
+    assert st["final_failures"][-1] == {"values": [-37, -37, -37, -22, -37, -34, -37, -12], "why": "crash", "core": 2}
+    for _i in range(100):                                     # core 5 alone fails again at −34 (+6), then −31 holds
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["final"] == [-37, -37, -34, -22, -37, -31, -37, -12] and st["core_margin"] == {"5": 6, "2": 3} and "error" not in st, st
+    run(["autotune", "abort"])
+    # the cores that failed alone are remembered: the next calibration starts with only those raised
+    st = run(["autotune", "start", "auto", "step=3"])
+    assert at_final_values(st) == [-37, -37, -34, -22, -37, -31, -37, -12] and st["final_tries"] == 0, st
+    assert st["core_margin"] == {"5": 6, "2": 3}
+    run(["autotune", "abort"])
+    st = run(["autotune", "start", "eco", "step=3"])          # Eco: that final pass (with each core alone) validates it
+    assert st["phase"] == "done" and st["eco_from"] and st["final"] == [-37, -37, -34, -22, -37, -31, -37, -12], st
+    run(["autotune", "abort"])
+    FAKE.s["single_limits"] = {}
+    FAKE.save()
+
+    # ---- autotune verify: long check of a saved profile, loads only, result per core, proposal ----
+    expect_err(["autotune", "verify"], "usage")
+    expect_err(["autotune", "verify", "nope"], "does not exist")
+    expect_err(["autotune", "verify", "baseline"], "reserved")
+    run(["profile", "save", "noco", "ppt 150"])
+    expect_err(["autotune", "verify", "noco"], "no co line")
+    run(["profile", "delete", "noco"])
+    vok = ["co -10 -10 -10 -10 -10 -10 -10 -10", "ppt 150", "fan 1 step 10000 5000"]
+    run(["profile", "save", "vok"] + vok)
+    expect_err(["autotune", "verify", "vok", "minutes=5"], "out of range")
+    expect_err(["autotune", "verify", "vok", "hours=1"], "unknown parameter")
+    run(["autotune", "start", "eco", "step=3"])
+    expect_err(["autotune", "verify", "vok"], "already in progress")     # a calibration is running (or waiting for a choice)
+    run(["autotune", "abort"])
+    expect_err(["autotune", "finish"], "no verification")
+    FAKE.s["log"] = []
+    FAKE.save()
+    st = run(["autotune", "verify", "vok", "minutes=10"])   # 10 min: one iteration (8 cores alone + all together ≈ 7 min)
+    assert st["phase"] == "verify" and st["verify"] and st["iterations"] == 1 and st["core"] == 0 and st["final"] == [-10] * CORES, st
+    assert st["eta"] == {"total_s": S + VERIFY_PAR_SEC, "remaining_s": S + VERIFY_PAR_SEC} and "final_margin" not in st, st
+    assert run(["status"])["co"] == [-10] * CORES and run(["status"])["limits"]["ppt"] == 150.0   # applied with `apply`
+    writes, cores_seen = len(FAKE.s["log"]), []
+    for _i in range(50):
+        cores_seen.append(st["core"])
+        st = run(["autotune", "step"])                        # one test per step: each core alone, then all together
+        if st["phase"] == "done":
+            break
+        assert len(FAKE.s["log"]) == writes, "SMU written during the verification"
+    assert cores_seen == list(range(CORES + 1)), cores_seen
+    assert st["profile_lines"] == [] and st["unstable"] == {} and st["results"] == {str(c): -10 for c in range(CORES)}, st
+    assert run(["status"])["co"] == [0] * CORES and not os.path.exists(marker("active"))   # back at baseline
+    expect_err(["autotune", "save"], "no completed calibration")          # held: nothing proposed
+    run(["autotune", "abort"])
+    # crash while a core runs alone: recorded on that core, the run goes on; after a reboot the profile is applied again
+    st = run(["autotune", "verify", "vok", "minutes=10"])
+    st = run(["autotune", "step"])                            # core 0 ok
+    st["in_progress"] = {"kind": "verify", "core": 1, "cores": list(range(CORES)), "boot_id": "other-boot"}
+    at_save(st)
+    reboot()
+    assert run(["boot"])["crashed"]                           # the crash-guard: profile not reapplied at boot
+    run(["crashed", "clear"])
+    assert run(["autotune", "status"])["unstable"] == {"1": {"value": -10, "why": "crash"}}   # attributed by boot already
+    st = run(["autotune", "step"])                            # core 2, with the profile applied again
+    assert st["resumed_after_crash"] and st["core"] == 3 and run(["status"])["co"] == [-10] * CORES, st
+    for _i in range(10):                                      # up to the all-core pass, then a crash during it
+        if st["core"] == CORES:
+            break
+        st = run(["autotune", "step"])
+    st["in_progress"] = {"kind": "verify", "core": None, "cores": [0, 2, 3], "boot_id": "other-boot"}
+    at_save(st)
+    st = run(["autotune", "finish"])                          # stop now: result and proposal from what was tested
+    assert st["phase"] == "done" and set(st["unstable"]) == {"0", "1", "2", "3"}, st
+    assert st["profile_lines"] == ["co -7 -7 -7 -7 -10 -10 -10 -10", "ppt 150", "fan 1 step 10000 5000"], st["profile_lines"]
+    run(["autotune", "abort"])
+    # a core that fails alone: only that one raised in the proposal, then Save
+    FAKE.s["single_limits"] = {"5": -8}
+    FAKE.save()
+    st = run(["autotune", "verify", "vok", "minutes=30"])     # 30 min: 4 iterations
+    assert st["iterations"] == 4
+    for _i in range(100):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["unstable"] == {"5": {"value": -10, "why": "simulato"}} and st["iteration"] == 5, st
+    assert st["final"] == [-10] * 5 + [-7] + [-10] * 2 and st["profile_lines"] == ["co -10 -10 -10 -10 -10 -7 -10 -10"] + vok[1:], st
+    assert run(["status"])["co"] == [0] * CORES and run(["autotune", "save"])["saved"] == "vok"
+    assert run(["profile", "show", "vok"])["lines"][-3:] == ["co -10 -10 -10 -10 -10 -7 -10 -10"] + vok[1:]
+    run(["profile", "delete", "vok"])
+    FAKE.s["single_limits"] = {}
     FAKE.save()
 
     # ---- telemetry and caps ----
@@ -3187,8 +4009,122 @@ def selftest():
     assert not replies[2]["ok"] and "serve" in replies[2]["error"]
     assert not replies[3]["ok"]
     assert replies[4]["ok"] and replies[4]["data"]["co"][7] == -3
+    selftest_watchdog()
     selftest_variants()
     print("selftest ok (%s)" % ROOT)
+
+
+def selftest_watchdog():
+    """The hardware watchdog on the fake device (never a real one): armed only while a run goes on under serve,
+    keepalives, magic close and check at done/abort/end of input/SIGTERM, never armed when it could not be stopped."""
+    global WD_PET_SEC
+    import io
+    import signal
+    transcript = lambda: open(P(Fake.WD_DEV), "rb").read()      # "\0" keepalive, "V" magic, "C" close
+    state = lambda: read_text(Fake.WD_SYS + "/state")
+    FAKE.wd_files()
+
+    def setting(key, value):
+        FAKE.s[key] = value
+        FAKE.save()
+
+    def serve(requests):
+        open(P(Fake.WD_DEV), "wb").close()
+        stdin, stdout = sys.stdin, sys.stdout
+        sys.stdin, sys.stdout = io.StringIO("".join(json.dumps(r) + "\n" for r in requests)), io.StringIO()
+        try:
+            run(["serve"])
+            return [(json.loads(l).get("data") or {}).get("watchdog") for l in sys.stdout.getvalue().splitlines()]
+        finally:
+            sys.stdin, sys.stdout = stdin, stdout
+    # direct: armed, keepalives from the thread, magic close, then nothing more
+    pet, WD_PET_SEC = WD_PET_SEC, 0.01
+    try:
+        wd = Watchdog()
+        wd.arm()
+        assert wd.status == "armed (60 s)" and state() == "active", wd.status
+        for _i in range(300):
+            if b"\0" in transcript():
+                break
+            time.sleep(0.01)
+        assert b"\0" in transcript(), "no keepalive"
+        assert wd.disarm() and transcript().endswith(b"VC") and state() == "inactive" and wd.status == "disarmed"
+        n = len(transcript())
+        time.sleep(0.05)
+        assert len(transcript()) == n, "keepalive after the magic close"
+        # a driver that keeps running after the magic close: reopened and kept alive, never left without keepalive
+        wd.arm()
+        setting("wd_deaf", True)
+        assert not wd.disarm() and state() == "active" and wd.status.startswith("ERROR") and wd.fd is not None, wd.status
+        n = len(transcript())
+        for _i in range(300):
+            if len(transcript()) > n:
+                break
+            time.sleep(0.01)
+        assert transcript()[n:] and transcript()[n:].strip(b"\0") == b"", transcript()   # keepalives go on
+        setting("wd_deaf", False)
+        assert wd.disarm(final=True) and state() == "inactive"
+        wd.arm()                                                    # serve exiting: never armed again
+        assert wd.fd is None and state() == "inactive"
+    finally:
+        WD_PET_SEC = pet
+    # never armed when it could not be stopped for sure, or when it is not ours
+    for key, value, why in (("nowayout", "1", "nowayout"), ("state", "active", "already active"), ("timeout", "15", "shorter")):
+        with open(P(Fake.WD_SYS + "/" + key), "w") as fh:
+            fh.write(value + "\n")
+        open(P(Fake.WD_DEV), "wb").close()
+        wd = Watchdog()
+        wd.arm()
+        assert wd.fd is None and why in wd.status and transcript() == b"", (key, wd.status)
+        with open(P(Fake.WD_SYS + "/" + key), "w") as fh:
+            fh.write({"nowayout": "0", "state": "inactive", "timeout": "60"}[key] + "\n")
+    setting("wd_busy", True)
+    wd = Watchdog()
+    wd.arm()
+    assert wd.fd is None and "in use" in wd.status and state() == "inactive", wd.status
+    setting("wd_busy", False)
+    setting("wd_no_magic", True)                                    # opened (= started), then closed: it stops
+    open(P(Fake.WD_DEV), "wb").close()
+    wd = Watchdog()
+    wd.arm()
+    assert wd.fd is None and "no magic close" in wd.status and state() == "inactive" and transcript() == b"VC", wd.status
+    setting("wd_no_magic", False)
+    # under serve: armed after start and at every step, disarmed at done; refused steps do not arm it again
+    marks = serve([["autotune", "start", "eco", "step=3", "reuse=0"]] + [["autotune", "step"]] * 25)
+    done = len([m for m in marks if m == "armed (60 s)"])
+    assert done == 1 + 8 + 1 + 7 and marks[done] == "disarmed" and marks[done + 1:] == [None] * (25 - done), marks
+    assert transcript().replace(b"\0", b"") == b"VC" and state() == "inactive" and run(["autotune", "status"])["phase"] == "done"
+    run(["autotune", "abort"])
+    # abort, end of input (GUI closed), watchdog=0, a verification stopped with `finish`
+    assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
+        "armed (60 s)", "armed (60 s)", "disarmed"] and transcript() == b"VC"
+    assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"]]) == ["armed (60 s)"] * 2
+    assert transcript() == b"VC" and state() == "inactive"
+    run(["autotune", "abort"])
+    assert serve([["autotune", "start", "eco", "step=3", "reuse=0", "watchdog=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
+        "unavailable: disabled (watchdog=0)"] * 3 and transcript() == b""
+    run(["profile", "save", "wdv", "co " + " ".join(["-5"] * CORES)])
+    assert serve([["autotune", "verify", "wdv", "minutes=10"], ["autotune", "step"], ["autotune", "finish"]]) == [
+        "armed (60 s)", "armed (60 s)", "disarmed"] and transcript() == b"VC" and not os.path.exists(P(AT_ABORT_FLAG))
+    run(["autotune", "abort"])
+    run(["profile", "delete", "wdv"])
+    # SIGTERM (logout, shutdown) to a real `serve` process on the fake root: magic close, then out
+    open(P(Fake.WD_DEV), "wb").close()
+    pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                          env=dict(os.environ, RYZENCTL_ROOT=ROOT, RYZENCTL_FAKE_FAMILY="granite", LANGUAGE="C", LC_ALL="C.UTF-8"),
+                          text=True)
+    try:
+        pr.stdin.write(json.dumps(["autotune", "start", "eco", "step=3", "reuse=0"]) + "\n")
+        pr.stdin.flush()
+        assert json.loads(pr.stdout.readline())["data"]["watchdog"] == "armed (60 s)" and state() == "active"
+        pr.send_signal(signal.SIGTERM)
+        assert pr.wait(20) == 128 + signal.SIGTERM
+    finally:
+        if pr.poll() is None:
+            pr.kill()
+    assert transcript() == b"VC" and state() == "inactive", transcript()
+    FAKE.s = json.loads(open(FAKE.path).read())                   # the child changed the fake state on file
+    run(["autotune", "abort"])
 
 
 def selftest_variants():
@@ -3237,6 +4173,225 @@ def selftest_variants():
         expect_err(argv, "PM table")
     assert run(["co", "0", "-5"])["co"][0] == -5 and run(["fmax", "5000"])["fmax"] == 5000
     assert run(["telemetry"])["cores"][0]["temp"] is None and run(["status"])["limits"]["ppt"] is None
+    expect_err(["autotune", "start", "auto", "step=3"], "power limits")        # the knee needs the PPT
+    st = run(["autotune", "start", "eco", "step=3", "reuse=0"])                 # Eco works: CO, FMax, no limits
+    assert "0" not in st["samples"] and st["mv_per_step"] is None              # no per-core voltages without the PM table
+    for _i in range(300):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and "error" not in st and not any(l.startswith("ppt") for l in st["profile_lines"]), st
+    run(["autotune", "abort"])
+    # ---- one CCD with 6 cores (9600X): only CCD0 present; slots from the fuses, PM table values by slot ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-6-")
+    FAKE = Fake("granite6")           # slots 2 and 5 disabled
+    init_cpu()
+    assert CORES == 6 and co_support() is None and core_map() == [(0, 0), (0, 1), (0, 3), (0, 4), (0, 6), (0, 7)]
+    run(["boot"])
+    assert run(["co", "2", "-7"])["co"] == [0, 0, -7, 0, 0, 0] and FAKE.s["co"][2] == -7
+    temps = [c["temp"] for c in run(["telemetry"])["cores"]]
+    assert temps == [FAKE.s["tctl"] - 6.0 + s % 3 for _ccd, s in core_map()], temps   # core 2 = slot 3
+    assert sample_cores()["volt"] == [1.25, 1.25, round(1.25 - 7 * 0.003, 3), 1.25, 1.25, 1.25]
+    # ---- two CCDs with 6 cores each (9900X): the physical slots come from the core fuses ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-12-")
+    FAKE = Fake("granite12")          # CCD0 slots 2 and 5 disabled, CCD1 slots 0 and 7
+    init_cpu()
+    assert CORES == 12 and TOPO[6][0] == 8 and co_support() is None
+    assert core_map() == [(0, 0), (0, 1), (0, 3), (0, 4), (0, 6), (0, 7), (1, 1), (1, 2), (1, 3), (1, 4), (1, 5), (1, 6)]
+    assert co_mask(2) == 3 << 20 and co_mask(6) == (1 << 28) | (1 << 20)
+    try:
+        smn_read(0x12345678)
+        raise AssertionError("SMN read outside the fuse addresses accepted")
+    except Err as e:
+        assert "not allowed" in str(e)
+    run(["boot"])
+    assert run(["baseline", "show"])["co"] == [0] * 12
+    assert run(["co", "2", "-7"])["co"] == [0, 0, -7] + [0] * 9 and FAKE.s["co"][2] == -7   # slot 3, not slot 2
+    FAKE.smu(MP1, 0x35, [(2 << 20) | (-20 & 0xFFFF)])            # Linux numbering as a slot: slot 2 is disabled, nothing
+    FAKE.save()
+    assert run(["status"])["co"][2] == -7 and run(["status"])["co"] == [0, 0, -7] + [0] * 9
+    st = run(["autotune", "start", "auto", "step=3", "reuse=0"])
+    for _i in range(300):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and len(st["final"]) == 12, st
+    run(["autotune", "abort"])
+    r = run(["hwtest"])
+    assert r["co"].startswith("ok") and r["esito"] == "ok", r
+    # fuses that do not match the topology (a core more on CCD0 than Linux sees): no per-core CO at all
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-12b-")
+    FAKE = Fake("fusebad")
+    init_cpu()
+    assert core_map() is None and "physical position" in co_support()
+    st = run(["status"])
+    assert st["co"] is None and st["co_unavailable"] and "CO      n/a" in fmt_status(st)
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert "co" not in base and base["fmax"] == 5225 and base["ppt"] == 162, base
+    expect_err(["co", "0", "-5"], "physical position")
+    expect_err(["co", "all", "-5"], "physical position")
+    expect_err(["autotune", "start", "auto", "step=3"], "physical position")
+    write_atomic(P(ETC + "/profiles/hand.conf"), "co " + " ".join(["-5"] * CORES) + "\n")   # written by hand: `profile save` refuses it
+    expect_err(["autotune", "verify", "hand"], "physical position")
+    assert not any(l.startswith("co ") for l in run(["preset", "quiet", "show"])["lines"])
+    assert run(["fmax", "5000"])["fmax"] == 5000 and run(["ppt", "150"])["ppt"] == 150.0
+    r = run(["hwtest"])
+    assert r["co"].startswith("skipped") and r["fmax"].startswith("ok") and r["esito"] == "ok", r
+    assert all(c["co"] is None for c in run(["telemetry"])["cores"])
+    # ---- Raphael (Ryzen 7000): IDs of ZenStates-Core, not verified, no readable map of the limits ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-raphael-")
+    FAKE = Fake("raphael")
+    init_cpu()
+    st = run(["status"])
+    assert st["cpu"] == "Raphael" and not st["verified"] and st["shaper"] is None and "not verified" in fmt_status(st)
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert base["co"] == [0] * 8 and not any(k in base for k in ("ppt", "tdc", "edc", "tjmax")), base
+    assert run(["co", "3", "-7"])["co"][3] == -7 and run(["fmax", "5000"])["fmax"] == 5000
+    for argv in (["ppt", "100"], ["tjmax", "80"]):
+        expect_err(argv, "PM table")
+    expect_err(["shaper", "raw"], "not available")
+    # ---- Ryzen 5000 (Vermeer, a 5900X: 2 CCDs × 6): MP1 CO in −30..+30, RSMU limits read back from the
+    # PM table, no FMax command; the enabled CCDs from the Zen 3 "down" fuses ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-vermeer-")
+    FAKE = Fake("vermeer")            # CCD0 slots 1 and 6 disabled, CCD1 slots 0 and 3
+    init_cpu()
+    st = run(["status"])
+    assert st["cpu"] == "Vermeer" and not st["verified"] and st["fmax"] is None and st["shaper"] is None, st
+    assert core_map() == [(0, 0), (0, 2), (0, 3), (0, 4), (0, 5), (0, 7), (1, 1), (1, 2), (1, 4), (1, 5), (1, 6), (1, 7)]
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert "fmax" not in base and base["ppt"] == 162 and base["co"] == [0] * 12 and base["boost"] == "on", base
+    assert run(["status"])["caps"]["co"] == [-30, 30] and "fmax" not in run(["status"])["caps"]
+    expect_err(["co", "0", "-31"], "out of range")
+    assert run(["co", "7", "-30"])["co"][7] == -30 and FAKE.s["co"][7] == -30      # core 7 = CCD1 slot 2
+    assert run(["ppt", "120"])["ppt"] == 120.0 and FAKE.s["ppt"] == 120.0          # RSMU 0x53, PM table index 0
+    assert run(["tjmax", "85"])["tjmax"] == 85.0
+    expect_err(["fmax", "4500"], "not available")
+    r = run(["hwtest"])
+    assert r["fmax"].startswith("skipped") and r["co"].startswith("ok") and r["ppt"].startswith("ok") and r["esito"] == "ok", r
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "ppt 89" in pl and "boost on" in pl and not any(l.startswith("fmax") for l in pl), pl   # Zen 3 has the CO: boost stays
+    st = run(["autotune", "start", "auto", "step=3", "reuse=0"])
+    assert st["params"]["colimit"] == -30, st["params"]
+    for _i in range(300):
+        st = run(["autotune", "step"])
+        if st["phase"] == "done":
+            break
+    assert st["phase"] == "done" and min(st["final"]) >= -30 and not st["knee"]["fmax"]["tests"], st   # knee: PPT alone
+    assert any(l.startswith("ppt ") for l in st["profile_lines"]) and not any(l.startswith("fmax") for l in st["profile_lines"])
+    run(["autotune", "abort"])
+    FAKE.s["pm_version"] = 0x380705   # a table outside the verified versions: limits refused
+    FAKE.save()
+    assert run(["status"])["limits"]["ppt"] is None
+    expect_err(["ppt", "100"], "PM table")
+    # a 5800X on the second CCD of a two-CCD package: the fuses are read even for a complete CCD
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-vermeer8-")
+    FAKE = Fake("vermeer8")
+    init_cpu()
+    assert core_map() == [(1, s) for s in range(8)] and co_mask(0) == 1 << 28
+    run(["boot"])
+    assert run(["co", "0", "-10"])["co"][0] == -10 and FAKE.s["co"][0] == -10
+    # ---- Ryzen 3000 (Matisse): no CO, no FMax; RSMU limits; Quiet turns the boost off ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-matisse-")
+    FAKE = Fake("matisse")
+    init_cpu()
+    st = run(["status"])
+    assert st["cpu"] == "Matisse" and st["co"] is None and "Curve Optimizer" in st["co_unavailable"] and st["fmax"] is None, st
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert "co" not in base and "fmax" not in base and base["ppt"] == 162 and base["boost"] == "on", base
+    assert run(["ppt", "100"])["ppt"] == 100.0 and run(["edc", "120"])["edc"] == 120.0
+    expect_err(["co", "0", "-5"], "not available")
+    expect_err(["autotune", "start", "eco", "step=3"], "Curve Optimizer")
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "boost off" in pl and "ppt 89" in pl and "tjmax 80" in pl, pl
+    run(["preset", "quiet"])
+    run(["apply", "quiet"])
+    assert boost_get() == "off" and run(["status"])["boost"] == "off"
+    run(["default"])
+    assert boost_get() == "on"
+    r = run(["hwtest"])
+    assert r["co"].startswith("skipped") and r["fmax"].startswith("skipped") and r["boost"].startswith("ok") and r["esito"] == "ok", r
+    # ---- Ryzen 2000 (Pinnacle Ridge): no SMU command at all; boost, power profile and fans ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-pinnacle-")
+    FAKE = Fake("pinnacle")
+    init_cpu()
+    run(["boot"])
+    base = run(["baseline", "show"])
+    assert set(base) <= {"shaper", "power", "boost"} and base["boost"] == "on", base
+    for argv, why in ((["ppt", "100"], "baseline"), (["tjmax", "80"], "baseline"), (["fmax", "3000"], "not available"),
+                      (["co", "0", "-5"], "not available")):
+        expect_err(argv, why)
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "boost off" in pl and not any(l.split()[0] in ("co", "ppt", "fmax", "tjmax") for l in pl), pl
+    r = run(["hwtest"])
+    assert r["boost"].startswith("ok") and r["esito"] == "ok", r
+    os.remove(P(CPUFREQ + "/boost"))   # a kernel without the boost switch
+    expect_err(["boost", "off"], "not available")
+    assert run(["status"])["boost"] is None
+    # ---- motherboard limits in the BIOS (PBO "Enabled": PPT 1000 W): Quiet on AMD's Eco mode, Auto refused ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-board-")
+    FAKE = Fake("granite")
+    FAKE.s.update({"ppt": 1000.0, "tdc": 1000.0, "edc": 1000.0})
+    FAKE.save()
+    init_cpu()
+    run(["boot"])
+    pl = run(["preset", "quiet", "show"])["lines"]
+    assert "ppt 88" in pl and "tdc 75" in pl and "edc 150" in pl, pl
+    expect_err(["preset", "auto", "show"], "motherboard limits")
+    expect_err(["autotune", "start", "auto", "step=3"], "motherboard limits")
+    # ---- custom calibration: from a base mode, saved under its own name; the mode's profile and the shared
+    # CO measurement stay as they are (the user keeps the Auto that works while trying other parameters) ----
+    ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-custom-")
+    FAKE = Fake("granite")
+    init_cpu()
+    run(["boot"])
+
+    def calibrate(*argv):
+        st = run(["autotune", "start"] + list(argv))
+        for _i in range(300):
+            if st["phase"] == "done":
+                return st
+            st = run(["autotune", "step"])
+        raise AssertionError(st)
+    calibrate("auto", "step=3", "reuse=0")
+    run(["autotune", "save"])
+    auto_before, shared = open(profile_path("auto")).read(), json.loads(open(P(CO_LIMITS_PATH)).read())
+    expect_err(["autotune", "start", "auto", "name=auto"], "mode of its own")
+    expect_err(["autotune", "start", "auto", "name=Bad!"], "invalid profile name")
+    st = calibrate("auto", "name=auto-2", "step=3", "reuse=0", "colimit=-20", "margin=6")
+    assert st["save_as"] == "auto-2" and st["results"] != shared["results"], st["results"]
+    assert run(["autotune", "save", "apply"])["saved"] == "auto-2"
+    after = json.loads(open(P(CO_LIMITS_PATH)).read())
+    assert open(profile_path("auto")).read() == auto_before and (after["results"], after["colimit"]) == (shared["results"], shared["colimit"])
+    st = run(["status"])
+    assert st["calibrated"]["auto-2"]["base"] == "auto" and st["profile"] == "auto-2"
+    run(["profile", "delete", "auto-2"])
+    assert "auto-2" not in run(["status"])["calibrated"]
+    # retry=1 (custom only): the crash of the reused measurement and its recorded failures are ignored, the final
+    # pass starts again from the last stable + margin
+    saved = json.loads(open(P(CO_LIMITS_PATH)).read())
+    saved["unstable"]["0"] = {"value": saved["results"]["0"] - CO_STEP, "why": "crash"}   # the search ended with a crash
+    res = [saved["results"][str(c)] for c in range(CORES)]
+    saved["final_failures"] = [{"values": [min(0, r + 6) for r in res], "time": "x"}]   # and margin +6 failed
+    write_atomic(P(CO_LIMITS_PATH), json.dumps(saved))
+    expect_err(["autotune", "start", "auto", "retry=1", "step=3"], "custom calibration")
+    st = run(["autotune", "start", "auto", "name=auto-r", "step=3"])
+    assert at_final_values(st) == [min(0, r + 9) for r in res], at_final_values(st)   # +3 margin, +3 crash, +3 failure
+    run(["autotune", "abort"])
+    st = run(["autotune", "start", "auto", "name=auto-r", "retry=1", "step=3"])
+    assert at_final_values(st) == [min(0, r + 3) for r in res] and not st["final_failures"], at_final_values(st)
+    run(["autotune", "abort"])
+    # a custom Boost follows Boost's unlock rule
+    run(["unlock", "on"])
+    calibrate("boost", "name=boost-2", "step=3")
+    run(["autotune", "save", "apply"])
+    expect_err(["unlock", "off"], "requires unlock")
+    run(["default"])
+    run(["unlock", "off"])
+    expect_err(["apply", "boost-2"], "requires unlock")
 
 
 def main():

@@ -1,7 +1,7 @@
 # Ryzen Control — the single source of truth for the installed layout. Packages (RPM, deb, Arch)
 # call `make install DESTDIR=…`; `install-cli` / `install-gui` / `install-dkms-src` /
 # `install-locales` are the pieces.
-VERSION := 0.4.5
+VERSION := 0.5.0
 # DKMS module version: bump ONLY when ryzen_smu/ changes (a new /usr/src directory means a
 # rebuild + dracut, about a minute at upgrade time). Same value as %drv_version in the spec.
 DRV_VERSION := 0.4.1
@@ -87,7 +87,7 @@ uninstall:
 
 # Checks that need neither root nor hardware: selftest, layout in a scratch root, units,
 # desktop entries, metainfo, the calibration window over every state of the fake backend
-# (needs a display), once in English and once with the Italian catalog.
+# (needs a display; a fresh fake root each time), once in English and once with the Italian catalog.
 check: locales
 	python3 ryzenctl selftest
 	rm -rf "$(TMPROOT)" && $(MAKE) install DESTDIR="$(TMPROOT)" >/dev/null
@@ -95,8 +95,10 @@ check: locales
 	systemd-analyze --root="$(TMPROOT)" verify --recursive-errors=no ryzenctl.service ryzenctl-resume.service
 	desktop-file-validate data/ryzenctl-notify.desktop data/$(APPID).desktop
 	-appstreamcli validate --no-net data/$(APPID).metainfo.xml
-	LANGUAGE=C LC_ALL=C.UTF-8 timeout 120 python3 ryzen-control --mock --smoke
-	LANGUAGE=it LC_ALL=it_IT.UTF-8 RYZEN_CONTROL_LOCALEDIR=build/locale timeout 120 python3 ryzen-control --mock --smoke
+	root=$$(mktemp -d) && LANGUAGE=C LC_ALL=C.UTF-8 RYZENCTL_ROOT=$$root timeout 120 python3 ryzen-control --mock --smoke; \
+	  rc=$$?; rm -rf $$root; exit $$rc
+	root=$$(mktemp -d) && LANGUAGE=it LC_ALL=it_IT.UTF-8 RYZEN_CONTROL_LOCALEDIR=build/locale RYZENCTL_ROOT=$$root timeout 120 \
+	  python3 ryzen-control --mock --smoke; rc=$$?; rm -rf $$root; exit $$rc
 
 # README screenshots: the GUI on a fresh fake backend (fan roles, presets, the three calibrations),
 # one PNG per page plus the calibration window and a short GIF of an Auto calibration (ImageMagick),

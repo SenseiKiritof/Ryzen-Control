@@ -11,6 +11,7 @@ import gettext
 import json
 import locale
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -92,13 +93,23 @@ AT_PARAMS = (("target", _("Fan target Tctl"), "°C", (50, 90), _("Only the Quiet
 FAN_LEVELS = (_("BIOS: fans untouched"), _("Moderate: rise 3 s, fall 2 s, BIOS curve +10 % with 100 % at 100 °C"),
               _("Quiet: rise 10 s, fall 5 s, minimum up to target Tctl −10 °C, 100 % at Tjmax −5 °C"))
 AT_WARNING = _("Every core is brought to an ever more negative CO (Curve Optimizer) under load (stress-ng) as long as it stays "
-               "stable, then a final pass on all cores; finally, for Auto the performance/watt knee, for Boost the measurement "
+               "stable, then a final pass on all cores and on each core alone; finally, for Auto the performance/watt knee, "
+               "for Boost the measurement "
                "of the gain (MT and ST) over stock, while Eco takes the reduced limits of its preset. The CO limit search is "
                "shared by Eco, Auto and Boost and later calibrations reuse it; Eco also reuses a final pass already passed at "
                "the same CO (for example Auto's) without any load test. "
                "An unstable CO can reboot the PC without warning: save everything before starting. "
                "The machine stays usable but slowed down; the calibration resumes from where it was.")
 AT_PARALLEL_SUB = _("Off: one core at a time, slower (%s) but attributes even a reboot with certainty")
+AT_SINGLE_SUB = _("One thread alone on each core, from idle to the highest boost: catches the CO instability that all-core "
+                  "loads miss. A core that fails is raised alone. Adds %s")
+WD_TIP = _("During a calibration or a verification ryzenctl keeps the motherboard watchdog armed: if the PC freezes, it "
+           "restarts by itself after the timeout and the run resumes from where it was, with that step recorded as unstable.")
+VERIFY_TEXT = _("The saved profile is applied, then every core is tested alone (one thread, from idle to the highest boost) and "
+                "then all cores together, over and over until the time is up; CO and limits are never changed during the run. "
+                "A core that fails is reported and the proposal raises only that core (+3, less negative). An unstable CO can "
+                "reboot the PC without warning: save everything before starting. At the end the CPU goes back to the stock values.")
+VERIFY_DURATIONS = ((30, _("30 min")), (60, _("1 h")), (180, _("3 h")), (480, _("8 h")))
 AT_PHASES = {"co": 0.6, "final": 0.7, "ppt": 0.85, "fmax_knee": 1.0, "bench": 1.0}   # share of the bar at the end of the phase
 ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 # ryzenctl protocol values shown to the user (fan roles, why a CO level failed) through a translated name;
@@ -106,7 +117,7 @@ ROLE_CSS = {"ventola": "success", "pompa": "accent"}
 ROLE_NAMES = {"ventola": _("fan"), "pompa": _("pump"), "sconosciuto": _("unknown"), "non-controllabile": _("not controllable")}
 WHY_NAMES = {"crash": _("crash"), "instabile": _("unstable"), "simulato": _("simulated")}
 AT_PHASE_NAMES = {"co": _("CO search"), "final": _("final pass"), "ppt": _("PPT knee"), "fmax_knee": _("FMax knee"),
-                  "bench": _("benchmark")}
+                  "bench": _("benchmark"), "verify": _("verification")}
 PUMP_KINDS = ("auto", "max", "fixed")   # same order as PUMP_MODES (ComboRow index)
 PUMP_MODES = (_("Automatic (BIOS) — recommended"), _("Maximum cap"), _("Fixed speed"))
 CSS = """
@@ -250,13 +261,14 @@ def at_sample(st, c, level=None):
     """(level, V, MHz) measured on core c: at the level closest to `level`, or the deepest one if None."""
     best = None
     for lvl, smp in st.get("samples", {}).items():
-        v = int(lvl)
-        volt = (smp.get("volt") or [None] * 8)[c] if c < len(smp.get("volt") or []) else None
+        smp, v = smp or {}, int(lvl)   # None: no per-core PM table layout on this CPU
+        vs, ms = smp.get("volt") or [], smp.get("mhz") or []
+        volt = vs[c] if c < len(vs) else None
         if v == 0 or volt is None or not at_tested(st, c, v):
             continue
         key = abs(v - level) if level is not None else v
         if best is None or key < best[0]:
-            best = (key, v, volt, (smp.get("mhz") or [None] * 8)[c] if c < len(smp.get("mhz") or []) else None)
+            best = (key, v, volt, ms[c] if c < len(ms) else None)
     return best[1:] if best else None
 
 
@@ -301,15 +313,21 @@ def curve_points(tokens):
     return out
 
 
-def crash_story(st):
+def crash_story(st, cores):
     """Sentence for the user after a lockup: at which CO it happened and where it resumes from ('' if no crash)."""
     span = AutotuneDialog.co_span
     crashed = [u["value"] for u in (st.get("unstable") or {}).values() if u.get("why") == "crash"]
     fails = [f for f in (st.get("final_failures") or []) if f.get("why") == "crash"]
     if not crashed and not fails:
         return ""
-    where = _("at CO %s") % span(crashed) if crashed else _("in the final pass at CO %s") % span(fails[-1]["values"])
-    nxt = AutotuneDialog.final_values(st)
+    last = fails[-1] if fails else {}
+    if crashed:
+        where = _("at CO %s") % span(crashed)
+    elif last.get("core") is not None:   # the single-core part of the final pass: only that core is raised
+        where = _("in the single-core test of core %d at CO %d") % (last["core"], last["values"][last["core"]])
+    else:
+        where = _("in the final pass at CO %s") % span(last["values"])
+    nxt = AutotuneDialog.final_values(st, cores)
     if st.get("phase") == "done":
         return _("The system locked up %s.") % where
     return _("The system locked up %s: that level is recorded as unstable and the calibration restarts from the final pass at CO %s (margin +%d).") % (
@@ -380,17 +398,17 @@ def diff_label(base, new, unit="", lower_is_better=True):
     return lab
 
 
-def values_of(lines):
-    """Profile lines → {ppt, tdc, edc, fmax, tjmax, power, co: [8], fan: {n: {step: (up, down), curve: str}}}."""
+def values_of(lines, cores):
+    """Profile lines → {ppt, tdc, edc, fmax, tjmax, power, co: [one per core], fan: {n: {step: (up, down), curve: str}}}."""
     v = {"fan": {}}
     for t in (l.split() for l in lines):
         try:
             if t[0] == "co":
-                if len(t) == 9:
+                if len(t) == cores + 1:
                     v["co"] = [int(x) for x in t[1:]]
                 elif len(t) == 3:
-                    co = v.setdefault("co", [None] * 8)
-                    for c in (range(8) if t[1] == "all" else [int(t[1])]):
+                    co = v.setdefault("co", [None] * cores)
+                    for c in (range(cores) if t[1] == "all" else [int(t[1])]):
                         co[c] = int(t[2])
             elif t[0] == "fan" and len(t) >= 4:
                 f = v["fan"].setdefault(int(t[1]), {})
@@ -400,8 +418,8 @@ def values_of(lines):
                     f["curve"] = " ".join(t[3:])
                 elif t[2] == "pump":   # auto | max <pct> | <pct>
                     f["pump"] = "auto" if t[3] == "auto" else ("max", int(t[4])) if t[3] == "max" else int(t[3])
-            elif t[0] == "power":
-                v["power"] = t[1]
+            elif t[0] in ("power", "boost"):
+                v[t[0]] = t[1]
             elif len(t) == 2:
                 v[t[0]] = int(t[1])
         except (ValueError, IndexError):
@@ -412,22 +430,28 @@ def values_of(lines):
 def profile_table(lines, st):
     """Coloured 'parameter · stock → profile' table: CPU values from the status baseline, fan values
     from the baseline's fan lines (BIOS settings captured at boot), rpm estimates from fan status."""
-    v, base = values_of(lines), st.get("baseline") or {}
+    cores = st.get("cores") or 0
+    v, base = values_of(lines, cores), st.get("baseline") or {}
     fans = {c["canale"]: c for c in (st.get("fans") or {}).get("canali", [])}
-    stock_fans = values_of(st.get("baseline_lines") or [])["fan"]
+    stock_fans = values_of(st.get("baseline_lines") or [], cores)["fan"]
     rows = [(title, diff_label(base.get(key), v[key], unit)) for key, title, unit in CPU_PARAMS if key in v]
     if "power" in v:
         rows.append((_("Power mode"), diff_label(base.get("power"), v["power"])))
+    if "boost" in v:
+        rows.append((_("Boost"), diff_label(base.get("boost"), v["boost"])))
     n_flow = len(rows)   # the rows after these (CO, fans) go one per line in the grid, in order
-    if "co" in v:
-        chips, bco = Gtk.Box(spacing=4), base.get("co") or [None] * 8
-        for c in range(8):
+    if "co" in v:   # one line of chips per CCD
+        chips = Gtk.Grid(column_spacing=4, row_spacing=4, column_homogeneous=True, halign=Gtk.Align.START)
+        bco = base.get("co") or [None] * cores
+        per_line = max(1, cores // (st.get("ccds") or 1))
+        for c in range(cores):
             if v["co"][c] is not None:
                 chip = diff_label(bco[c], v["co"][c])
                 chip.set_text("%+d" % v["co"][c])
+                chip.set_xalign(0.5)
                 chip.set_tooltip_text(_("core %d: stock %s") % (c, fmt(bco[c])))
                 chip.add_css_class("chip")
-                chips.append(chip)
+                chips.attach(chip, c % per_line, c // per_line, 1, 1)
         rows.append((_("CO (Curve Optimizer) per core"), chips, CO_TIP))
     step_cells = Gtk.SizeGroup(mode=Gtk.SizeGroupMode.HORIZONTAL)   # one width for every rise/fall: "fall" in one column
     for n, f in sorted(v["fan"].items()):
@@ -693,6 +717,13 @@ class MonitorPage(Gtk.Box):
         self.hist = deque(maxlen=60)   # (tctl, ppt)
         self.ppt_limit = None
         self.fan_labels = {}
+        top = Gtk.Box(spacing=12)
+        self.cpu = label("", ["heading"])   # family · active cores
+        self.unverified = label(_("Family not verified on hardware yet: run the Hardware check in Preferences"),
+                                ["warning"], wrap=True, visible=False)
+        top.append(self.cpu)
+        top.append(self.unverified)
+        self.append(top)
         tiles = Gtk.Box(spacing=12, homogeneous=True)
         self.tiles = {}
         for key, title in (("tctl", "Tctl"), ("ppt", "PPT"), ("tdc", "TDC"), ("fmax", "FMax")):
@@ -708,17 +739,14 @@ class MonitorPage(Gtk.Box):
         self.append(tiles)
         mid = Gtk.Box(spacing=12, vexpand=True)
         table = card()
-        grid = Gtk.Grid(column_spacing=18, row_spacing=4)
+        self.grid = Gtk.Grid(column_spacing=18, row_spacing=4)
         tips = {3: _("Core voltage at this instant (PM table)"), 4: CO_TIP}
         for col, h in enumerate((_("Core"), "MHz", "°C", "V", _("CO (Curve Optimizer)"))):
-            grid.attach(label(h, ["heading"], xalign=1.0 if col else 0.0, tooltip_text=tips.get(col)), col, 0, 1, 1)
-        self.cores = []
-        for c in range(8):
-            row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"], xalign=1.0) for _i in range(4)]
-            for col, lab in enumerate(row):
-                grid.attach(lab, col, c + 1, 1, 1)
-            self.cores.append(row[1:])
-        table.append(grid)
+            self.grid.attach(label(h, ["heading"], xalign=1.0 if col else 0.0, tooltip_text=tips.get(col)), col, 0, 1, 1)
+        self.cores = []   # one row per active core, built by the first telemetry
+        # many cores (16 on two CCDs) scroll instead of making the window taller
+        table.append(Gtk.ScrolledWindow(child=self.grid, vexpand=True, hscrollbar_policy=Gtk.PolicyType.NEVER,
+                                        propagate_natural_width=True, propagate_natural_height=True))
         mid.append(table)
         gcard = card()
         gcard.set_hexpand(True)
@@ -743,8 +771,9 @@ class MonitorPage(Gtk.Box):
         bottom.append(self.power)
         self.append(bottom)
 
-    def refresh(self, st):
-        pass   # the monitor lives on `telemetry`
+    def refresh(self, st):   # the values live on `telemetry`
+        self.cpu.set_text(_("%s · %d cores") % (st.get("cpu", "?"), st.get("cores", 0)))
+        self.unverified.set_visible(not st.get("verified", True))
 
     def telemetry(self, t):
         value, sub, _bar = self.tiles["tctl"]
@@ -767,8 +796,16 @@ class MonitorPage(Gtk.Box):
             self.hist.append((t["tctl"], t["ppt"]))
             self.ppt_limit = t["ppt_limit"]
             self.graph.queue_draw()
-        for c, labs in enumerate(self.cores):
-            d = t["cores"][c] if c < len(t["cores"]) else {}
+        if len(self.cores) != len(t["cores"]):   # one row per active core
+            for _r in self.cores:
+                self.grid.remove_row(1)
+            self.cores = []
+            for c in range(len(t["cores"])):
+                row = [label("%d" % c, ["numeric"])] + [label("—", ["numeric"], xalign=1.0) for _i in range(4)]
+                for col, lab in enumerate(row):
+                    self.grid.attach(lab, col, c + 1, 1, 1)
+                self.cores.append(row[1:])
+        for d, labs in zip(t["cores"], self.cores):
             labs[0].set_text(fmt(d.get("mhz")))
             labs[1].set_text(fmt(d.get("temp")))
             labs[2].set_text(volts(d.get("volt"), ""))
@@ -854,15 +891,23 @@ class AutotuneDialog(Adw.Window):
     """Calibration progress: one `autotune step` at a time until phase == done.
     Separate, resizable window (Adw.Dialog has fixed dimensions and the table is tall)."""
 
-    def __init__(self, win, mode):
-        super().__init__(title=_("%s calibration") % mode.capitalize(), transient_for=win, modal=True, destroy_with_parent=True,
+    def __init__(self, win, mode, verify=False, name=None):
+        # verify: `autotune verify` of the saved profile `mode` (same window: progress, per-core table, proposal);
+        # name: a custom calibration from the base mode `mode`, saved under its own name (the mode's profile untouched)
+        super().__init__(title=_("%s verification") % mode.capitalize() if verify else
+                         _("Custom calibration from %s → %s") % (mode.capitalize(), name) if name else
+                         _("%s calibration") % mode.capitalize(), transient_for=win,
+                         modal=True, destroy_with_parent=True,
                          default_width=max(640, int(win.get_width() * 0.9)), default_height=max(560, int(win.get_height() * 0.9)))
-        self.win, self.mode = win, mode
+        self.win, self.mode, self.verify, self.name = win, mode, verify, name
+        self.target = name or mode   # the profile the result is saved as
         self.running = self.aborting = False
         self.closable = False
         self.connect("close-request", self.on_close_request)
         body = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12, margin_top=12, margin_bottom=12, margin_start=12, margin_end=12)
         self.header = label("", ["dim-label"], wrap=True)
+        # one line, allocated from the start (constant height): the hardware watchdog state reported by ryzenctl serve
+        self.watchdog = label(" ", ["dim-label", "caption"], ellipsize=Pango.EllipsizeMode.END, single_line_mode=True, tooltip_text=WD_TIP)
         self.reuse = label("", ["dim-label"], wrap=True, visible=False)
         # constant heights: every height change moves the table and the compositor leaves fragments
         self.phase = label(_("Starting…"), ["title-3"], hexpand=True, ellipsize=Pango.EllipsizeMode.END, single_line_mode=True)
@@ -874,7 +919,7 @@ class AutotuneDialog(Adw.Window):
         self.note = label("", ["warning"], wrap=True, visible=False)
         # progress (start, phase, time left, bar) pinned above the scrolled area: visible while scrolling the results
         pinned = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin_top=6, margin_bottom=10, margin_start=12, margin_end=12)
-        for w in (self.header, top, self.progress):
+        for w in (self.header, self.watchdog, top, self.progress):
             pinned.append(w)
         for w in (self.reuse, self.note, label(_("CO (Curve Optimizer) per core"), ["heading"], tooltip_text=CO_TIP)):
             body.append(w)
@@ -886,7 +931,7 @@ class AutotuneDialog(Adw.Window):
         for col, (h, tip) in enumerate(heads):
             grid.attach(label(h, ["heading"], tooltip_text=tip), col, 0, 1, 1)
         self.cells = []
-        for c in range(8):
+        for c in range(win.status.get("cores", 0)):   # one row per active core
             cell = {"core": label("%d" % c, ["numeric"], valign=Gtk.Align.START)}
             boxes = []
             for key in ("fab", "prova"):   # two lines: CO above, voltage below; fixed width = no reflows
@@ -919,11 +964,14 @@ class AutotuneDialog(Adw.Window):
         self.discard_btn = button(_("Discard"), self.discard, "destructive-action")
         self.save_btn = button(_("Save"), lambda: self.save(False))
         self.save_apply_btn = button(_("Save and apply"), lambda: self.save(True), "suggested-action")
-        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+        self.apply_btn = button(_("Apply the profile"), self.apply_profile, "suggested-action")   # verification passed
+        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn, self.apply_btn):
             b.set_visible(False)
         self.save_btn.set_tooltip_text(_("Writes the %s profile without activating it: apply it from the Modes page") % mode)
         self.save_apply_btn.set_tooltip_text(_("Writes the %s profile, applies it right away and selects it") % mode)
-        for b in (self.abort_btn, self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+        if verify:   # Stop keeps what was tested: result and proposal (`autotune finish`)
+            self.abort_btn.set_tooltip_text(_("Ends the verification now: result and proposal from the tests done so far"))
+        for b in (self.abort_btn, self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn, self.apply_btn):
             bar.append(b)
         # in a wide window the content stays centred and readable (max 1100 px), the grid widens
         clamp = Adw.Clamp(child=body, maximum_size=1100, tightening_threshold=800)
@@ -942,7 +990,8 @@ class AutotuneDialog(Adw.Window):
         return False
 
     def start(self, params):
-        argv = ["autotune", "start", self.mode] + ["%s=%d" % kv for kv in params.items()]
+        argv = (["autotune", "verify" if self.verify else "start", self.mode] + (["name=" + self.name] if self.name else [])
+                + ["%s=%d" % kv for kv in params.items()])
         bg(lambda: self.win.h.call(*argv), self.got, self.fail)
 
     def loop(self):
@@ -953,6 +1002,8 @@ class AutotuneDialog(Adw.Window):
 
     def got(self, st):
         self.running = False
+        if self.aborting:   # Stop pressed: the reply of the interrupted step is stale (finish/abort answer next)
+            return
         self.show(st)
         if st.get("phase") == "done":
             self.done(st)
@@ -969,30 +1020,47 @@ class AutotuneDialog(Adw.Window):
     def show(self, st):
         ph, p = st.get("phase"), st.get("params", {})
         if st.get("resumed_after_crash"):
-            self.note.set_text(_("The system rebooted during a test: that step has been marked unstable. If the final CO was already "
+            self.note.set_text(_("The system rebooted during the test of a core: that core is recorded as failed (crash) and no longer "
+                                 "tested; after a reboot the profile is applied again.") if self.verify else
+                               _("The system rebooted during a test: that step has been marked unstable. If the final CO was already "
                                  "applied, the combination is unstable and the final pass is repeated with +3 on every core."))
             self.note.set_visible(True)
+        if st.get("watchdog"):
+            self.watchdog.set_text(_("Hardware watchdog: %s") % st["watchdog"])
         if st.get("co_reused"):   # search skipped: table already populated, the CO phase counts as complete in the bar
             if st.get("eco_from"):   # Eco: final pass skipped too
-                text = _("Undervolt validated by the final pass of %s, reused without load tests. %s") % (st["eco_from"], crash_story(st))
+                text = _("Undervolt validated by the final pass of %s, reused without load tests. %s") % (st["eco_from"], crash_story(st, len(self.cells)))
             else:
-                text = _("CO limit reused from the measurement of %s. %s") % (st["co_reused"], crash_story(st))
+                text = _("CO limit reused from the measurement of %s. %s") % (st["co_reused"], crash_story(st, len(self.cells)))
             self.reuse.set_text(text)
             self.reuse.set_visible(True)
         eta = st.get("eta") or {}
         if eta:
             self.header.set_text(_("Started at %s · estimated %s in total") % (st.get("started", "")[-5:], mins(eta.get("total_s"))))
             self.eta.set_text(_("Estimated time remaining: %s") % mins(eta.get("remaining_s")))
-        if ph == "co" and st.get("parallel"):
+        n = len(self.cells)
+        if ph == "verify":                        # one test per step: each core alone, then all together, per iteration
+            c, it = st.get("core", 0), (st.get("iteration", 1), st.get("iterations", 1))
+            if c < n:
+                self.phase.set_text(_("Verifying core %d alone at CO %d (iteration %d of %d)…") % ((c, st["final"][c]) + it))
+            else:
+                self.phase.set_text(_("Verifying all cores together (iteration %d of %d)…") % it)
+            frac = ((it[0] - 1) * (n + 1) + min(c, n)) / float(max(1, it[1] * (n + 1)))
+        elif ph == "co" and st.get("parallel"):
             levels = max(1, (-(p.get("colimit") or -5)) // 5)      # levels of 5 (CO_STEP), like at_estimate in ryzenctl
             self.phase.set_text(_("CO level %d: testing all cores together (still under test: %d cores)…") % (st["value"], len(st.get("active_cores", []))))
             frac = AT_PHASES["co"] * max(0, (-st["value"]) // 5 - 1) / levels
         elif ph == "co":
             self.phase.set_text(_("Core %d: testing CO %d…") % (st["core"], st["value"]))
-            frac = (st["core"] + min(1.0, st["value"] / p["colimit"] if p.get("colimit") else 0)) / 8
+            frac = (st["core"] + min(1.0, st["value"] / p["colimit"] if p.get("colimit") else 0)) / max(1, len(self.cells))
         elif ph == "final":
-            self.phase.set_text(_("Final pass on all cores at CO %s (attempt %d/3)") % (self.co_span(self.final_values(st)), st.get("final_tries", 0) + 1))
-            frac = AT_PHASES["co"] + (AT_PHASES["final"] - AT_PHASES["co"]) * min(1.0, st.get("final_tries", 0) / 3)
+            vals, c = self.final_values(st, n), st.get("single")
+            if c is None:
+                self.phase.set_text(_("Final pass on all cores at CO %s (attempt %d/3)") % (self.co_span(vals), st.get("final_tries", 0) + 1))
+            else:   # the single-core part: one step per core
+                self.phase.set_text(_("Final pass, single-core test: core %d alone at CO %d (%d of %d)…") % (c, vals[c], c + 1, n))
+            part = 0 if c is None else (c + 1) / float(n + 1)
+            frac = AT_PHASES["co"] + (AT_PHASES["final"] - AT_PHASES["co"]) * min(1.0, (st.get("final_tries", 0) + part) / 3)
         elif ph == "bench":                       # Boost: a single step, performance at stock and in boost
             self.phase.set_text(_("Measuring performance at stock and in boost (MT and ST)…") + self.load_text(st))
             frac = (AT_PHASES["final"] + AT_PHASES["bench"]) / 2
@@ -1015,15 +1083,21 @@ class AutotuneDialog(Adw.Window):
         self.queue_draw()                   # full redraw: no fragments of the previous frame
         self.follow()
         res, uns, fin = st.get("results", {}), st.get("unstable", {}), st.get("final")
-        base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
-        ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
-        ref_mhz = (st.get("samples", {}).get("0") or {}).get("mhz") or [None] * 8
-        active = st.get("active_cores", []) if st.get("parallel") else [st.get("core")]
+        base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * n
+        ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * n
+        ref_mhz = (st.get("samples", {}).get("0") or {}).get("mhz") or [None] * n
+        if ph == "verify":   # under test: the core alone, or every core not failed yet in the all-core pass
+            active = [st["core"]] if st["core"] < n else [c for c in range(n) if str(c) not in uns]
+        else:
+            active = st.get("active_cores", []) if st.get("parallel") else [st.get("core")]
         for c, cell in enumerate(self.cells):
             fab_sub = volts(ref[c]) + (" · " + mhz(ref_mhz[c]) if ref_mhz[c] is not None else "") if ref[c] is not None else None
             self.two_lines(cell["fab"], "%d" % base_co[c] if base_co[c] is not None else "—", fab_sub)
             smp = at_sample(st, c)                      # deepest measurement available for this core
-            cur = st["value"] if ph == "co" and c in active else (smp[0] if smp else None)
+            if ph in ("co", "verify") and c in active:
+                cur = st["value"] if ph == "co" else fin[c]
+            else:
+                cur = smp[0] if smp else None
             sub, css = None, None
             if smp:
                 dmv = round((smp[1] - ref[c]) * 1000) if ref[c] is not None else None
@@ -1042,8 +1116,12 @@ class AutotuneDialog(Adw.Window):
             self.failures.remove(self.failures.get_first_child())
         for f in fails:
             why = f.get("why", "?")
-            self.failures.append(label(_("Final pass failed at CO %s (%s): +3 on every core and a new attempt") % (self.co_span(f.get("values") or [0]), WHY_NAMES.get(why, why)),
-                                       ["warning"], wrap=True))
+            if f.get("core") is not None:   # failed alone in the single-core part: only that core is raised
+                text = _("Core %d failed alone at CO %d (%s): +3 on that core only and a new final pass") % (
+                    f["core"], f["values"][f["core"]], WHY_NAMES.get(why, why))
+            else:
+                text = _("Final pass failed at CO %s (%s): +3 on every core and a new attempt") % (self.co_span(f.get("values") or [0]), WHY_NAMES.get(why, why))
+            self.failures.append(label(text, ["warning"], wrap=True))
         slope = st.get("mv_per_step")          # median of the slopes per level, computed by ryzenctl
         self.slope.set_visible(slope is not None)
         if slope is not None:
@@ -1058,10 +1136,12 @@ class AutotuneDialog(Adw.Window):
         self.sweeps.set_visible(bool(text))   # Eco and Boost have no sweep: no empty gap above the result
 
     @staticmethod
-    def final_values(st):
-        """CO of the final pass: measured limit + margin (computed by ryzenctl: mode, failed passes, crash)."""
+    def final_values(st, cores):
+        """CO of the final pass: measured limit + margin (computed by ryzenctl: mode, failed passes, crash) + the
+        extra margin of the cores that failed alone in the single-core test (core_margin)."""
         m = st.get("final_margin", st.get("params", {}).get("margin", 0) + 3 * st.get("final_tries", 0))
-        return [min(0, st.get("results", {}).get(str(c), 0) + m) for c in range(8)]
+        cm = st.get("core_margin") or {}
+        return [min(0, st.get("results", {}).get(str(c), 0) + m + cm.get(str(c), 0)) for c in range(cores)]
 
     @staticmethod
     def co_span(vals):
@@ -1099,20 +1179,34 @@ class AutotuneDialog(Adw.Window):
             self.result.append(label(st["error"], ["warning"], wrap=True))
         tries = st.get("final_tries", 0)
         crashed = any(u.get("why") == "crash" for u in (st.get("unstable") or {}).values())
-        if (tries or crashed) and st.get("final"):
+        if (tries or crashed) and st.get("final") and not self.verify:
             why = []
             if tries:
                 why.append(_("the combined pass failed once") if tries == 1 else _("the combined pass failed %d times") % tries)
             if crashed:
                 why.append(_("the search ended with a system lockup (+3)"))
             self.result.append(label(_("The final margin is +%d because %s") % (st.get("final_margin", 0), _(" and ").join(why)), ["warning"], wrap=True))
-        if st.get("final"):   # per core: stock → final CO and measured ΔV (sample at the final level or the closest one)
-            base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * 8
-            ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * 8
+        cm = st.get("core_margin") or {}
+        if cm and st.get("final"):   # cores that failed alone in the single-core test of the final pass
+            self.result.append(label(_("Raised alone after failing the single-core test: %s") % ", ".join(
+                _("core %s +%d") % (c, m) for c, m in sorted(cm.items(), key=lambda kv: int(kv[0]))), ["warning"], wrap=True))
+        if self.verify:   # per core: failed (reason) or held; the live table above has the details
+            uns = st.get("unstable") or {}
+            if uns:
+                self.result.append(label(_("Failed: %s. The proposal raises only those cores by +3 (less negative).") % ", ".join(
+                    _("core %s at CO %d (%s)") % (c, u["value"], WHY_NAMES.get(u.get("why"), u.get("why")))
+                    for c, u in sorted(uns.items(), key=lambda kv: int(kv[0]))), ["warning"], wrap=True))
+            else:
+                self.result.append(label(_("No core failed (iterations completed: %d of %d; every core alone, then all together).") % (
+                    min(st.get("iteration", 1) - 1, st.get("iterations", 0)), st.get("iterations", 0)), ["success"], wrap=True))
+        elif st.get("final"):   # per core: stock → final CO and measured ΔV (sample at the final level or the closest one)
+            n = len(st["final"])
+            base_co = (self.win.status.get("baseline") or {}).get("co") or [None] * n
+            ref = (st.get("samples", {}).get("0") or {}).get("volt") or [None] * n
             grid = Gtk.Grid(column_spacing=18, row_spacing=4)
             for col, h in enumerate((_("Core"), _("Stock → final CO"), _("Measured ΔV"))):
                 grid.attach(label(h, ["heading"], tooltip_text=CO_TIP if col == 1 else None), col, 0, 1, 1)
-            for c in range(8):
+            for c in range(n):
                 grid.attach(label("%d" % c, ["numeric"]), 0, c + 1, 1, 1)
                 grid.attach(diff_label(base_co[c], st["final"][c]), 1, c + 1, 1, 1)
                 smp = at_sample(st, c, st["final"][c])
@@ -1134,12 +1228,13 @@ class AutotuneDialog(Adw.Window):
                 pct(g), ops(bench.get("fabbrica")), ops(bench.get("boost")), pct(bench.get("gain_st_pct"))),
                 ["numeric", "success" if g > 0 else ("error" if g < 0 else "dim-label")], wrap=True))
         if st.get("profile_lines"):
-            self.result.append(label(_("%s profile: stock → calibrated") % self.mode, ["heading"]))
+            self.result.append(label((_("%s profile: stock → proposed") if self.verify else _("%s profile: stock → calibrated")) % self.target, ["heading"]))
             self.result.append(profile_view(st["profile_lines"], self.win.status))
         knee = st.get("knee")
         if knee and knee["ppt"].get("chosen"):
-            self.result.append(label(_("Performance/watt knee: PPT %d W, FMax %d MHz (maximum loss %d %%)") % (
-                knee["ppt"]["chosen"], knee["fmax"]["chosen"] or 0, st.get("params", {}).get("loss", 0)), ["numeric"], wrap=True))
+            fmax = (_(", FMax %d MHz") % knee["fmax"]["chosen"]) if knee["fmax"].get("chosen") else ""   # no FMax on Zen 3
+            self.result.append(label(_("Performance/watt knee: PPT %d W%s (maximum loss %d %%)") % (
+                knee["ppt"]["chosen"], fmax, st.get("params", {}).get("loss", 0)), ["numeric"], wrap=True))
         method = self.load_method(st)
         if method:
             self.result.append(label(_("Test load: %s — the one that draws the most power on this CPU") % method, ["dim-label"], wrap=True))
@@ -1150,8 +1245,15 @@ class AutotuneDialog(Adw.Window):
                                      ["warning"], wrap=True))
         self.abort_btn.set_visible(False)
         if st.get("profile_lines"):
-            self.phase.set_text(_("Calibration complete: discard, save, or save and apply?"))
+            self.phase.set_text(_("Verification complete: discard the proposal, save it, or save and apply?") if self.verify
+                                else _("Calibration complete: discard, save, or save and apply?"))
             for b in (self.discard_btn, self.save_btn, self.save_apply_btn):
+                b.set_visible(True)
+        elif self.verify and not st.get("unstable"):   # held: nothing to change; the CPU is back at the stock values
+            complete = st.get("iteration", 1) > st.get("iterations", 0)   # not stopped early with Stop / Show the result
+            self.phase.set_text(_("Verification passed: nothing to change") if complete
+                                else _("Verification stopped early: no core failed in the tests done"))
+            for b in (self.close_btn, self.apply_btn):
                 b.set_visible(True)
         else:
             self.phase.set_text(_("Calibration ended without a profile to save"))
@@ -1159,22 +1261,33 @@ class AutotuneDialog(Adw.Window):
         self.follow()   # the proposed profile is at the bottom
         # the choice is mandatory: the window closes only afterwards (the state stays on disk and is proposed again)
 
-    def choose(self, argv, msg):
-        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn):
+    def choose(self, argv, msg, more=()):
+        for b in (self.close_btn, self.discard_btn, self.save_btn, self.save_apply_btn, self.apply_btn):
             b.set_sensitive(False)
-        self.win.run([argv], lambda _r: (self.win.toast(msg), setattr(self, "closable", True), self.close()))
+        self.win.run([argv] + list(more), lambda _r: (self.win.toast(msg), setattr(self, "closable", True), self.close()))
+
+    def apply_profile(self):
+        """After a verification that passed: the profile again, as before the run (the CPU is at the stock values)."""
+        self.choose(["autotune", "abort"], _("Profile '%s' applied") % self.mode, (["apply", self.mode], ["use", self.mode]))
 
     def discard(self):
-        self.choose(["autotune", "abort"], _("Calibration discarded, CPU at baseline"))
+        self.choose(["autotune", "abort"], _("Verification discarded, CPU at baseline") if self.verify else _("Calibration discarded, CPU at baseline"))
 
     def save(self, apply):
         self.choose(["autotune", "save"] + (["apply"] if apply else []),
-                    _("%s profile saved and applied") % self.mode if apply else _("%s profile saved (not applied)") % self.mode)
+                    _("%s profile saved and applied") % self.target if apply else _("%s profile saved (not applied)") % self.target)
+
+    def finished(self, st):
+        self.show(st)
+        self.done(st)
 
     def abort(self):
         self.aborting = True
         self.abort_btn.set_sensitive(False)
         self.phase.set_text(_("Stopping…"))
+        if self.verify:   # what was tested is kept: result and proposal
+            bg(lambda: self.win.h.call("autotune", "finish"), self.finished, self.fail)
+            return
         self.win.run([["autotune", "abort"]], lambda _r: (self.win.toast(_("Calibration discarded, CPU at baseline")), setattr(self, "closable", True), self.close()))
 
 
@@ -1201,7 +1314,7 @@ class ModesPage(Gtk.ScrolledWindow):
             cols.append(col)
         content.append(cols)
         self.rows, first = {}, None
-        self.tables = {}
+        self.tables, self.cal, self.verify_btns = {}, {}, {}
         for key, title, sub in MODES:
             if key in PRESETS:   # expandable: under the row the stock → profile table
                 row = Adw.ExpanderRow(title=title, subtitle=sub, expanded=True)
@@ -1225,35 +1338,89 @@ class ModesPage(Gtk.ScrolledWindow):
                 tag.add_css_class("success" if key in CALIBRATED else "dim-label")
                 row.add_suffix(tag)
                 if key in CALIBRATED:
-                    cal = button(_("Calibrate…"), lambda k=key: self.calibrate(k))
+                    cal = self.cal[key] = button(_("Calibrate…"), lambda k=key: self.calibrate(k))
                     cal.set_tooltip_text(_("Measures on this CPU: per-core undervolt, FMax, limits and fans"))
                     row.add_suffix(cal)
+                    ver = Gtk.Button(icon_name="security-high-symbolic", valign=Gtk.Align.CENTER, visible=False,
+                                     tooltip_text=_("Verify…: long stability test of the saved profile (each core alone, then all together)"))
+                    ver.add_css_class("flat")   # compact like the regenerate button; only once the profile exists
+                    ver.connect("clicked", lambda *_a, k=key: self.verify(k))
+                    row.add_suffix(ver)
+                    self.verify_btns[key] = ver
                 regen = Gtk.Button(icon_name="view-refresh-symbolic", valign=Gtk.Align.CENTER,
                                    tooltip_text=_("Regenerate the profile from the stock values"))
                 regen.add_css_class("flat")
                 regen.connect("clicked", lambda *_a, k=key: self.regen(k))
                 row.add_suffix(regen)
             self.rows[key] = (row, chk, regen)
-            if key == "boost":
-                self.boost_widgets = (chk, cal, regen)
             lists["calibrate" if key in CALIBRATED else "preset"].append(row)
-        self.lock_boost(True)   # until the status says that unlock is on
+        # custom calibrations: from Eco/Auto/Boost with your parameters, each saved under its own name, so the
+        # three modes (e.g. an Auto that works) are never overwritten while trying something else
+        self.first, self.custom_rows, self.custom_chk = first, [], {}
+        self.custom = Adw.ExpanderRow(title=_("Custom"), expanded=True,
+                                      subtitle=_("Calibrations from Eco, Auto or Boost with your parameters, each saved as a new "
+                                                 "profile: the three modes stay as they are"))
+        self.custom.set_title_lines(1)
+        self.custom.set_subtitle_lines(3)
+        self.custom_cal = button(_("Calibrate…"), self.calibrate_custom)
+        self.custom_cal.set_tooltip_text(_("Pick the base mode and the name of the new profile, then the usual parameters"))
+        self.custom.add_suffix(self.custom_cal)
+        lists["calibrate"].append(self.custom)
+        self.lock_calibrated({})   # until the status says that unlock is on
 
-    def lock_boost(self, locked):
-        """Boost only with unlock (ryzenctl refuses it too): radio and buttons insensitive, row dimmed,
-        the reason in the tooltip of the row, which stays sensitive: GTK 4 hides a tooltip owned by an
-        insensitive widget at the first pointer motion. The buttons' own tooltips are off meanwhile,
-        so they do not cover the row's."""
-        row = self.rows["boost"][0]
-        for w in self.boost_widgets:
-            w.set_sensitive(not locked)
-            w.set_has_tooltip(not locked)
-        (row.add_css_class if locked else row.remove_css_class)("dim-label")
-        row.set_tooltip_text(_("Boost needs \"Allow beyond the stock values\": turn it on in Preferences") if locked else None)
+    def lock_calibrated(self, st):
+        """The calibrated modes measure the per-core CO (none on Ryzen 1000–3000); Boost also needs unlock
+        (ryzenctl refuses both). Radio and buttons insensitive, row dimmed, the reason in the tooltip of the
+        row, which stays sensitive: GTK 4 hides a tooltip owned by an insensitive widget at the first pointer
+        motion. The buttons' own tooltips are off meanwhile, so they do not cover the row's."""
+        no_co = st.get("co_unavailable")
+        for key in CALIBRATED:
+            why = (_("Calibrated modes measure the per-core Curve Optimizer, not available on this CPU: %s") % no_co if no_co
+                   else _("Boost needs \"Allow beyond the stock values\": turn it on in Preferences")
+                   if key == "boost" and not st.get("unlock") else None)
+            row, chk, regen = self.rows[key]
+            for w in (chk, self.cal[key], regen, self.verify_btns[key]):
+                w.set_sensitive(not why)
+                w.set_has_tooltip(not why)
+            (row.add_css_class if why else row.remove_css_class)("dim-label")
+            row.set_tooltip_text(why)
+        self.custom_cal.set_sensitive(not no_co)
+        self.custom.set_tooltip_text(_("Calibrated modes measure the per-core Curve Optimizer, not available on this CPU: %s") % no_co
+                                     if no_co else None)
+
+    def refresh_custom(self, st):
+        """One row per saved custom calibration (radio = apply, Verify…, delete) with its stock → profile table."""
+        for r in self.custom_rows:
+            self.custom.remove(r)
+        self.custom_rows, self.custom_chk = [], {}
+        shown, no_co = st.get("profile_lines", {}), st.get("co_unavailable")
+        for name, meta in sorted(st.get("calibrated", {}).items()):
+            row = Adw.ActionRow(title=name, subtitle=_("from %s, %s") % (meta.get("base", "?").capitalize(), meta.get("time", "?")),
+                                activatable=True)
+            chk = self.custom_chk[name] = Gtk.CheckButton(valign=Gtk.Align.CENTER, group=self.first)
+            row.add_prefix(chk)
+            row.set_activatable_widget(chk)
+            chk.connect("toggled", self.on_mode, name)
+            why = (_("Boost needs \"Allow beyond the stock values\": turn it on in Preferences")
+                   if meta.get("base") == "boost" and not st.get("unlock") else no_co)
+            for icon, tip, cb in (("security-high-symbolic", _("Verify…: long stability test of the saved profile (each core alone, then all together)"), self.verify),
+                                  ("user-trash-symbolic", _("Delete this custom calibration"), self.delete_custom)):
+                b = Gtk.Button(icon_name=icon, valign=Gtk.Align.CENTER, tooltip_text=tip)
+                b.add_css_class("flat")
+                b.connect("clicked", lambda *_a, n=name, f=cb: f(n))
+                b.set_sensitive(not why or cb == self.delete_custom)
+                row.add_suffix(b)
+            chk.set_sensitive(not why)
+            row.set_tooltip_text(why)
+            self.custom_rows.append(row)
+            if name in shown:
+                self.custom_rows.append(Gtk.ListBoxRow(child=profile_table(shown[name], st), activatable=False, selectable=False))
+        for r in self.custom_rows:
+            self.custom.add_row(r)
 
     def refresh(self, st):
         self.loading = True
-        self.lock_boost(not st.get("unlock"))
+        self.lock_calibrated(st)
         prof = st.get("profile")
         shown = st.get("profile_lines", {})
         for key, title, sub in MODES:
@@ -1261,6 +1428,8 @@ class ModesPage(Gtk.ScrolledWindow):
             if regen:
                 exists = key in shown
                 regen.set_visible(exists)
+                if key in self.verify_btns:   # ryzenctl verifies only where the per-core CO is usable
+                    self.verify_btns[key].set_visible(exists and st.get("co") is not None)
                 row.set_subtitle(sub if exists else sub + _(" — profile not created yet: tick to create it"))
                 if key in self.tables:
                     row.remove(self.tables.pop(key))
@@ -1268,8 +1437,11 @@ class ModesPage(Gtk.ScrolledWindow):
                     self.tables[key] = Gtk.ListBoxRow(child=profile_table(shown[key], st), activatable=False, selectable=False)
                     row.add_row(self.tables[key])
                     row.set_expanded(True)
-        current = prof if prof in PRESETS else ("custom" if prof else "default")
-        self.rows[current][1].set_active(True)
+        self.refresh_custom(st)
+        if prof in self.custom_chk:
+            self.custom_chk[prof].set_active(True)
+        else:
+            self.rows[prof if prof in PRESETS else ("custom" if prof else "default")][1].set_active(True)
         self.loading = False
 
     def on_mode(self, chk, key):
@@ -1292,8 +1464,9 @@ class ModesPage(Gtk.ScrolledWindow):
                                  _("Create and apply"), go, extra=profile_view(res["lines"], self.win.status))
             bg(lambda: self.win.h.call("preset", key, "show"), ask, lambda m: (self.win.toast(m), self.win.reload()))
 
-    def calibrate(self, mode):
-        """First the estimate (`autotune estimate`), then a simple choice: automatic with the ryzenctl defaults, or the parameters by hand."""
+    def calibrate(self, mode, name=None, retry=0):
+        """First the estimate (`autotune estimate`), then a simple choice: automatic with the ryzenctl defaults, or the parameters by hand.
+        name: a custom calibration from the base `mode`, saved under that name; retry: it ignores the crash of the reused measurement."""
         def ask(est):
             p = est["params"]
             target = _("target Tctl %d °C, ") % p["target"] if "target" in p else ""   # Boost: no thermal target
@@ -1305,13 +1478,20 @@ class ModesPage(Gtk.ScrolledWindow):
             else:
                 auto = _("all cores together, %s — %sCO (Curve Optimizer) down to %d with margin %d, %d s per test.") % (
                     mins(est["parallel_total_s"]), target, p["colimit"], p["margin"], p["step"])
+            if p.get("retry"):
+                auto += " " + _("The crash of the measurement is ignored: the final pass starts again from the last stable value + margin.")
             # the chosen level as the subtitle (as a value at the end of the row the dialog cut it down to "…");
             # use_subtitle before model/selected: set after them, libadwaita leaves the subtitle empty
             fans = Adw.ComboRow(title=_("Fans"), use_subtitle=True, model=Gtk.StringList.new(list(FAN_LEVELS)), selected=p.get("fans", 0),
                                 tooltip_text=_("Also in automatic mode: how much the mode touches the fans (only the channels recognised as fans)"))
+            # chosen at every start, also in automatic mode (the user's request): on by default
+            single = Adw.SwitchRow(title=_("Single-core test in the final pass"), active=bool(p.get("single", 1)),
+                                   subtitle=AT_SINGLE_SUB % mins(est.get("single_s")))
             lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
             lb.append(fans)
-            d = Adw.AlertDialog(heading=_("Calibrate the %s mode?") % mode.capitalize(),
+            lb.append(single)
+            d = Adw.AlertDialog(heading=_("Custom calibration from %s → %s") % (mode.capitalize(), name) if name else
+                                _("Calibrate the %s mode?") % mode.capitalize(),
                                 body=_("Automatic (recommended): %s\n\n%s\n\n%s") % (auto, AT_WARNING, CO_TIP), extra_child=lb)
             d.add_response("cancel", _("Cancel"))
             d.add_response("custom", _("Choose the values…"))
@@ -1319,14 +1499,14 @@ class ModesPage(Gtk.ScrolledWindow):
             d.set_response_appearance("auto", Adw.ResponseAppearance.SUGGESTED)
             def resp(_d, r):
                 if r == "auto":
-                    AutotuneDialog(self.win, mode).start(dict(p, parallel=1, fans=fans.get_selected()))
+                    AutotuneDialog(self.win, mode, name=name).start(dict(p, parallel=1, fans=fans.get_selected(), single=int(single.get_active())))
                 elif r == "custom":
-                    self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected())))
+                    self.calibrate_params(mode, dict(est, params=dict(p, fans=fans.get_selected(), single=int(single.get_active()))), name)
             d.connect("response", resp)
             d.present(self.win)
-        bg(lambda: self.win.h.call("autotune", "estimate", mode), ask, self.win.toast)
+        bg(lambda: self.win.h.call("autotune", "estimate", mode, *(["retry=1"] if retry else [])), ask, self.win.toast)
 
-    def calibrate_params(self, mode, est):
+    def calibrate_params(self, mode, est, name=None):
         """Parameters (ranges from AT_PARAMS, defaults from ryzenctl) with an estimate that follows the changes → autotune start → progress."""
         group = Adw.PreferencesGroup()
         spins = {}
@@ -1341,17 +1521,21 @@ class ModesPage(Gtk.ScrolledWindow):
             group.add(r)
         parallel = Adw.SwitchRow(title=_("Test all cores together (fast, recommended)"), active=bool(est["params"].get("parallel", 1)))
         group.add(parallel)
+        single = Adw.SwitchRow(title=_("Single-core test in the final pass"), active=bool(est["params"].get("single", 1)))
+        group.add(single)
         fans = Adw.ComboRow(title=_("Fans"), use_subtitle=True, model=Gtk.StringList.new(list(FAN_LEVELS)), selected=est["params"].get("fans", 0))
         group.add(fans)
         repeat = Adw.SwitchRow(title=_("Repeat the CO limit search"), active=False, sensitive=bool(est.get("co_reuse")))
         group.add(repeat)
         estimate = label("", ["heading"], margin_top=6)
         params = lambda: dict(((k, int(r.get_value())) for k, r in spins.items()), parallel=int(parallel.get_active()),
-                              reuse=int(not repeat.get_active()), fans=fans.get_selected())
+                              single=int(single.get_active()), reuse=int(not repeat.get_active()), fans=fans.get_selected(),
+                              retry=est["params"].get("retry", 0))
         def show_est(e):
             estimate.set_text(_("Estimated duration: %s") % mins(e["total_s"]) + (
                 _(" (undervolt validated by the final pass of %s: no load test)") % e["eco_from"] if e.get("eco_from") else ""))
             parallel.set_subtitle(AT_PARALLEL_SUB % mins(e["sequential_total_s"]))
+            single.set_subtitle(AT_SINGLE_SUB % mins(e.get("single_s")))
             repeat.set_subtitle(_("Off: reuses the measurement of %s; on: measures the limit again (longer)") % e["co_reuse"] if e.get("co_reuse")
                                 else (_("full search") if repeat.get_active() else _("no usable previous measurement")))
         pending = {"timer": 0, "seq": 0}
@@ -1371,14 +1555,16 @@ class ModesPage(Gtk.ScrolledWindow):
             pending["timer"] = GLib.timeout_add(400, refresh_est)
         for r in spins.values():
             r.connect("notify::value", changed)
-        parallel.connect("notify::active", changed)
-        repeat.connect("notify::active", changed)
+        for sw in (parallel, single, repeat):
+            sw.connect("notify::active", changed)
         show_est(est)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
         box.append(group)
         box.append(estimate)
-        d = Adw.AlertDialog(heading=_("%s calibration parameters") % mode.capitalize(), body=AT_WARNING, extra_child=box)
-        d.spins, d.parallel, d.repeat, d.estimate = spins, parallel, repeat, estimate   # reachable from the driven tests
+        d = Adw.AlertDialog(heading=(_("%s calibration parameters") % mode.capitalize()) + (" → " + name if name else ""),
+                            body=AT_WARNING, extra_child=box)
+        d.spins, d.parallel, d.single, d.repeat, d.estimate = spins, parallel, single, repeat, estimate   # reachable from the driven tests
+        d.params = params
         d.add_response("cancel", _("Cancel"))
         d.add_response("start", _("Start"))
         d.set_response_appearance("start", Adw.ResponseAppearance.DESTRUCTIVE)
@@ -1387,9 +1573,89 @@ class ModesPage(Gtk.ScrolledWindow):
                 GLib.source_remove(pending["timer"])
                 pending["timer"] = 0
             if r == "start":
-                AutotuneDialog(self.win, mode).start(params())
+                AutotuneDialog(self.win, mode, name=name).start(params())
         d.connect("response", resp)
         d.present(self.win)
+        return d
+
+    def verify(self, mode):
+        """Long verification of the saved profile (`autotune verify`, CoreCycler-like iterations): the duration, then
+        the calibration window with the progress and, at the end, the result and the proposal."""
+        dur = Adw.ComboRow(title=_("Duration"), model=Gtk.StringList.new([t for _m, t in VERIFY_DURATIONS]), selected=1)
+        lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        lb.append(dur)
+        d = Adw.AlertDialog(heading=_("Verify the %s profile?") % mode.capitalize(), body=VERIFY_TEXT, extra_child=lb)
+        d.add_response("cancel", _("Cancel"))
+        d.add_response("start", _("Start"))
+        d.set_response_appearance("start", Adw.ResponseAppearance.DESTRUCTIVE)
+        def resp(_d, r):
+            if r == "start":
+                AutotuneDialog(self.win, mode, verify=True).start({"minutes": VERIFY_DURATIONS[dur.get_selected()][0]})
+        d.connect("response", resp)
+        d.present(self.win)
+        return d
+
+    def calibrate_custom(self):
+        """Custom calibration: the base mode (Boost only with unlock) and the name of the new profile, then the
+        same dialog as the modes. The name never replaces a mode; an existing custom one is replaced at Save."""
+        st = self.win.status
+        bases = [m for m in CALIBRATED if m != "boost" or st.get("unlock")]
+        base = Adw.ComboRow(title=_("Starting from"), model=Gtk.StringList.new([m.capitalize() for m in bases]),
+                            selected=bases.index("auto") if "auto" in bases else 0)
+        entry = Adw.EntryRow(title=_("Name of the new profile"))
+        note = label("", ["dim-label", "caption"], wrap=True, margin_top=6)
+        retry = Adw.SwitchRow(title=_("Retry from the last stable value, ignoring the crash"), active=False,
+                              subtitle=_("When the reused measurement ended with a crash (or a final pass failed), the final pass "
+                                         "normally starts 3 steps further away and skips what failed. On: from the last stable value + "
+                                         "margin again; a freeze is possible (the watchdog resets the PC, the crash is recorded)."))
+        lb = Gtk.ListBox(selection_mode=Gtk.SelectionMode.NONE, css_classes=["boxed-list"])
+        lb.append(base)
+        lb.append(entry)
+        lb.append(retry)
+        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        box.append(lb)
+        box.append(note)
+        taken = set(st.get("calibrated", {}))
+        d = Adw.AlertDialog(heading=_("Custom calibration"), extra_child=box,
+                            body=_("The result is saved as a new profile: Eco, Auto and Boost stay as they are, and a new "
+                                   "search of the CO limit does not replace their measurement.") +
+                            ("" if st.get("unlock") else "\n\n" + _("Boost as a base needs \"Allow beyond the stock values\" (Preferences).")))
+        d.add_response("cancel", _("Cancel"))
+        d.add_response("next", _("Continue…"))
+        d.set_response_appearance("next", Adw.ResponseAppearance.SUGGESTED)
+
+        def suggest(*_a):   # "<base>-custom", "-2", "-3"… the first name not taken
+            b = bases[base.get_selected()]
+            entry.set_text(next(n for n in ["%s-custom" % b] + ["%s-custom-%d" % (b, i) for i in range(2, 100)] if n not in taken))
+
+        def check(*_a):
+            name = entry.get_text()
+            ok = bool(re.fullmatch(r"[a-z0-9_-]{1,32}", name)) and name not in PRESETS + ("baseline", "default", "custom")
+            d.set_response_enabled("next", ok)
+            note.set_text(_("Only a-z 0-9 - _, and not the name of a mode") if not ok
+                          else _("'%s' exists: it is replaced when you save the result") % name if name in taken else "")
+        base.connect("notify::selected", suggest)
+        entry.connect("changed", check)
+        suggest()
+        d.base, d.entry, d.retry = base, entry, retry   # reachable from the smoke test
+
+        def resp(_d, r):
+            if r == "next":
+                self.calibrate(bases[base.get_selected()], entry.get_text(), int(retry.get_active()))
+        d.connect("response", resp)
+        d.present(self.win)
+        return d
+
+    def delete_custom(self, name):
+        active = self.win.status.get("profile") == name
+
+        def go(ok):
+            if ok:   # the active one: the stock values first, so nothing stays applied from a deleted profile
+                self.win.run(([["default"]] if active else []) + [["profile", "delete", name]],
+                             lambda _r: self.win.toast(_("Custom calibration '%s' deleted") % name))
+        self.win.confirm(_("Delete '%s'?") % name, _("The profile of this custom calibration is deleted") +
+                         (_("; it is the active mode: the stock values are applied") if active else "") + ".",
+                         _("Delete"), go, destructive=True)
 
     def regen(self, key):
         def ask(res):
@@ -1513,6 +1779,14 @@ class CpuPage(Page):
         row.append(self.power)
         row.append(label(_("system power profile (power-profiles-daemon / EPP)"), ["dim-label"]))
         self.body.append(row)
+        self.boost_row = Gtk.Box(spacing=12)
+        self.boost_row.append(label(_("Boost"), ["heading"], width_chars=9))
+        self.boost = Gtk.Switch(valign=Gtk.Align.CENTER)
+        self.boost_row.append(self.boost)
+        self.boost_row.append(label(_("Precision Boost (kernel switch): off keeps the clock at the base frequency, the frequency "
+                                      "lever of CPUs without FMax"), ["dim-label"], wrap=True))
+        self.body.append(self.boost_row)
+        self.read_boost = None
         self.nocaps = label(_("Baseline of this boot missing: no CPU write possible (ryzenctl.service did not capture it, see `ryzenctl status`)."),
                             ["warning"], wrap=True, visible=False)
         self.body.append(self.nocaps)
@@ -1536,18 +1810,25 @@ class CpuPage(Page):
         self.power.set_sensitive(self.read_power in POWER)
         if self.read_power in POWER:
             self.power.set_selected(POWER.index(self.read_power))
+        self.read_boost = st.get("boost")
+        self.boost_row.set_visible(self.read_boost is not None)
+        self.boost.set_active(self.read_boost == "on")
 
     def reset(self):
         for p in self.params.values():
             p.reset()
         if self.read_power in POWER:
             self.power.set_selected(POWER.index(self.read_power))
+        self.boost.set_active(self.read_boost == "on")
 
     def lines(self, only_changed):
         out = ["%s %d" % (key, p.value()) for key, p in self.params.items() if p.get_visible() and (not only_changed or p.changed())]
         pw = POWER[self.power.get_selected()]
         if self.power.get_sensitive() and (not only_changed or pw != self.read_power):
             out.append("power " + pw)
+        b = "on" if self.boost.get_active() else "off"
+        if self.read_boost and (not only_changed or b != self.read_boost):
+            out.append("boost " + b)
         return out
 
 
@@ -1557,20 +1838,29 @@ class CurvePage(Page):
     def __init__(self, win):
         super().__init__(win, CO_HELP)
         self.loading = False
+        self.missing = label("", ["warning"], wrap=True, visible=False)   # why the CO cannot be used on this CPU
+        self.body.append(self.missing)
         self.all = Param(_("All"), "", tooltip=CO_TIP)
         self.all.adj.connect("value-changed", self.on_all)
         self.body.append(self.all)
         self.body.append(Gtk.Separator())
-        self.cores = [Param(_("Core %d") % c, "", info=True, tooltip=PARAM_HELP["co"]) for c in range(8)]
-        for p in self.cores:
-            self.body.append(p)
+        self.cores = []   # one row per active core, built by refresh
         self.buttons()
 
     def refresh(self, st):
+        if len(self.cores) != st.get("cores", 0):
+            for p in self.cores:
+                self.body.remove(p)
+            self.cores = [Param(_("Core %d") % c, "", info=True, tooltip=PARAM_HELP["co"]) for c in range(st.get("cores", 0))]
+            for p in self.cores:
+                self.body.append(p)
         caps = st.get("caps")
-        self.bar.set_sensitive(bool(caps))
-        self.set_sensitive(bool(caps))
-        if not caps:
+        why = st.get("co_unavailable") if st.get("co") is None else None
+        self.missing.set_text(_("Curve Optimizer not available on this CPU: %s") % why if why else "")
+        self.missing.set_visible(bool(why))
+        for w in [self.all, self.bar] + self.cores:
+            w.set_sensitive(bool(caps) and not why)
+        if not caps or why:
             return
         self.loading = True
         lo, hi = caps["co"]
@@ -1805,7 +2095,7 @@ class Window(Adw.ApplicationWindow):
             st = self.h.call("status")
             st["profile_lines"] = {}
             for name in self.h.call("profile", "list")["profiles"]:
-                if name in PRESETS:
+                if name in PRESETS or name in st.get("calibrated", {}):
                     st["profile_lines"][name] = self.h.call("profile", "show", name)["lines"]
             st["autotune"] = self.h.call("autotune", "status")
             try:   # BIOS fan settings captured at boot: the "stock" side of the fan rows in the profile tables
@@ -1831,18 +2121,51 @@ class Window(Adw.ApplicationWindow):
         if at.get("phase") and not getattr(self, "at_asked", False):
             self.at_asked = True   # once per session
             if at["phase"] == "done":   # finished without a choice (GUI closed): discard / save / save and apply is proposed again
-                dlg = AutotuneDialog(self, at.get("mode", "eco"))
+                dlg = AutotuneDialog(self, at.get("mode", "eco"), verify=bool(at.get("verify")), name=at.get("save_as"))
                 dlg.show(at)
                 dlg.done(at)
             else:
                 self.ask_resume(at)
 
+    def ask_verify(self, at):
+        """A verification left halfway (GUI closed, or a crash): what failed so far, then continue, see the result now
+        (`autotune finish`: result and proposal of what was tested) or discard."""
+        uns = at.get("unstable") or {}
+        failed = ", ".join(_("core %s at CO %d (%s)") % (c, u["value"], WHY_NAMES.get(u.get("why"), u.get("why")))
+                           for c, u in sorted(uns.items(), key=lambda kv: int(kv[0]))) or _("none")
+        d = Adw.AlertDialog(heading=_("Verification interrupted"),
+                            body=_("The verification of the %s profile started on %s was left halfway (iteration %d of %d). Failed so "
+                                   "far: %s. A core that locked up the system is recorded as failed and no longer tested. Continue the "
+                                   "verification, see the result now, or discard it and stay on the stock values?") % (
+                                       at.get("mode", "?"), at.get("started", "?"), at.get("iteration", 1), at.get("iterations", 1), failed))
+        d.add_response("abort", _("Discard"))
+        d.add_response("finish", _("Show the result"))
+        d.add_response("resume", _("Continue verification"))
+        d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)
+        def resp(_d, r):
+            if r == "abort":
+                self.run([["autotune", "abort"]], lambda _r: self.toast(_("Verification discarded, CPU at baseline")))
+                return
+            dlg = AutotuneDialog(self, at.get("mode", "?"), verify=True)
+            dlg.show(at)
+            if r == "resume":
+                dlg.loop()
+            else:
+                dlg.abort()   # for a verification: `autotune finish`, then the result
+        d.connect("response", resp)
+        d.present(self)
+        return d
+
     def ask_resume(self, at):
+        if at.get("verify"):
+            return self.ask_verify(at)
         ph = at.get("phase")
         where = AT_PHASE_NAMES.get(ph, ph)
         if ph == "co":
             where += _(", CO level %s") % at.get("value") if at.get("parallel") else _(", core %s") % at.get("core")
-        story = crash_story(at) or _("The step interrupted by the reboot has already been recorded as unstable.")
+        elif ph == "final" and at.get("single") is not None:
+            where += _(", single-core test of core %s") % at["single"]
+        story = crash_story(at, self.status.get("cores", 0)) or _("The step interrupted by the reboot has already been recorded as unstable.")
         d = Adw.AlertDialog(heading=_("Calibration interrupted"),
                             body=_("A %s calibration started on %s was left halfway (%s). %s Resume it from where it was, or "
                                    "discard it and stay on the stock values?") % (
@@ -1852,7 +2175,7 @@ class Window(Adw.ApplicationWindow):
         d.set_response_appearance("resume", Adw.ResponseAppearance.SUGGESTED)
         def resp(_d, r):
             if r == "resume":
-                dlg = AutotuneDialog(self, at.get("mode", "eco"))
+                dlg = AutotuneDialog(self, at.get("mode", "eco"), name=at.get("save_as"))
                 dlg.show(at)
                 dlg.loop()
             else:
@@ -2004,10 +2327,12 @@ class App(Adw.Application):
 
     def screenshot_steps(self):
         """--mock --screenshots DIR (make screenshots): fills a fresh fake backend (fan roles, presets,
-        the three calibrations), saves the frames of the Auto calibration (README GIF), then one PNG
-        per page."""
+        the three calibrations if the CPU has a per-core CO), saves the frames of the Auto calibration
+        (README GIF), then one PNG per page."""
         win = self.props.active_window
         h = win.h
+        while not win.status:   # the windows are built with the core count of the first status
+            yield 100
         h.call("fan", "autodetect")
         h.call("fan", "identify", "1")
         # a new fake boot: as on a real machine the fan roles exist at boot, so the baseline has the BIOS fan lines
@@ -2017,34 +2342,35 @@ class App(Adw.Application):
         subprocess.run([RYZENCTL, "boot"], env=dict(os.environ, RYZENCTL_ROOT=MOCK_DIR), check=True, stdout=subprocess.DEVNULL)
         for name in ("quiet", "performance"):
             h.call("preset", name)
-        # Auto from scratch, one step at a time: a frame per step for the README GIF (assembled by `make
-        # screenshots` from $RYZENCTL_ROOT/frames), the end state as calibration.png
-        frames = os.path.join(MOCK_DIR, "frames")
-        os.makedirs(frames, exist_ok=True)
-        dlg = AutotuneDialog(win, "auto")
-        st = h.call("autotune", "start", "auto", "step=3", "reuse=0")
-        for i in range(300):
-            dlg.show(st)
-            yield 250
-            save_png(dlg, os.path.join(frames, "f-%03d.png" % i))
-            if st["phase"] == "done":
-                break
-            st = h.call("autotune", "step")
-        dlg.done(st)
-        yield 800
-        save_png(dlg, os.path.join(frames, "last.png"))
-        h.call("autotune", "save")
-        dlg.closable = True
-        dlg.close()
-        h.call("unlock", "on")   # Boost is calibrated and used only with the unlock: the screenshots show it usable
-        for mode in ("eco", "boost"):   # Eco reuses the final pass Auto just validated: done at once
-            st = h.call("autotune", "start", mode, "step=3")
-            while st["phase"] != "done":
+        if win.status.get("co") is not None:   # the calibrations measure the CO: refused on CPUs without a per-core CO
+            # Auto from scratch, one step at a time: a frame per step for the README GIF (assembled by `make
+            # screenshots` from $RYZENCTL_ROOT/frames), the end state as calibration.png
+            frames = os.path.join(MOCK_DIR, "frames")
+            os.makedirs(frames, exist_ok=True)
+            dlg = AutotuneDialog(win, "auto")
+            st = h.call("autotune", "start", "auto", "step=3", "reuse=0")
+            for i in range(300):
+                dlg.show(st)
+                yield 250
+                save_png(dlg, os.path.join(frames, "f-%03d.png" % i))
+                if st["phase"] == "done":
+                    break
                 st = h.call("autotune", "step")
+            dlg.done(st)
+            yield 800
+            save_png(dlg, os.path.join(frames, "last.png"))
             h.call("autotune", "save")
-        h.call("use", "auto")
-        h.call("apply", "auto")
-        h.call("autostart", "on")
+            dlg.closable = True
+            dlg.close()
+            h.call("unlock", "on")   # Boost is calibrated and used only with the unlock: the screenshots show it usable
+            for mode in ("eco", "boost"):   # Eco reuses the final pass Auto just validated: done at once
+                st = h.call("autotune", "start", mode, "step=3")
+                while st["phase"] != "done":
+                    st = h.call("autotune", "step")
+                h.call("autotune", "save")
+            h.call("use", "auto")
+            h.call("apply", "auto")
+            h.call("autostart", "on")
         win.reload()
         yield 1500
         mon = next(p for p in win.pages if isinstance(p, MonitorPage))
@@ -2056,38 +2382,126 @@ class App(Adw.Application):
             save_png(win, os.path.join(self.shots, page.NAME + ".png"))
 
     def run_smoke(self):
-        """--mock --smoke (make check): the calibration window shows every real state of the fake
-        backend for eco, auto and boost (all phases, end, resume dialog), the collapsible section of the
-        unknown channels on the Fans page hides/shows only them and is saved, then the app exits; a
-        rendering error becomes exit code 1 instead of a traceback on the desktop."""
+        """--mock --smoke (make check): the per-core rows of Monitor and Curves follow the core count, the
+        calibration window shows every real state of the fake backend for eco, auto and boost (all
+        phases, end, resume dialog), the collapsible section of the unknown channels on the Fans page
+        hides/shows only them and is saved, then the app exits; a rendering error becomes exit code 1
+        instead of a traceback on the desktop."""
         win = self.props.active_window
+        if not win.status:   # the windows are built with the core count of the first status
+            return True
         try:
             win.h.call("autotune", "abort")
             modes = next(p for p in win.pages if isinstance(p, ModesPage))
+            no_co = bool(win.status.get("co_unavailable"))   # Ryzen 1000–3000: every calibrated mode locked, with the reason
             for on in (False, True):   # Boost only with unlock: disabled without it, usable as soon as the status says on
                 modes.refresh(dict(win.status, unlock=on))
                 row, chk, regen = modes.rows["boost"]
-                assert chk.get_sensitive() == regen.get_sensitive() == on and (row.get_tooltip_text() is None) == on
+                ok = on and not no_co
+                assert chk.get_sensitive() == regen.get_sensitive() == ok and (row.get_tooltip_text() is None) == ok
+                assert all(modes.rows[k][1].get_sensitive() != no_co for k in ("eco", "auto"))
+            # per-core views follow the active cores, also when the count changes: rows replaced, not added
+            mon = next(p for p in win.pages if isinstance(p, MonitorPage))
+            curve = next(p for p in win.pages if isinstance(p, CurvePage))
+            t, n = win.h.call("telemetry"), win.status["cores"]
+            mon.telemetry(t)   # rows of every core, as after the first 1 Hz poll
+            for k in (2, n):
+                old = curve.cores
+                mon.telemetry(dict(t, cores=t["cores"][:k]))
+                curve.refresh(dict(win.status, cores=k))
+                assert len(mon.cores) == len(curve.cores) == k and mon.grid.get_child_at(0, k + 1) is None, "core rows not following the count"
+                assert not any(p.get_parent() for p in old), "old core rows kept"
             win.h.call("unlock", "on")   # needed by the Boost calibration below
-            # the first Eco measures from scratch, the last one reuses the final passes just recorded: done at once
-            for i, mode in enumerate(("eco", "auto", "boost", "eco")):
+            # the first Eco measures from scratch, the last one reuses the final passes just recorded: done at once;
+            # no calibration without a per-core CO (ryzenctl refuses it)
+            # Auto sweeps the PPT: not on CPUs whose PM table limits are unknown (ryzenctl refuses it)
+            pm_limits = (win.status.get("limits") or {}).get("ppt") is not None
+            for i, mode in enumerate((("eco", "auto", "boost", "eco") if pm_limits else ("eco", "boost", "eco"))
+                                     if win.status.get("co") is not None else ()):
                 dlg = AutotuneDialog(win, mode)
                 st = win.h.call("autotune", "start", mode, "step=3", "reuse=%d" % (i > 0))
                 dlg.show(st)
+                # serve arms the (fake) hardware watchdog for the run and the window says so; done at once: nothing to arm
+                assert st["phase"] == "done" or (st.get("watchdog") and dlg.watchdog.get_text().strip()), "watchdog state not shown"
                 for _i in range(300):
                     if st["phase"] == "done":
                         break
                     st = win.h.call("autotune", "step")
                     dlg.show(st)
-                assert i < 3 or st.get("eco_from"), "Eco did not reuse the validated undervolt"
+                assert i == 0 or mode != "eco" or st.get("eco_from"), "Eco did not reuse the validated undervolt"
                 dlg.done(st)
                 win.h.call("autotune", "abort")
                 dlg.closable = True
                 dlg.close()
+            if win.status.get("co") is not None:
+                # the parameters: the single-core test of the final pass is on by default and sent to ryzenctl
+                d = modes.calibrate_params("eco", win.h.call("autotune", "estimate", "eco"))
+                assert d.single.get_active() and d.params()["single"] == 1 and d.single.get_subtitle(), "single-core switch"
+                d.force_close()
+                # a verification of a saved profile: Verify… on the row, the duration, then the same window to the end
+                win.h.call("preset", "eco")
+                modes.refresh(dict(win.status, profile_lines={"eco": win.h.call("profile", "show", "eco")["lines"]}))
+                assert modes.verify_btns["eco"].get_visible(), "Verify… missing on a saved calibrated profile"
+                modes.verify("eco").force_close()
+                dlg = AutotuneDialog(win, "eco", verify=True)
+                st = win.h.call("autotune", "verify", "eco", "minutes=10")
+                for _i in range(100):
+                    dlg.show(st)
+                    if st["phase"] == "done":
+                        break
+                    st = win.h.call("autotune", "step")
+                dlg.done(st)
+                assert not st["profile_lines"] and dlg.apply_btn.get_visible(), "a passed verification offers to apply the profile"
+                win.h.call("autotune", "abort")
+                dlg.closable = True
+                dlg.close()
+                dlg = AutotuneDialog(win, "eco", verify=True)   # stopped before the last iteration: not "passed"
+                dlg.done(dict(st, iteration=st["iterations"]))
+                assert dlg.apply_btn.get_visible() and dlg.phase.get_text() != _("Verification passed: nothing to change")
+                dlg.closable = True
+                dlg.close()
+                cores = win.status["cores"]
+                failed = dict(st, unstable={"1": {"value": -12, "why": "crash"}}, final=[-9 if c == 1 else -12 for c in range(cores)],
+                              profile_lines=["co " + " ".join("-9" if c == 1 else "-12" for c in range(cores))])
+                dlg = AutotuneDialog(win, "eco", verify=True)   # a core failed: the proposal raises only that one
+                dlg.show(failed)
+                dlg.done(failed)
+                assert dlg.save_btn.get_visible() and not dlg.apply_btn.get_visible()
+                dlg.closable = True
+                dlg.close()
+                win.ask_resume(dict(failed, phase="verify", core=2, iteration=1, iterations=3))
+                win.h.call("profile", "delete", "eco")
+                # a custom calibration: base and name (never a mode's), saved under its own name and listed in its row
+                d = modes.calibrate_custom()
+                assert d.entry.get_text().endswith("-custom") and d.get_response_enabled("next"), "custom name not proposed"
+                assert not d.retry.get_active(), "retrying past crashes must be an explicit choice"
+                d.entry.set_text("auto")
+                assert not d.get_response_enabled("next"), "a mode's name accepted for a custom calibration"
+                d.force_close()
+                base = "auto" if pm_limits else "eco"
+                dlg = AutotuneDialog(win, base, name="smoke-custom")
+                st = win.h.call("autotune", "start", base, "name=smoke-custom", "step=3")
+                for _i in range(300):
+                    dlg.show(st)
+                    if st["phase"] == "done":
+                        break
+                    st = win.h.call("autotune", "step")
+                dlg.done(st)
+                assert win.h.call("autotune", "save")["saved"] == "smoke-custom"
+                dlg.closable = True
+                dlg.close()
+                cal = win.h.call("status")["calibrated"]
+                modes.refresh(dict(win.status, calibrated=cal, profile=None,
+                                   profile_lines={"smoke-custom": win.h.call("profile", "show", "smoke-custom")["lines"]}))
+                assert "smoke-custom" in modes.custom_chk and len(modes.custom_rows) == 2, "custom calibration not listed"
+                win.h.call("profile", "delete", "smoke-custom")
             win.ask_resume({"mode": "auto", "phase": "ppt", "started": "today"})
             win.ask_resume({"mode": "eco", "phase": "co", "parallel": True, "value": -10, "started": "today"})
             win.ask_resume({"mode": "auto", "phase": "final", "started": "today", "params": {"margin": 3}, "final_margin": 6,
-                            "results": {str(c): -35 for c in range(8)}, "unstable": {"0": {"value": -40, "why": "crash"}}})
+                            "results": {str(c): -35 for c in range(win.status["cores"])}, "unstable": {"0": {"value": -40, "why": "crash"}}})
+            win.ask_resume({"mode": "auto", "phase": "final", "single": 1, "started": "today", "params": {"margin": 3}, "final_margin": 3,
+                            "core_margin": {"1": 3}, "results": {str(c): -35 for c in range(win.status["cores"])}, "unstable": {},
+                            "final_failures": [{"values": [-32] * win.status["cores"], "why": "crash", "core": 1}]})
             fans = next(p for p in win.pages if isinstance(p, FansPage))
             chans = [{"canale": 8, "rpm": 0, "pwm": 255, "modo": 0, "role": "non-controllabile"},
                      {"canale": 9, "rpm": 0, "pwm": 0, "modo": 5}]   # no role = unknown

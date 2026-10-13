@@ -1,20 +1,63 @@
 # Ryzen Control
 
-Ryzen Master-style control for AMD Ryzen 9000 (Granite Ridge) on Linux: per-core Curve
-Optimizer and Curve Shaper, PPT/TDC/EDC limits, boost frequency (FMax), maximum temperature
-(Tjmax), power profile and motherboard fans. Profiles applied at boot with protection after a
-crash.
+Ryzen Master-style control for AMD Ryzen desktop processors on Linux (Ryzen 9000 verified,
+Ryzen 1000–7000 expected: see [Processors](#processors)): per-core Curve Optimizer and Curve Shaper,
+PPT/TDC/EDC limits, boost frequency (FMax), maximum temperature (Tjmax), power profile and
+motherboard fans. Profiles applied at boot with protection after a crash.
 
 > **Warning.** Experimental software that talks directly to the processor's SMU.
 > Developed and tested on a single system: Ryzen 7 9800X3D, ASUS ROG STRIX X870E-H, Fedora 44.
-> Any other CPU is refused. A Curve Optimizer that is too negative can reboot the system (no
-> damage, but unsaved work is lost): read "Safety" before using it.
+> Processors outside the [table](#processors) are refused. A Curve Optimizer that is too
+> negative can reboot the system (no damage, but unsaved work is lost): read "Safety" before
+> using it.
 
-Status: phases 1–4 done on the development system — `ryzenctl` helper/CLI, systemd services,
-driver via DKMS, RPM package, fans, GTK4 GUI and calibrations. Next: other Ryzen CPUs, tray icon,
-deb/Arch packages (see `docs/plans/`).
+Status: phases 1–5 done on the development system — `ryzenctl` helper/CLI, systemd services,
+driver via DKMS, RPM package, fans, GTK4 GUI, calibrations, per-family support for other Ryzen
+CPUs. Next: tray icon, deb/Arch packages (see `docs/plans/`).
 
 ![Modes page: presets on the left, calibrated modes on the right](docs/screenshots/modes.png)
+
+## Processors
+
+Every family has its own SMU allowlist (`FAMILIES` at the top of `ryzenctl`, from ZenStates-Core
+and ryzen_smu): a family that is not there is refused in full, and a function the family does not
+have is refused, its command never sent. A family is **verified** once a `hwtest` on real hardware
+has written and read back each of its functions; until then it is **expected**: same guarantees
+(values ≤ the BIOS ones, readback of every write, crash-guard), but nobody has tried it yet, and
+`ryzenctl status` and the Monitor page say so.
+
+| Processors | Family (codename) | Status | Functions |
+|---|---|---|---|
+| Ryzen 9000 desktop: 9800X3D | Granite Ridge (23) | **verified** on 9800X3D, SMU 98.81.0, PM table 0x620105 | Curve Optimizer, FMax, PPT/TDC/EDC, Tjmax, voltage and temperature per core, all calibrations; Curve Shaper experimental (not verifiable) |
+| Ryzen 9000 desktop: 9600X, 9700X, 9900X, 9950X, 9900X3D, 9950X3D | Granite Ridge (23) | expected | as above; the limits are read at the PM table offsets measured on 0x620105, voltage and temperature per core only with that version; the 6-core CCDs (9600X, 9900X, 9900X3D) take the core positions from the fuses |
+| Ryzen 7000 desktop: 7600X … 7950X3D | Raphael (20) | expected | Curve Optimizer, FMax, Eco and Boost calibrations; PPT/TDC/EDC/Tjmax and Auto refused (no verified map of the limits in its PM table) |
+| Ryzen 5000 desktop: 5600X … 5950X, 5800X3D | Vermeer (12) | expected | Curve Optimizer (−30..+30), PPT/TDC/EDC/Tjmax (PM tables 0x3808xx/0x3809xx), all calibrations, Auto on the PPT alone; no FMax (Zen 3 has no command for it); the core positions always come from the fuses; on the 5800X3D the BIOS may lock the power limits (the CO still works) |
+| Ryzen 3000 desktop: 3600 … 3950X | Matisse (4) | expected | PPT/TDC/EDC/Tjmax (PM tables 0x240803/0x240903), Quiet and Performance, Quiet also turns the boost off; no Curve Optimizer, so no calibrated modes |
+| Ryzen 1000/2000 desktop | Summit Ridge (9), Pinnacle Ridge (10) | expected | boost switch, power profile and fans only: no SMU command (no Curve Optimizer, no readable limits); Tdie instead of Tctl on the X models with an offset |
+| APUs and laptops (Ryzen G, mobile, Ryzen AI) | Raven Ridge … Strix Halo | not supported | other limits (STAPM, fast/slow PPT), often no RSMU mailbox |
+| Threadripper, EPYC | — | not supported | other interface (HSMP), out of scope |
+
+Fans depend on the motherboard (Nuvoton nct67xx chip), not on the processor.
+
+### Adding your processor
+
+If your processor is *expected*, one check on your machine moves it to *verified*. It takes a few
+seconds and restores everything, but save your work first: it lowers the Curve Optimizer of one
+core by 3 steps for a moment.
+
+1. Install (below): the service loads the driver and reads the BIOS values of this boot.
+2. `sudo ryzenctl status` — the first line shows family, cores, SMU and PM table version.
+3. `sudo ryzenctl hwtest` (or Preferences → Hardware check): each command is written slightly
+   away from the BIOS value, read back and brought back; the last line is `esito ok`, or
+   `esito FAILED` with `error:` on the step that failed. Functions the family does not have are
+   `skipped`.
+4. Open an issue with the output of `lscpu | grep 'Model name'`, `sudo ryzenctl status` and
+   `sudo ryzenctl hwtest`.
+
+A family that is not in the table is refused before any SMU command (`unsupported CPU (codename
+N…)`). Adding it needs its command IDs and PM table map from a verified source, a fake variant in
+the selftest (`RYZENCTL_FAKE_FAMILY`) and then the same `hwtest`: open an issue with the codename
+(`cat /sys/kernel/ryzen_smu_drv/codename`) and the PM table version.
 
 ## Installation
 
@@ -66,9 +109,10 @@ needs root asks for the administrator password once per session; "Stop asking fo
 in Preferences removes even that one. The screenshots below come from the fake backend
 (`make screenshots`), so the values are illustrative.
 
-**Monitor** — Tctl and per-core temperature, PPT and TDC against their limits, MHz, voltage and
-Curve Optimizer per core, a 60 s graph of Tctl (blue, °C) and PPT (orange, W, its limit dashed),
-fan speeds and power mode.
+**Monitor** — the CPU family and its active cores on top (with a note when the family has not
+been verified on hardware yet), Tctl and per-core temperature, PPT and TDC against their limits,
+MHz, voltage and Curve Optimizer per core, a 60 s graph of Tctl (blue, °C) and PPT (orange, W, its
+limit dashed), fan speeds and power mode. Every per-core view lists only the active cores.
 
 ![Monitor page](docs/screenshots/monitor.png)
 
@@ -126,6 +170,7 @@ sudo ryzenctl ppt 120                # limits: ppt (W), tdc (A), edc (A)
 sudo ryzenctl fmax 5000              # maximum boost frequency (MHz)
 sudo ryzenctl tjmax 85               # maximum temperature (°C), never above the baseline
 sudo ryzenctl power balanced         # power-saver | balanced | performance
+sudo ryzenctl boost off              # Precision Boost through the kernel (cpufreq), no SMU: on | off
 sudo ryzenctl default                # everything back to the base (BIOS) values, autostart off
 sudo ryzenctl trust on|off|status    # polkit rule: your user starts Ryzen Control without a password
 sudo ryzenctl hwtest                 # reversible test of every command with readback
@@ -169,8 +214,12 @@ BIOS. In profiles: `fan <N> step …`, `fan <N> curve …`, `fan <N> pump auto|m
 ### Modes and automatic calibration
 
 From the GUI (Modes page) or the CLI. Fixed presets (no test): **Default** = BIOS values,
-**Quiet** = limits ×0.55/0.63/0.83, FMax −400, Tjmax 80, fans 10 s/5 s, **Performance** =
-factory values with power at maximum. Modes **calibrated on the hardware** with load tests
+**Quiet** = limits ×0.55/0.63/0.83, FMax −400, Tjmax 80, fans 10 s/5 s (on Ryzen 1000–3000, which
+have neither Curve Optimizer nor FMax, also the boost off), **Performance** =
+factory values with power at maximum. If the BIOS reports the motherboard's limits instead of the
+CPU's (PBO "Enabled" on many boards: PPT 1000 W and the like), ratios of them mean nothing: Quiet
+and Eco use AMD's 65 W Eco mode values (88 W / 75 A / 150 A on AM5, 88 / 60 / 90 on AM4) and Auto
+is refused with the reason (set PBO to Auto/Disabled, or Advanced with your own limits). Modes **calibrated on the hardware** with load tests
 (**Eco**, **Auto**, **Boost**): the search for the per-core CO stability limit is a single one,
 shared and saved (`/var/lib/ryzenctl/co_limits.json`, reused by later calibrations), and the three
 modes use the same margin (+3), so the same validated undervolt.
@@ -178,15 +227,33 @@ modes use the same margin (+3), so the same validated undervolt.
 ```sh
 sudo ryzenctl preset quiet|performance|eco|auto|boost   # creates the profile from the factory values (placeholder)
 sudo ryzenctl autotune estimate eco              # estimated duration (0 s when Eco reuses a validated final pass: eco_from)
-sudo ryzenctl autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 fans=0|1|2]
+sudo ryzenctl autotune start eco|auto|boost [name=<profile>] [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 fans=0|1|2 single=1 watchdog=1]
 sudo ryzenctl autotune step                      # one test at a time; repeat until phase == done
+sudo ryzenctl autotune verify auto [minutes=60]  # long stability test of a saved profile; `autotune finish` stops it keeping the result
 sudo ryzenctl autotune status | abort            # abort stops immediately, even a step in progress
 sudo ryzenctl autotune save [apply]              # at phase == done: writes the proposed profile (and applies it); abort discards it
 ```
 
 When the calibration is over the CPU goes back to the factory values and the profile is only
 **proposed**: you choose whether to cancel, save (the profile appears in Modes, not active) or
-save and apply. Without a choice the state stays on disk and the GUI offers it again at the
+save and apply.
+
+**Custom calibrations** (Modes → Calibrated → Custom → "Calibrate…"; CLI `name=<profile>`): pick the
+base mode (Eco, Auto, Boost) and the name of a new profile, then the usual dialog. The result is
+saved under that name and listed in the Custom row (apply, Verify…, delete): the Eco, Auto and Boost
+profiles are never overwritten, and a new search of the CO limit stays in the custom calibration —
+the shared measurement the three modes reuse is untouched. So a working Auto stays as it is while you
+try other parameters. A custom calibration based on Boost follows Boost's unlock rule. Only here,
+"Retry from the last stable value, ignoring the crash" (`retry=1`): when the reused measurement ended
+with a crash, or a final pass failed, the final pass normally starts 3 steps further away and skips
+what failed; with it on, it starts again from the last stable value + margin (a freeze is possible:
+the watchdog resets the PC and the new crash is recorded).
+
+**Verify…** (shield button on a saved calibrated profile; CLI `autotune verify`): hours of load on the
+saved profile without changing anything, like CoreCycler or Ryzen Master's "Validate": each core alone
+with one thread, then all cores together, in iterations for the chosen time (30 min – 8 h). At the
+end either "passed", or a proposal with only the cores that failed raised by 3 (Cancel / Save / Save
+and apply). Stop keeps the partial result. Without a choice the state stays on disk and the GUI offers it again at the
 next start.
 
 From the GUI: Modes → "Calibrate…" on Eco, Auto or Boost, then "Automatic" (default values) or
@@ -224,7 +291,11 @@ The CO search uses as the first phase of every level the heaviest stress-ng meth
 (probed at start with factory CO); measurements from earlier versions, taken without this load,
 are not reused. The **final pass** (all cores at the proposed CO) starts with the stress-ng
 method that draws the most power on this CPU, at full load for 60 s with verify, then 100 s
-full / 50 % / 10 %. If it fails, or if in a later phase (knee, benchmark) a load dies, an
+full / 50 % / 10 %; then, with `single=1` (default; a switch in the first calibration dialog, so it is chosen at every
+start, also in automatic mode), **each core alone** with one
+thread for 45 s and a load that comes and goes: a too-negative CO fails at the highest single-core
+boost, which all-core loads never reach (CoreCycler's lesson); a core that fails alone is raised
+alone (+3) and the final pass repeated. If it fails, or if in a later phase (knee, benchmark) a load dies, an
 MCE error appears or the system freezes and is rebooted, the combination is unstable: +3 on all
 cores and the final pass repeated (3 attempts at most). If the search itself ends with a system
 freeze, the margin gets an extra +3: the "stable" level below the crash one was tested only for
@@ -233,6 +304,15 @@ retry them. After a forced reboot the interrupted step is marked unstable as soo
 `ryzenctl.service` starts, before any choice in the GUI (Resume or Cancel). Result on the
 development 9800X3D: with the heaviest method in the search the per-core limit is −35 (−40 froze
 the system), and the final pass at −29 on all cores is stable; one CO step is worth ≈ 3.4 mV.
+
+**Hardware watchdog**: while a calibration or a verification runs from the GUI, `ryzenctl serve` arms
+the motherboard watchdog (e.g. the SP5100 TCO timer, 60 s) and keeps it alive every 10 s. On Ryzen 9000
+a too-negative CO freezes the PC instead of rebooting it: with the watchdog the board resets by itself
+within the timeout, and the calibration resumes with that step marked unstable. It is never armed if it
+could not be stopped again (`nowayout`), if the system already uses it (systemd `RuntimeWatchdogSec`),
+without "magic close", or with `watchdog=0`; the calibration window shows its state. Every way out
+(end, Stop, window closed, logout) stops it with the magic close and checks that it stopped. If the
+helper is killed with SIGKILL during a calibration, the PC resets after the timeout (handled as a crash).
 
 **Warning**: an unstable CO can reboot the PC during the calibration (no damage, unsaved work
 lost). The state is on disk: at reboot the interrupted step is marked unstable and the
@@ -256,6 +336,12 @@ the BIOS.
   every value. Without a baseline of this boot no CPU write is accepted.
 - Every write is verified by reading the value back; if it does not match, one retry, then
   restore of the base value and error.
+- The Curve Optimizer addresses a core by its physical position in the CCD, while Linux lists
+  only the enabled cores. With complete CCDs (8 cores) the positions are 0–7 in order. With
+  disabled cores (e.g. 9600X, 9900X, 7600X) the positions come from the core fuses, read through
+  the driver's `smn` file — reads only, only at the fuse addresses of the CPU family — and are used
+  only if they agree with the system topology; otherwise the per-core CO is refused. On Ryzen 5000
+  the fuses are always read: an 8-core part can sit on the second CCD of a two-CCD package.
 - **Crash-guard**: `ryzenctl.service` writes the markers `dirty` (boot in progress) and `active`
   (state modified) *before* touching the SMU and removes `dirty` at clean shutdown. If both
   exist at the next boot, the system crashed: the CPU profile is **not reapplied**,

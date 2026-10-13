@@ -156,8 +156,26 @@ msgstr "Ora     PPT %s  TDC %s  Tctl %s"
 
 #: ryzenctl
 #, python-format
-msgid "Power   %s%s"
-msgstr "Energia %s%s"
+msgid "Power   %s%s, boost %s%s"
+msgstr "Energia %s%s, boost %s%s"
+
+msgid "usage: boost on|off"
+msgstr "uso: boost on|off"
+
+msgid "boost switch not available (no cpufreq boost control)"
+msgstr "interruttore del boost non disponibile (nessun controllo del boost in cpufreq)"
+
+msgid "boost: wrote %s but read back %s"
+msgstr "boost: scritto %s ma riletto %s"
+
+msgid "FMax is not available on this CPU (no SMU command for it): use `boost off` to cap the clock"
+msgstr "FMax non disponibile su questa CPU (nessun comando SMU): usa `boost off` per limitare la frequenza"
+
+msgid "skipped: not available on this CPU"
+msgstr "saltato: non disponibile su questa CPU"
+
+msgid "the BIOS reports motherboard limits (%s), not the CPU's stock ones: set PBO to Auto or Disabled in the BIOS, or Advanced with your own limits"
+msgstr "il BIOS riporta i limiti della scheda madre (%s), non quelli di fabbrica della CPU: nel BIOS imposta PBO su Auto o Disabled, oppure Advanced con limiti tuoi"
 
 #: ryzenctl
 #, python-format
@@ -257,8 +275,8 @@ msgid "stress-ng reported no metrics"
 msgstr "stress-ng non ha riportato le metriche"
 
 #: ryzenctl
-msgid "usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
-msgstr "uso: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1] | step | status | abort | save [apply] | estimate eco|auto|boost […]"
+msgid "usage: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1 watchdog=1] | verify <profile> [minutes=60] | step | status | abort | finish | save [apply] | estimate eco|auto|boost […]"
+msgstr "uso: autotune start eco|auto|boost [target=70 colimit=-40 margin=3 step=90 parallel=1 reuse=1 single=1 watchdog=1] | verify <profilo> [minutes=60] | step | status | abort | finish | save [apply] | estimate eco|auto|boost […]"
 
 #: ryzenctl
 msgid "usage: autotune estimate eco|auto [key=value…]"
@@ -273,8 +291,11 @@ msgid "usage: autotune save [apply]"
 msgstr "uso: autotune save [apply]"
 
 #: ryzenctl
-msgid "usage: autotune start eco|auto [key=value…]"
-msgstr "uso: autotune start eco|auto [chiave=valore…]"
+msgid "usage: autotune start eco|auto|boost [name=<profile>] [key=value…]"
+msgstr "uso: autotune start eco|auto|boost [name=<profilo>] [chiave=valore…]"
+
+msgid "'%s' is a mode of its own: a custom calibration needs another name"
+msgstr "'%s' è una modalità a sé: una calibrazione personalizzata ha bisogno di un altro nome"
 
 #: ryzenctl
 #, python-format
@@ -282,8 +303,8 @@ msgid "the combined CO already proved unstable up to margin +%d: raise margin or
 msgstr "il CO combinato è già risultato instabile fino al margine +%d: aumenta margin o ripeti la ricerca con reuse=0"
 
 #: ryzenctl
-msgid "usage: autotune start|step|status|abort|save|estimate"
-msgstr "uso: autotune start|step|status|abort|save|estimate"
+msgid "usage: autotune start|verify|step|status|abort|finish|save|estimate"
+msgstr "uso: autotune start|verify|step|status|abort|finish|save|estimate"
 
 #: ryzenctl
 msgid "no calibration in progress (autotune start eco|auto|boost)"
@@ -486,3 +507,100 @@ msgstr "topologia della CPU non leggibile (/sys/devices/system/cpu)"
 
 msgid "%s is not available on this CPU"
 msgstr "%s non è disponibile su questa CPU"
+
+msgid "no verified Curve Optimizer commands for this CPU family"
+msgstr "nessun comando Curve Optimizer verificato per questa famiglia di CPU"
+
+msgid "Curve Optimizer not available on this CPU: %s"
+msgstr "Curve Optimizer non disponibile su questa CPU: %s"
+
+msgid "skipped: %s"
+msgstr "saltato: %s"
+
+msgid "  (family not verified on hardware yet: run hwtest)"
+msgstr "  (famiglia non ancora verificata sull'hardware: esegui hwtest)"
+
+msgid "CO      n/a: %s"
+msgstr "CO      n/d: %s"
+
+msgid "Shaper  n/a on this CPU"
+msgstr "Shaper  n/d su questa CPU"
+
+msgid "the physical position of the cores is unknown (core fuses unreadable or not matching the topology)"
+msgstr "la posizione fisica dei core è sconosciuta (fusibili dei core illeggibili o non coerenti con la topologia)"
+
+msgid "SMN read of 0x%08X not allowed"
+msgstr "lettura SMN di 0x%08X non consentita"
+
+msgid "Auto needs the power limits of the PM table, not readable on this CPU: use Eco or Boost"
+msgstr "Auto ha bisogno dei limiti di potenza della PM table, non leggibili su questa CPU: usa Eco o Boost"
+
+#, python-format
+msgid "unavailable: %s"
+msgstr "non disponibile: %s"
+
+msgid "disabled (watchdog=0)"
+msgstr "disattivato (watchdog=0)"
+
+#, python-format
+msgid "no hardware watchdog (%s)"
+msgstr "nessun watchdog hardware (%s)"
+
+#, python-format
+msgid "%s does not report nowayout, state and timeout"
+msgstr "%s non riporta nowayout, state e timeout"
+
+msgid "nowayout is set: once armed it could never be stopped"
+msgstr "nowayout è impostato: una volta armato non si potrebbe più fermare"
+
+msgid "already active (used by the system or by another program)"
+msgstr "già attivo (usato dal sistema o da un altro programma)"
+
+#, python-format
+msgid "timeout of %d s shorter than twice the keepalive interval (%d s)"
+msgstr "timeout di %d s più corto del doppio dell'intervallo di keepalive (%d s)"
+
+msgid "in use by another program (systemd RuntimeWatchdogSec?)"
+msgstr "in uso da un altro programma (systemd RuntimeWatchdogSec?)"
+
+msgid "the driver has no magic close"
+msgstr "il driver non ha la chiusura magica"
+
+#, python-format
+msgid "armed (%d s)"
+msgstr "armato (%d s)"
+
+#, python-format
+msgid "ERROR: keepalive failed (%s): the PC resets within %d s"
+msgstr "ERRORE: keepalive fallito (%s): il PC si riavvia entro %d s"
+
+#, python-format
+msgid "ERROR: still running after the magic close, kept alive: the PC resets %d s after Ryzen Control closes"
+msgstr "ERRORE: ancora attivo dopo la chiusura magica, tenuto in vita: il PC si riavvia %d s dopo la chiusura di Ryzen Control"
+
+#, python-format
+msgid "ERROR: still running after the magic close and not reopened (%s): the PC resets within %d s"
+msgstr "ERRORE: ancora attivo dopo la chiusura magica e non riaperto (%s): il PC si riavvia entro %d s"
+
+msgid "disarmed"
+msgstr "disarmato"
+
+#, python-format
+msgid "usage: autotune verify <profile> [minutes=%d]"
+msgstr "uso: autotune verify <profilo> [minutes=%d]"
+
+#, python-format
+msgid "profile '%s' has no co line: nothing to verify"
+msgstr "il profilo '%s' non ha una riga co: niente da verificare"
+
+msgid "a calibration or verification is already in progress or waiting for a choice: finish or discard it first"
+msgstr "una calibrazione o una verifica è già in corso o in attesa di una scelta: concludila o annullala prima"
+
+msgid "no verification in progress"
+msgstr "nessuna verifica in corso"
+
+msgid "load died or MCE error with all cores loaded"
+msgstr "carico terminato o errore MCE con tutti i core sotto carico"
+
+msgid "retry=1 only for a custom calibration (name=<profile>): it retries what already crashed"
+msgstr "retry=1 solo per una calibrazione personalizzata (name=<profilo>): riprova ciò che è già andato in crash"
