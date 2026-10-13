@@ -468,42 +468,27 @@ class Fake:
         extra = self.s.get("combined_stricter", 0)
         return all(self.s["co"][c] >= limit("co_limits", c) + extra for c in range(CORES))
 
-    # Simulated hardware watchdog (an SP5100 TCO with timeout 60): sysfs attributes and device as regular files under
-    # ROOT; the device file is the transcript of what was written ("\0" keepalive, "V" magic) with a "C" at each close.
-    # wd_busy: held by another program (EBUSY); wd_no_magic: driver without magic close; wd_deaf: never stops.
-    WD_SYS, WD_DEV = "/sys/class/watchdog/watchdog0", "/dev/watchdog0"
+    # Simulated hardware watchdog (an SP5100 TCO with timeout 60) and systemd's RuntimeWatchdogUSec driving it:
+    # sysfs attributes as regular files under ROOT. sd_absent: a systemd without the property.
+    WD_SYS = "/sys/class/watchdog/watchdog0"
 
     def wd_files(self):
         if not os.path.exists(P(self.WD_SYS + "/state")):
             os.makedirs(P(self.WD_SYS), exist_ok=True)
-            os.makedirs(P("/dev"), exist_ok=True)
             for name, v in (("identity", "SP5100 TCO timer"), ("state", "inactive"), ("timeout", "60"), ("nowayout", "0")):
                 with open(P(self.WD_SYS + "/" + name), "w") as fh:
                     fh.write(v + "\n")
-            open(P(self.WD_DEV), "wb").close()
 
-    def wd_open(self, dev):
-        """open(2): EBUSY while another program holds the device, otherwise the timer starts."""
-        import errno
-        if self.s.get("wd_busy"):
-            raise OSError(errno.EBUSY, os.strerror(errno.EBUSY))
-        with open(P(self.WD_SYS + "/state"), "w") as fh:
-            fh.write("active\n")
-        return os.open(P(dev), os.O_WRONLY | os.O_APPEND)
-
-    def wd_options(self):
-        """WDIOC_GETSUPPORT options."""
-        return 0x8080 if self.s.get("wd_no_magic") else 0x8180
-
-    def wd_close(self, fd):
-        """close(2): the kernel stops the timer after a "V" (magic close), or at any close without magic close."""
-        os.close(fd)
-        with open(P(self.WD_DEV), "rb+") as f:
-            stops = (f.read().endswith(b"V") or self.s.get("wd_no_magic")) and not self.s.get("wd_deaf")
-            f.write(b"C")
-        if stops:
+    def sd_watchdog(self, usec=None):
+        """PID 1: a value other than 0 opens the device (active), 0 stops it with the magic close."""
+        if self.s.get("sd_absent"):
+            return None
+        if usec is not None:
+            self.s["sd_wd"] = usec
+            self.save()
             with open(P(self.WD_SYS + "/state"), "w") as fh:
-                fh.write("inactive\n")
+                fh.write(("active" if usec else "inactive") + "\n")
+        return self.s.get("sd_wd", 0)
 
     def bench(self, threads):
         """Simulated (bogo-ops/s, W): multi-thread saturates with the PPT, single-thread follows FMax."""
@@ -1998,6 +1983,7 @@ def at_mv_per_step(st):
 def cmd_autotune(ctx, args):
     """autotune start eco|auto|boost [key=value…] | verify <profile> [minutes=N watchdog=1] | step | status | abort |
     finish | save [apply] | estimate eco|auto|boost [key=value…]. Under `serve` the hardware watchdog follows the run."""
+    wd_cleanup()                               # one left with systemd by a ryzenctl that died
     if WD and args[:1] == ["step"]:
         WD.follow(at_load())                   # (re)armed before the step: a resumed run is protected too
     try:
@@ -2131,11 +2117,12 @@ def _autotune(ctx, args):
 
 
 def at_attribute_crash(st):
-    """The step in `in_progress` belongs to a previous boot: the system crashed during that
-    test. State only, no SMU write (so that `boot` calls it too, and the memory of the
-    failures is updated before the user chooses Resume or Cancel)."""
+    """The step in `in_progress` belongs to a previous boot (the system crashed during that test), or to a
+    ryzenctl that is gone (it died or was killed mid-test, no reboot: counted as a crash too). State only, no
+    SMU write (so that `boot` calls it too, and the memory of the failures is updated before the user
+    chooses Resume or Cancel)."""
     ip = st.get("in_progress")
-    if not ip or ip.get("boot_id") == boot_id():
+    if not ip or (ip.get("boot_id") == boot_id() and pid_alive(ip.get("pid"))):
         return False
     st["resumed_after_crash"] = True
     st["in_progress"] = None
@@ -2165,14 +2152,17 @@ def at_attribute_crash(st):
 
 def at_step(ctx, st, base):
     st.pop("interrupted", None)
+    same_boot = (st.get("in_progress") or {}).get("boot_id") == boot_id()
     if at_attribute_crash(st):
+        if same_boot:   # the ryzenctl that ran the test died: its CO under test is still applied
+            apply_lines(profile_lines("baseline"), ctx, "cpu")
         at_save(st)
         return st
     if st.get("verify"):
         return at_verify_step(ctx, st)
     if st["phase"] == "co" and st.get("parallel"):
         v, cores = st["value"], st["active_cores"]
-        st["in_progress"] = {"kind": "co_par", "cores": cores, "value": v, "boot_id": boot_id()}
+        st["in_progress"] = {"kind": "co_par", "cores": cores, "value": v, "boot_id": boot_id(), "pid": os.getpid()}
         at_save(st)
         for c in cores:
             run(["co", str(c), str(v)], ctx)
@@ -2199,7 +2189,7 @@ def at_step(ctx, st, base):
         return st
     if st["phase"] == "co":
         c, v = st["core"], st["value"]
-        st["in_progress"] = {"kind": "co", "core": c, "value": v, "boot_id": boot_id()}
+        st["in_progress"] = {"kind": "co", "core": c, "value": v, "boot_id": boot_id(), "pid": os.getpid()}
         at_save(st)
         run(["co", str(c), str(v)], ctx)
         ok, sample = co_test_sampled([c], st["params"]["step"], st.get("method", "all"))
@@ -2221,7 +2211,7 @@ def at_step(ctx, st, base):
     if st["phase"] == "final":
         # one step for the all-core part, then (single=1) one step per core alone: st["single"] = the next core
         vals, c = at_final_values(st), st.get("single")
-        st["in_progress"] = {"kind": "final", "boot_id": boot_id()}
+        st["in_progress"] = {"kind": "final", "boot_id": boot_id(), "pid": os.getpid()}
         if c is not None:
             st["in_progress"]["core"] = c            # a crash here raises only this core
         at_save(st)
@@ -2258,7 +2248,7 @@ def at_step(ctx, st, base):
         return st
     if st["phase"] in ("ppt", "fmax_knee", "bench"):
         # phases with the final CO applied: a crash or a load that dies = unstable combination
-        st["in_progress"] = {"kind": "post", "boot_id": boot_id()}
+        st["in_progress"] = {"kind": "post", "boot_id": boot_id(), "pid": os.getpid()}
         at_save(st)
         try:
             if st["phase"] == "bench":
@@ -2412,7 +2402,7 @@ def at_verify_step(ctx, st):
             run(["apply", st["mode"], "cpu"], ctx)
             st["applied_boot"] = boot_id()
         c, alive = st["core"], [k for k in range(CORES) if str(k) not in st["unstable"]]
-        st["in_progress"] = {"kind": "verify", "core": c if c < CORES else None, "cores": alive, "boot_id": boot_id()}
+        st["in_progress"] = {"kind": "verify", "core": c if c < CORES else None, "cores": alive, "boot_id": boot_id(), "pid": os.getpid()}
         at_save(st)
         if c < CORES:
             failed, why = (set(), None) if co_test_single(c) else ({c}, LAST_FAIL["why"])
@@ -3024,28 +3014,68 @@ def fmt_hwtest(r):
 
 # ---- Hardware watchdog during a calibration (serve only) ----------------------------------
 # On Ryzen 9000 a too negative CO can freeze the machine instead of resetting it. While a calibration or a
-# verification runs under `serve` (the GUI), the first /sys/class/watchdog device stays armed and kept alive:
-# a freeze becomes a reset after its timeout, then the crash-guard and the resume of the run take over. The
-# CLI (one process per step) never arms it. Residual risk: if `serve` is killed with SIGKILL mid-run nothing
-# sends the magic close, the machine resets after the timeout and the next boot treats it as a crash
-# (conservative: the step in progress is recorded as unstable).
+# verification runs under `serve` (the GUI), the hardware watchdog is handed to systemd (RuntimeWatchdogUSec):
+# PID 1 pings it as long as the system lives, so a freeze becomes a reset after WD_SEC and the crash-guard and
+# the resume of the run take over, while a ryzenctl that dies or is killed does not reset the PC: its run counts
+# as crashed when ryzenctl starts again (at_attribute_crash, pid of the step) and the watchdog it left with
+# systemd is released then (wd_cleanup). The CLI (one process per step) never arms it.
 WD_CLASS = "/sys/class/watchdog"
-WD_PET_SEC = 10                   # keepalive interval; arming needs a timeout of at least twice as much
-WDIOC_GETSUPPORT = 0x80285700     # _IOR('W', 0, struct watchdog_info {u32 options, firmware_version; u8 identity[32]})
-WDIOF_MAGICCLOSE = 0x0100
+WD_SEC = 60                       # timeout given to systemd, which pings at half of it
+WD_STATE = RUN + "/watchdog"      # pid of the ryzenctl that handed the watchdog to systemd
 WD = None                         # the Watchdog of this `serve` process; None under the CLI
 
 
+def sd_watchdog(usec=None):
+    """systemd's RuntimeWatchdogUSec: read it, or set it first (not 0: PID 1 opens the hardware watchdog and pings it;
+    0: it stops it with the magic close). None if this systemd cannot do it."""
+    if FAKE:
+        return FAKE.sd_watchdog(usec)
+    obj = ["org.freedesktop.systemd1", "/org/freedesktop/systemd1", "org.freedesktop.systemd1.Manager", "RuntimeWatchdogUSec"]
+    if usec is not None and subprocess.run(["busctl", "set-property"] + obj + ["t", str(usec)], capture_output=True).returncode:
+        return None
+    r = subprocess.run(["busctl", "get-property"] + obj, capture_output=True, text=True)
+    try:
+        return int(r.stdout.split()[1]) if r.returncode == 0 else None
+    except (IndexError, ValueError):
+        return None
+
+
+def pid_alive(pid):
+    """Is `pid` still a running ryzenctl? (None: unknown, assumed alive)"""
+    if pid is None:
+        return True
+    try:
+        with open("/proc/%d/cmdline" % pid, "rb") as f:
+            return b"ryzenctl" in f.read()
+    except (OSError, ValueError):
+        return False
+
+
+def wd_release():
+    """systemd's runtime watchdog back off (it stops the hardware one with the magic close). True if off."""
+    ok = sd_watchdog(0) == 0
+    if ok:
+        rm(P(WD_STATE))
+    return ok
+
+
+def wd_cleanup():
+    """The watchdog left with systemd by a ryzenctl that died (no reset: PID 1 kept pinging it) is released at the
+    next start of ryzenctl."""
+    try:
+        owner = int(read_text(WD_STATE))
+    except (OSError, ValueError):
+        return
+    if not pid_alive(owner):
+        wd_release()
+
+
 class Watchdog:
-    """Armed = the device is open (opening starts the timer) and a daemon thread writes a keepalive every
-    WD_PET_SEC; disarmed only by the magic close ("V", then close) checked on the sysfs state. `status` is
-    the text that `autotune …` reports under serve."""
+    """Armed = systemd drives the hardware watchdog for this run (see above). `status` is the text that
+    `autotune …` reports under serve."""
 
     def __init__(self):
-        import threading
-        self.lock = threading.Lock()
-        self.fd = self.stop = self.sys = self.dev = self.status = None
-        self.timeout, self.closed = 0, False     # closed: serve is exiting, never armed again
+        self.status, self.armed, self.closed = None, False, False   # closed: serve is exiting, never armed again
 
     def follow(self, st, arm=True):
         """Armed while a run is in progress (unless watchdog=0), disarmed as soon as it is done, aborted or gone."""
@@ -3057,7 +3087,7 @@ class Watchdog:
             self.arm()
 
     def why_not(self):
-        """Why the first watchdog must not be armed (fail closed: whatever could not surely be stopped), or None."""
+        """Why it must not be armed (fail closed: whatever could not surely be stopped, or is not ours), or None."""
         if FAKE:
             FAKE.wd_files()
         base = P(WD_CLASS)
@@ -3065,105 +3095,51 @@ class Watchdog:
                        key=lambda n: int(n[8:]))
         if not names:
             return _("no hardware watchdog (%s)") % WD_CLASS
-        self.sys, self.dev = WD_CLASS + "/" + names[0], "/dev/" + names[0]
+        self.sys = WD_CLASS + "/" + names[0]
         try:
             nowayout, state = read_text(self.sys + "/nowayout"), read_text(self.sys + "/state")
-            self.timeout = int(read_text(self.sys + "/timeout"))
-        except (OSError, ValueError):
-            return _("%s does not report nowayout, state and timeout") % names[0]
+        except OSError:
+            return _("%s does not report nowayout and state") % names[0]
         try:
             param = read_text(self.sys + "/device/driver/module/parameters/nowayout")   # most drivers hide it
         except OSError:
             param = "N"
         if nowayout != "0" or param in ("Y", "1"):
             return _("nowayout is set: once armed it could never be stopped")
+        cur = sd_watchdog()
+        if cur is None:
+            return _("systemd cannot drive it (RuntimeWatchdogUSec)")
+        if cur:
+            return _("already driven by systemd (RuntimeWatchdogSec %d s): the PC is protected anyway") % (cur // 10 ** 6)
         if state != "inactive":
-            return _("already active (used by the system or by another program)")
-        if self.timeout < 2 * WD_PET_SEC:
-            return _("timeout of %d s shorter than twice the keepalive interval (%d s)") % (self.timeout, WD_PET_SEC)
+            return _("already active (used by another program)")
         return None
 
-    def open(self):
-        return FAKE.wd_open(self.dev) if FAKE else os.open(P(self.dev), os.O_WRONLY)
-
     def arm(self):
-        import errno
-        with self.lock:
-            if self.fd is not None or self.closed:
-                return
-            why = self.why_not()
-            if not why:
-                try:
-                    self.fd = self.open()
-                except OSError as e:
-                    why = _("in use by another program (systemd RuntimeWatchdogSec?)") if e.errno == errno.EBUSY else e.strerror
-            if why:
-                self.status = _("unavailable: %s") % why
-                return
-            try:   # open = running: from here on only a verified magic close stops it
-                opts = FAKE.wd_options() if FAKE else struct.unpack_from("I", fcntl.ioctl(self.fd, WDIOC_GETSUPPORT, bytes(40)))[0]
-            except OSError:
-                opts = 0
-            if not opts & WDIOF_MAGICCLOSE:
-                if self.release():   # without magic close any close stops it
-                    self.status = _("unavailable: %s") % _("the driver has no magic close")
-                return
-            self.keepalive()
-            self.status = _("armed (%d s)") % self.timeout
-
-    def keepalive(self):
-        """Daemon thread writing a keepalive every WD_PET_SEC (lock held by the caller)."""
-        import threading
-        stop = self.stop = threading.Event()
-
-        def pet():
-            while not stop.wait(WD_PET_SEC):
-                with self.lock:
-                    if stop.is_set():
-                        return                     # the magic "V" must be the last write before the close
-                    try:
-                        os.write(self.fd, b"\0")
-                    except OSError as e:
-                        self.status = _("ERROR: keepalive failed (%s): the PC resets within %d s") % (e.strerror, self.timeout)
-        threading.Thread(target=pet, daemon=True).start()
-
-    def release(self):
-        """Magic close, then the sysfs state must say inactive (lock held). If the timer still runs it is reopened
-        and kept alive, never left armed without a keepalive. True if stopped."""
-        if self.stop:
-            self.stop.set()
-        fd, self.fd = self.fd, None
-        try:
-            os.write(fd, b"V")
-        except OSError:
-            pass
-        if FAKE:
-            FAKE.wd_close(fd)
-        else:
-            os.close(fd)
-        try:
-            if read_text(self.sys + "/state") == "inactive":
-                return True
-        except OSError:
-            pass
-        try:
-            self.fd = self.open()
-            self.keepalive()
-            self.status = _("ERROR: still running after the magic close, kept alive: the PC resets %d s after Ryzen Control closes") % self.timeout
-        except OSError as e:
-            self.status = _("ERROR: still running after the magic close and not reopened (%s): the PC resets within %d s") % (e.strerror, self.timeout)
-        return False
+        if self.armed or self.closed:
+            return
+        why = self.why_not()
+        if why:
+            self.status = _("unavailable: %s") % why
+            return
+        write_atomic(P(WD_STATE), str(os.getpid()))   # first: if this process dies, the next ryzenctl releases it
+        if sd_watchdog(WD_SEC * 10 ** 6) != WD_SEC * 10 ** 6 or read_text(self.sys + "/state") != "active":
+            wd_release()
+            self.status = _("unavailable: %s") % _("systemd did not take the watchdog")
+            return
+        self.armed = True
+        self.status = _("armed (%d s)") % WD_SEC
 
     def disarm(self, final=False):
-        """Magic close if armed; final (serve exiting): never armed again. False if the timer still runs (kept alive)."""
-        with self.lock:
-            self.closed = self.closed or final
-            if self.fd is None:
-                return True
-            stopped = self.release()
-            if stopped:
-                self.status = _("disarmed")
-            return stopped
+        """Released if armed; final (serve exiting): never armed again. False if systemd still drives it (harmless:
+        PID 1 keeps pinging it; the next start of ryzenctl releases it)."""
+        self.closed = self.closed or final
+        if not self.armed:
+            return True
+        self.armed = False
+        ok = wd_release()
+        self.status = _("disarmed") if ok else _("ERROR: systemd still drives the watchdog; it is released at the next start")
+        return ok
 
 
 # ---- serve: protocol for the GUI (one JSON line per request and per reply) ---------
@@ -3187,11 +3163,11 @@ def serve_one(line):
 def cmd_serve(ctx, args):
     """Requests run in order on a single thread (serialized SMU); the reader stays
     free so that `autotune abort` interrupts a long step at once (flag + stress-ng terminated).
-    A calibration keeps the hardware watchdog armed (Watchdog): magic close on every way out."""
+    A calibration hands the hardware watchdog to systemd for its duration (Watchdog)."""
     import queue
-    import signal
     import threading
     global WD
+    wd_cleanup()
     WD = Watchdog()
     q = queue.Queue()
 
@@ -3203,11 +3179,6 @@ def cmd_serve(ctx, args):
             sys.stdout.write(json.dumps(serve_one(line), ensure_ascii=False) + "\n")
             sys.stdout.flush()
 
-    def on_signal(signum, _frame):   # logout, shutdown, Ctrl-C: the magic close first, then out at once
-        WD.disarm(final=True)
-        os._exit(128 + signum)
-    sigs = (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)
-    old = {s: signal.signal(s, on_signal) for s in sigs}
     t = threading.Thread(target=worker, daemon=True)
     t.start()
     try:
@@ -3223,13 +3194,8 @@ def cmd_serve(ctx, args):
             q.put(line)
         q.put(None)
         t.join()                         # the step in progress ends first (armed meanwhile)
-    finally:   # end of input (GUI closed) or an exception: no signal handler may interrupt this magic close
-        for s in sigs:
-            signal.signal(s, signal.SIG_IGN)
-        while not WD.disarm(final=True):   # the timer still runs after the magic close: kept alive, retried
-            time.sleep(WD_PET_SEC)
-        for s, h in old.items():
-            signal.signal(s, signal.SIG_DFL if h is None else h)   # None: a handler installed outside Python
+    finally:   # end of input (GUI closed) or an exception; killed instead: released at the next start
+        WD.disarm(final=True)
         WD = None
 
 
@@ -4015,12 +3981,10 @@ def selftest():
 
 
 def selftest_watchdog():
-    """The hardware watchdog on the fake device (never a real one): armed only while a run goes on under serve,
-    keepalives, magic close and check at done/abort/end of input/SIGTERM, never armed when it could not be stopped."""
-    global WD_PET_SEC
-    import io
-    import signal
-    transcript = lambda: open(P(Fake.WD_DEV), "rb").read()      # "\0" keepalive, "V" magic, "C" close
+    """The hardware watchdog handed to systemd (fake RuntimeWatchdogUSec, never the real one): only while a run goes on
+    under serve, released at done/abort/end of input, never taken when it could not be stopped or is not ours; a
+    serve killed mid-run leaves it with systemd (no reset) and the next ryzenctl releases it and counts the step as
+    a crash."""
     state = lambda: read_text(Fake.WD_SYS + "/state")
     FAKE.wd_files()
 
@@ -4029,7 +3993,6 @@ def selftest_watchdog():
         FAKE.save()
 
     def serve(requests):
-        open(P(Fake.WD_DEV), "wb").close()
         stdin, stdout = sys.stdin, sys.stdout
         sys.stdin, sys.stdout = io.StringIO("".join(json.dumps(r) + "\n" for r in requests)), io.StringIO()
         try:
@@ -4037,79 +4000,55 @@ def selftest_watchdog():
             return [(json.loads(l).get("data") or {}).get("watchdog") for l in sys.stdout.getvalue().splitlines()]
         finally:
             sys.stdin, sys.stdout = stdin, stdout
-    # direct: armed, keepalives from the thread, magic close, then nothing more
-    pet, WD_PET_SEC = WD_PET_SEC, 0.01
-    try:
-        wd = Watchdog()
-        wd.arm()
-        assert wd.status == "armed (60 s)" and state() == "active", wd.status
-        for _i in range(300):
-            if b"\0" in transcript():
-                break
-            time.sleep(0.01)
-        assert b"\0" in transcript(), "no keepalive"
-        assert wd.disarm() and transcript().endswith(b"VC") and state() == "inactive" and wd.status == "disarmed"
-        n = len(transcript())
-        time.sleep(0.05)
-        assert len(transcript()) == n, "keepalive after the magic close"
-        # a driver that keeps running after the magic close: reopened and kept alive, never left without keepalive
-        wd.arm()
-        setting("wd_deaf", True)
-        assert not wd.disarm() and state() == "active" and wd.status.startswith("ERROR") and wd.fd is not None, wd.status
-        n = len(transcript())
-        for _i in range(300):
-            if len(transcript()) > n:
-                break
-            time.sleep(0.01)
-        assert transcript()[n:] and transcript()[n:].strip(b"\0") == b"", transcript()   # keepalives go on
-        setting("wd_deaf", False)
-        assert wd.disarm(final=True) and state() == "inactive"
-        wd.arm()                                                    # serve exiting: never armed again
-        assert wd.fd is None and state() == "inactive"
-    finally:
-        WD_PET_SEC = pet
-    # never armed when it could not be stopped for sure, or when it is not ours
-    for key, value, why in (("nowayout", "1", "nowayout"), ("state", "active", "already active"), ("timeout", "15", "shorter")):
+    import io
+    wd = Watchdog()
+    wd.arm()
+    assert wd.status == "armed (60 s)" and state() == "active" and FAKE.s["sd_wd"] == WD_SEC * 10 ** 6, wd.status
+    assert read_text(WD_STATE) == str(os.getpid())
+    assert wd.disarm() and state() == "inactive" and FAKE.s["sd_wd"] == 0 and not os.path.exists(P(WD_STATE)) and wd.status == "disarmed"
+    assert wd.disarm(final=True)
+    wd.arm()                                                      # serve exiting: never armed again
+    assert not wd.armed and state() == "inactive"
+    # never taken when it could not be stopped for sure, or when it is not ours
+    for key, value, why in (("nowayout", "1", "nowayout"), ("state", "active", "already active")):
         with open(P(Fake.WD_SYS + "/" + key), "w") as fh:
             fh.write(value + "\n")
-        open(P(Fake.WD_DEV), "wb").close()
         wd = Watchdog()
         wd.arm()
-        assert wd.fd is None and why in wd.status and transcript() == b"", (key, wd.status)
+        assert not wd.armed and why in wd.status and FAKE.s.get("sd_wd", 0) == 0, (key, wd.status)
         with open(P(Fake.WD_SYS + "/" + key), "w") as fh:
-            fh.write({"nowayout": "0", "state": "inactive", "timeout": "60"}[key] + "\n")
-    setting("wd_busy", True)
+            fh.write({"nowayout": "0", "state": "inactive"}[key] + "\n")
+    setting("sd_wd", 30 * 10 ** 6)                                # systemd already configured by the user: left alone
     wd = Watchdog()
     wd.arm()
-    assert wd.fd is None and "in use" in wd.status and state() == "inactive", wd.status
-    setting("wd_busy", False)
-    setting("wd_no_magic", True)                                    # opened (= started), then closed: it stops
-    open(P(Fake.WD_DEV), "wb").close()
+    assert not wd.armed and "already driven by systemd" in wd.status and FAKE.s["sd_wd"] == 30 * 10 ** 6, wd.status
+    setting("sd_wd", 0)
+    setting("sd_absent", True)
     wd = Watchdog()
     wd.arm()
-    assert wd.fd is None and "no magic close" in wd.status and state() == "inactive" and transcript() == b"VC", wd.status
-    setting("wd_no_magic", False)
-    # under serve: armed after start and at every step, disarmed at done; refused steps do not arm it again
+    assert not wd.armed and "systemd cannot" in wd.status, wd.status
+    setting("sd_absent", False)
+    # under serve: armed after start and at every step, released at done; refused steps do not arm it again
     marks = serve([["autotune", "start", "eco", "step=3", "reuse=0"]] + [["autotune", "step"]] * 25)
     done = len([m for m in marks if m == "armed (60 s)"])
     assert done == 1 + 8 + 1 + 7 and marks[done] == "disarmed" and marks[done + 1:] == [None] * (25 - done), marks
-    assert transcript().replace(b"\0", b"") == b"VC" and state() == "inactive" and run(["autotune", "status"])["phase"] == "done"
+    assert state() == "inactive" and run(["autotune", "status"])["phase"] == "done"
     run(["autotune", "abort"])
     # abort, end of input (GUI closed), watchdog=0, a verification stopped with `finish`
     assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
-        "armed (60 s)", "armed (60 s)", "disarmed"] and transcript() == b"VC"
+        "armed (60 s)", "armed (60 s)", "disarmed"] and state() == "inactive"
     assert serve([["autotune", "start", "eco", "step=3", "reuse=0"], ["autotune", "step"]]) == ["armed (60 s)"] * 2
-    assert transcript() == b"VC" and state() == "inactive"
+    assert state() == "inactive" and not os.path.exists(P(WD_STATE))
     run(["autotune", "abort"])
     assert serve([["autotune", "start", "eco", "step=3", "reuse=0", "watchdog=0"], ["autotune", "step"], ["autotune", "abort"]]) == [
-        "unavailable: disabled (watchdog=0)"] * 3 and transcript() == b""
+        "unavailable: disabled (watchdog=0)"] * 3 and state() == "inactive"
     run(["profile", "save", "wdv", "co " + " ".join(["-5"] * CORES)])
     assert serve([["autotune", "verify", "wdv", "minutes=10"], ["autotune", "step"], ["autotune", "finish"]]) == [
-        "armed (60 s)", "armed (60 s)", "disarmed"] and transcript() == b"VC" and not os.path.exists(P(AT_ABORT_FLAG))
+        "armed (60 s)", "armed (60 s)", "disarmed"] and state() == "inactive" and not os.path.exists(P(AT_ABORT_FLAG))
     run(["autotune", "abort"])
     run(["profile", "delete", "wdv"])
-    # SIGTERM (logout, shutdown) to a real `serve` process on the fake root: magic close, then out
-    open(P(Fake.WD_DEV), "wb").close()
+    # a real `serve` killed mid-run (no reset: systemd keeps pinging); the next ryzenctl releases the watchdog
+    # and counts the step of the dead process as a crash, with the CO under test back to the baseline
     pr = subprocess.Popen([sys.executable, os.path.abspath(__file__), "serve"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                           env=dict(os.environ, RYZENCTL_ROOT=ROOT, RYZENCTL_FAKE_FAMILY="granite", LANGUAGE="C", LC_ALL="C.UTF-8"),
                           text=True)
@@ -4117,13 +4056,24 @@ def selftest_watchdog():
         pr.stdin.write(json.dumps(["autotune", "start", "eco", "step=3", "reuse=0"]) + "\n")
         pr.stdin.flush()
         assert json.loads(pr.stdout.readline())["data"]["watchdog"] == "armed (60 s)" and state() == "active"
-        pr.send_signal(signal.SIGTERM)
-        assert pr.wait(20) == 128 + signal.SIGTERM
+        pr.kill()
+        pr.wait(20)
     finally:
         if pr.poll() is None:
             pr.kill()
-    assert transcript() == b"VC" and state() == "inactive", transcript()
     FAKE.s = json.loads(open(FAKE.path).read())                   # the child changed the fake state on file
+    assert state() == "active" and read_text(WD_STATE) == str(pr.pid)
+    st = at_load()
+    st["in_progress"] = {"kind": "co_par", "cores": list(range(CORES)), "value": -10, "boot_id": boot_id(), "pid": os.getpid()}
+    assert not at_attribute_crash(dict(st)), "a step of a living ryzenctl is not a crash"
+    st["in_progress"]["pid"] = pr.pid
+    at_save(st)
+    FAKE.s["co"] = [-10] * CORES                                  # the CO under test, still applied
+    FAKE.save()
+    st = run(["autotune", "step"])
+    assert state() == "inactive" and not os.path.exists(P(WD_STATE)) and FAKE.s["sd_wd"] == 0
+    assert st["resumed_after_crash"] and all(u == {"value": -10, "why": "crash"} for u in st["unstable"].values()), st["unstable"]
+    assert FAKE.s["co"] == [0] * CORES, FAKE.s["co"]
     run(["autotune", "abort"])
 
 

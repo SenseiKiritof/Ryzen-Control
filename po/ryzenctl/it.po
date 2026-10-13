@@ -546,41 +546,12 @@ msgstr "disattivato (watchdog=0)"
 msgid "no hardware watchdog (%s)"
 msgstr "nessun watchdog hardware (%s)"
 
-#, python-format
-msgid "%s does not report nowayout, state and timeout"
-msgstr "%s non riporta nowayout, state e timeout"
-
 msgid "nowayout is set: once armed it could never be stopped"
 msgstr "nowayout è impostato: una volta armato non si potrebbe più fermare"
-
-msgid "already active (used by the system or by another program)"
-msgstr "già attivo (usato dal sistema o da un altro programma)"
-
-#, python-format
-msgid "timeout of %d s shorter than twice the keepalive interval (%d s)"
-msgstr "timeout di %d s più corto del doppio dell'intervallo di keepalive (%d s)"
-
-msgid "in use by another program (systemd RuntimeWatchdogSec?)"
-msgstr "in uso da un altro programma (systemd RuntimeWatchdogSec?)"
-
-msgid "the driver has no magic close"
-msgstr "il driver non ha la chiusura magica"
 
 #, python-format
 msgid "armed (%d s)"
 msgstr "armato (%d s)"
-
-#, python-format
-msgid "ERROR: keepalive failed (%s): the PC resets within %d s"
-msgstr "ERRORE: keepalive fallito (%s): il PC si riavvia entro %d s"
-
-#, python-format
-msgid "ERROR: still running after the magic close, kept alive: the PC resets %d s after Ryzen Control closes"
-msgstr "ERRORE: ancora attivo dopo la chiusura magica, tenuto in vita: il PC si riavvia %d s dopo la chiusura di Ryzen Control"
-
-#, python-format
-msgid "ERROR: still running after the magic close and not reopened (%s): the PC resets within %d s"
-msgstr "ERRORE: ancora attivo dopo la chiusura magica e non riaperto (%s): il PC si riavvia entro %d s"
 
 msgid "disarmed"
 msgstr "disarmato"
@@ -604,3 +575,21 @@ msgstr "carico terminato o errore MCE con tutti i core sotto carico"
 
 msgid "retry=1 only for a custom calibration (name=<profile>): it retries what already crashed"
 msgstr "retry=1 solo per una calibrazione personalizzata (name=<profilo>): riprova ciò che è già andato in crash"
+
+msgid "%s does not report nowayout and state"
+msgstr "%s non riporta nowayout e lo stato"
+
+msgid "ERROR: systemd still drives the watchdog; it is released at the next start"
+msgstr "ERRORE: systemd gestisce ancora il watchdog; viene rilasciato al prossimo avvio"
+
+msgid "already active (used by another program)"
+msgstr "già attivo (usato da un altro programma)"
+
+msgid "already driven by systemd (RuntimeWatchdogSec %d s): the PC is protected anyway"
+msgstr "già gestito da systemd (RuntimeWatchdogSec %d s): il PC è comunque protetto"
+
+msgid "systemd cannot drive it (RuntimeWatchdogUSec)"
+msgstr "systemd non può gestirlo (RuntimeWatchdogUSec)"
+
+msgid "systemd did not take the watchdog"
+msgstr "systemd non ha preso il watchdog"

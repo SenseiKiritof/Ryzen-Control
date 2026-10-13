@@ -67,9 +67,12 @@ eco/auto/boost, and their CO search never written over the shared `co_limits.jso
 `settings.calibrated` (status `calibrated`) with the base mode; GUI "Custom" row in the Calibrated
 column; `retry=1` (custom only) ignores the reused measurement's crash margin and recorded failures.
 **Phase 5 closed, tag `v0.5.0`** (2026-10-13), on the 9800X3D: `hwtest` ok, watchdog armed and
-disarmed by `serve` (the forced-reset test was skipped: whether this board resets on the TCO timer is
-unproven), a custom calibration from Auto with the single-core test passed at −29 on every core
-(PPT 114 W, FMax 4750).
+disarmed by `serve`; forced reset proven (2026-10-13: `serve` killed with SIGKILL during a verify →
+the board reset by itself on the SP5100 TCO timer; with systemd driving it, 0.5.0-5, a killed `serve`
+no longer resets the PC and the next ryzenctl released it, while a kernel crash, sysrq c, during a
+verify was reset by the systemd-driven watchdog), a custom calibration from Auto with the single-core test passed at −29 on every core
+(PPT 114 W, FMax 4750). Tag `v0.5.1` (2026-10-13): the calibration watchdog driven by systemd, verified
+(freeze and kernel crash reset the PC, a dead ryzenctl does not), clearer custom-retry text.
 Next: phase 6 tray icon
 (StatusNotifierItem + dbusmenu via Gio, `ryzen-control --tray`, quick commands), phase 7
 deb/PKGBUILD.
@@ -230,10 +233,12 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   the core fuses, read through the driver's `smn` file (4-byte write = read; **never** the 8-byte
   write) only at the fuse addresses of the family entry, and only if they match the sysfs topology;
   otherwise CO, calibrations and the CO step of `hwtest` are refused/skipped.
-- Hardware watchdog (`Watchdog`): armed only by `serve` while a calibration/verification runs, never
-  with `nowayout`, when already active, without magic close or with `watchdog=0`; every exit path
-  (done, abort, error, EOF, SIGTERM/SIGHUP/SIGINT) does the magic close and checks the sysfs state; a
-  timer that keeps running is reopened and kept alive, never left armed without a keepalive.
+- Hardware watchdog (`Watchdog`): handed to systemd (`RuntimeWatchdogUSec` via busctl, `WD_SEC`) only by
+  `serve` while a calibration/verification runs, never with `nowayout`, when systemd already drives it,
+  when another program holds it, or with `watchdog=0`; released (property back to 0) at done, abort,
+  error, end of input. A `serve` that dies leaves it with systemd (PID 1 keeps pinging: no reset); the
+  next ryzenctl releases it (`wd_cleanup`, owner pid in `/run/ryzenctl/watchdog`) and the step of a dead
+  process counts as a crash (`in_progress` carries the pid; same boot → baseline CPU applied first).
 - Every SMU transaction under `flock(/run/ryzenctl/lock)` (the driver's `smu_args` is global).
 - Every write is followed by a readback; mismatch → one retry → restore of the baseline value →
   error. No automatic fallback to other IDs.
