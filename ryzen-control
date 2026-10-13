@@ -58,18 +58,22 @@ MODES = (("default", _("Default"), _("Stock values (baseline), automatic start d
          ("auto", _("Auto"), _("Calibrated with load tests: undervolt (measured limit + margin 3), PPT and FMax at the performance/watt knee")),
          ("boost", _("Boost"), _("Calibrated with load tests, maximum power: aggressive undervolt (measured limit + margin 3), limits and FMax at the allowed ceilings, measured gain")),
          ("custom", _("Custom"), _("Values set by hand in the CPU, Curves and Fans pages")))
-CPU_PARAMS = (("ppt", _("PPT"), "W"), ("tdc", _("TDC"), "A"), ("edc", _("EDC"), "A"), ("fmax", _("FMax"), "MHz"), ("tjmax", _("Tjmax"), "°C"))
+CPU_PARAMS = (("ppt", _("PPT"), "W"), ("fast", _("Fast PPT"), "W"), ("slow", _("Slow PPT"), "W"), ("tdc", _("TDC"), "A"),
+              ("edc", _("EDC"), "A"), ("fmax", _("FMax"), "MHz"), ("tjmax", _("Tjmax"), "°C"))   # fast/slow: the APUs
 PARAM_HELP = {"ppt": _("Maximum package power (Package Power Tracking): lower = less heat and power draw, less boost under full load"),
               "tdc": _("Maximum sustained current (Thermal Design Current) supplied by the VRMs"),
               "edc": _("Maximum peak current (Electrical Design Current) supplied by the VRMs"),
+              "fast": _("APU: power allowed for short bursts (seconds); lower = shorter and cooler peaks"),
+              "slow": _("APU: sustained power (tens of seconds); lower = less heat and fan noise under long loads"),
               "fmax": _("Maximum boost frequency: lowering it cuts the temperature peaks with little loss"),
               "tjmax": _("Temperature at which the CPU slows down to stay within the limit"),
               "co": None}   # filled below with CO_TIP
 CO_TIP = _("Curve Optimizer: per-core offset of the voltage/frequency curve. Negative = less voltage at the same frequency "
            "(less heat and power draw, higher boost); too negative = instability or reboot. Unit: steps of about 3–5 mV.")
 PARAM_HELP["co"] = CO_TIP
-CPU_HELP = _("PPT: maximum package power · TDC/EDC: sustained/peak current · FMax: maximum boost frequency · "
-             "Tjmax: temperature at which the CPU slows down. Drag the slider or type the number, then \"Apply now\".")
+CPU_HELP = _("PPT: maximum package power (on APUs fast/slow PPT: short-term and sustained power) · TDC/EDC: sustained/peak "
+             "current · FMax: maximum boost frequency · Tjmax: temperature at which the CPU slows down. Drag the slider or type "
+             "the number, then \"Apply now\".")
 CO_HELP = (_("CO (Curve Optimizer): ") + CO_TIP.split(": ", 1)[-1] + _(" Drag the slider or type the number, then \"Apply now\". "
            "The Curve Shaper is experimental on this platform: set it from the BIOS."))
 UNLOCK_WARNING = _("PPT, TDC and EDC will be allowed beyond the stock values and FMax beyond the baseline "

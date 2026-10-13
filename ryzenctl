@@ -35,6 +35,7 @@ CO_MIN, CO_MAX = -50, 30       # Curve Optimizer and Curve Shaper
 FMAX_MIN, FMAX_UNLOCK_EXTRA = 3000, 200
 TJMAX_MIN, TJMAX_ABS_MAX = 60, 95   # TJMAX_ABS_MAX: never above it, whatever the family says
 PPT_MIN, TDC_MIN, EDC_MIN = 45, 30, 45           # W, A, A — never 0: PPT 0 locks the CPU at 606 MHz
+APU_MIN_W = 6                  # fast/slow PPT of the APUs: the U-series go down to ~6 W (UXTU's eco presets)
 UNLOCK_PPT, UNLOCK_TDC, UNLOCK_EDC = 230, 160, 230
 READBACK_TOL = 0.6             # W/A: the limits come back as floats from the PM table
 READBACK_WAIT = 1.0            # s: the SMU updates the PM table at its own pace, not at once
@@ -141,6 +142,34 @@ FAMILIES = {
     10: {"name": "Pinnacle Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
     9: {"name": "Summit Ridge", "cmd": {}, "pm_prefix": None, "pm": None, "pm_cores": {}, "verified": False},
 }
+# APUs (Ryzen G desktop, mini PCs; refused on a laptop until the laptop part: system_battery): the fast/slow
+# PPT, Tctl and VRM current limits through MP1 (the same IDs in RyzenAdj, ZenStates-Core and UXTU), read back
+# from the PM table (RyzenAdj api.c: the STAPM/fast/slow header is shared by every table version, the other
+# offsets are per version, hence explicit pm_versions). STAPM is read only: a lower slow PPT already caps the
+# sustained power, and STAPM is the firmware's skin-temperature lever (STTv2 overwrites it). No Curve
+# Optimizer (no CO readback verified on any APU), no FMax command.
+APU_CMD = {"fast_set": (MP1, 0x15), "slow_set": (MP1, 0x16), "tjmax_set": (MP1, 0x19),
+           "tdc_set": (MP1, 0x1A), "edc_set": (MP1, 0x1C)}
+APU_PM = {"stapm_limit": 0, "stapm": 1, "fast_limit": 2, "fast": 3, "slow_limit": 4, "slow": 5,
+          "tdc_limit": 8, "tdc": 9, "edc_limit": 12, "thm_limit": 16, "tctl": 17}
+APU_HEADER = {k: APU_PM[k] for k in ("stapm_limit", "stapm", "fast_limit", "fast", "slow_limit", "slow")}
+APU = {"cmd": APU_CMD, "pm_prefix": None, "pm": APU_PM, "pm_cores": {}, "tjmax_max": 95, "verified": False}
+FAMILIES.update({
+    2: dict(APU, name="Renoir", pm_versions=(0x370000, 0x370001, 0x370002, 0x370003, 0x370005)),   # 4000 G/U/H
+    17: dict(APU, name="Lucienne", pm_versions=(0x370000, 0x370001, 0x370002, 0x370003, 0x370005)),   # 5000U (Zen 2)
+    14: dict(APU, name="Cezanne", pm_versions=(0x400005,)),            # 5000 G/U/H, Barcelo
+    11: dict(APU, name="Rembrandt", pm_versions=(0x450004, 0x450005)),  # 6000
+    21: dict(APU, name="Phoenix", pm_versions=(0x4C0006, 0x4C0007, 0x4C0008, 0x4C0009)),     # 7040, 8000G
+    24: dict(APU, name="Hawk Point", pm_versions=(0x4C0006, 0x4C0007, 0x4C0008, 0x4C0009)),  # 8040
+    # Strix Point: not the 0x650007 table (Krackan, another layout); TDC at 12, no separate EDC
+    22: dict(APU, name="Strix Point", pm_versions=(0x5D0008, 0x5D0009),
+             cmd={k: v for k, v in APU_CMD.items() if k != "edc_set"},
+             pm=dict(APU_HEADER, tdc_limit=12, tdc=13, thm_limit=16, tctl=17)),
+    # Strix Halo: fast/slow/Tctl read back on a real Ryzen AI MAX+ (ryzen_smu PR #50, RyzenAdj c9b07e0)
+    26: dict(APU, name="Strix Halo", pm_versions=(0x64010C, 0x64020C),
+             cmd={k: APU_CMD[k] for k in ("fast_set", "slow_set", "tjmax_set")},
+             pm=dict(APU_HEADER, thm_limit=22, tctl=23)),
+})
 # Never in any entry (sources above): voltage/VID, OC mode, PBO scalar, SMN writes. Dangerous neighbours
 # of the allowed IDs on Zen 2/3: RSMU 0x58 PBO scalar, 0x5A–0x5D OC mode/frequency, 0x61 OC VID.
 SMU_STATUS = {0: "WAITING", 1: "OK", 0xFF: "FAILED", 0xFE: "UNKNOWN_CMD",
@@ -327,7 +356,9 @@ class Fake:
                 "vermeer8": {"codename": 12, "cores": 8, "ccds": 1, "pm_version": 0x380905,    # 5800X sitting on the
                              "phys": [1]},                                                 # second CCD of the package
                 "matisse": {"codename": 4, "cores": 8, "ccds": 1, "pm_version": 0x240903},     # 3700X: no CO, no FMax
-                "pinnacle": {"codename": 10, "cores": 8, "ccds": 1, "pm_version": 0}}          # 2700X: no SMU command
+                "pinnacle": {"codename": 10, "cores": 8, "ccds": 1, "pm_version": 0},          # 2700X: no SMU command
+                "cezanne": {"codename": 14, "cores": 8, "ccds": 1, "pm_version": 0x400005},    # 5700G: APU, no CO
+                "phoenix": {"codename": 21, "cores": 8, "ccds": 1, "pm_version": 0x4C0006}}    # 8700G
     FAN_DIR = HWMON + "/hwmon0"
 
     def __init__(self, variant=None):
@@ -437,8 +468,8 @@ class Fake:
         if name == "co_set":
             c = self.core(a)
             self._write(lambda: c is not None and s["co"].__setitem__(c, s16(a)))
-        elif name in ("ppt_set", "tdc_set", "edc_set"):
-            self._write(lambda: s.__setitem__(name[:3], a / 1000.0))
+        elif name in ("ppt_set", "tdc_set", "edc_set", "fast_set", "slow_set"):
+            self._write(lambda: s.__setitem__(name[:-4], a / 1000.0))
         elif name == "co_get":
             c = self.core(a)
             return 1, [(s["co"][c] if c is not None else 0) & 0xFFFFFFFF, 0, 0, 0, 0, 0]
@@ -506,10 +537,11 @@ class Fake:
             return s["pm_version"], [0.0] * 457
         PM = fam["pm"]
         t = [0.0] * 457
-        t[PM["ppt_limit"]], t[PM["ppt"]] = s["ppt"], 61.0
-        t[PM["tdc_limit"]], t[PM["tdc"]] = s["tdc"], 23.0
-        t[PM["thm_limit"]], t[PM["tctl"]] = s["thm"], s["tctl"]
-        t[PM["edc_limit"]] = s["edc"]
+        vals = {"ppt_limit": s["ppt"], "ppt": 61.0, "tdc_limit": s["tdc"], "tdc": 23.0, "thm_limit": s["thm"],
+                "tctl": s["tctl"], "edc_limit": s["edc"], "stapm_limit": s.get("stapm", 65.0), "stapm": 38.0,   # APU header
+                "fast_limit": s.get("fast", 88.0), "fast": 52.0, "slow_limit": s.get("slow", 65.0), "slow": 41.0}
+        for k, i in PM.items():
+            t[i] = vals[k]
         layout = fam["pm_cores"].get(s["pm_version"])
         for c, (ccd, slot) in enumerate(self.slots if layout else []):   # by physical slot, like the real arrays
             i = 8 * ccd + slot
@@ -754,7 +786,7 @@ def values_from_lines(lines):
     for t in lines:
         if t[0] == "co" and len(t) == CORES + 1:
             v["co"] = [int(x) for x in t[1:]]
-        elif t[0] in ("ppt", "tdc", "edc", "fmax", "tjmax") and len(t) == 2:
+        elif t[0] in ("ppt", "fast", "slow", "tdc", "edc", "fmax", "tjmax") and len(t) == 2:
             v[t[0]] = int(t[1])
         elif t[0] == "shaper" and len(t) == 5:
             v["shaper"][int(t[1])] = [int(x) for x in t[2:]]
@@ -795,7 +827,8 @@ def capture_lines():
     lim = read_limits()
     co, fmax = read_co(), read_fmax()
     lines = (["co " + " ".join(str(v) for v in co)] if co is not None else []) + (["fmax %d" % fmax] if fmax is not None else [])
-    for key, pm_key in (("ppt", "ppt_limit"), ("tdc", "tdc_limit"), ("edc", "edc_limit"), ("tjmax", "thm_limit")):
+    for key, pm_key in (("ppt", "ppt_limit"), ("fast", "fast_limit"), ("slow", "slow_limit"), ("tdc", "tdc_limit"),
+                        ("edc", "edc_limit"), ("tjmax", "thm_limit")):   # fast before slow: raising back keeps slow ≤ fast
         if pm_key in lim:
             lines.append("%s %d" % (key, round(lim[pm_key])))
     # Curve Shaper excluded: on the 9800X3D (SMU 98.81.0) 0xA6 replies OK but 0x84 does not change,
@@ -844,6 +877,8 @@ def cap_of(base, key, unlock):
         return min(base[key], family().get("tjmax_max", TJMAX_ABS_MAX), TJMAX_ABS_MAX)
     if key == "fmax":
         return base[key] + (FMAX_UNLOCK_EXTRA if unlock else 0)
+    if key in ("fast", "slow"):   # APUs: no unlock, the stock limits are the ceiling
+        return base[key]
     hard = {"ppt": UNLOCK_PPT, "tdc": UNLOCK_TDC, "edc": UNLOCK_EDC}[key]
     return max(base[key], hard) if unlock else base[key]
 
@@ -896,7 +931,9 @@ def limit_setter(key, pm_key, cmd_name, unit, lo):
         check_cpu()
         s = load_settings()
         base = load_baseline()
-        check_range(key, v, lo, cap_of(base, key, s["unlock"]), " " + unit)
+        cap = cap_of(base, key, s["unlock"])   # no baseline for the key: refused
+        if v != base[key]:   # the stock value is always allowed back (an APU's Tctl limit can be 100 °C)
+            check_range(key, v, lo, cap, " " + unit)
         if not read_limits():
             raise Err(_("PM table missing: cannot verify %s, write refused") % key)
         scale = 1 if key == "tjmax" else 1000
@@ -1075,9 +1112,10 @@ def cmd_status(ctx, args):
         "smu_version": _("fake") if FAKE else read_text(SMU_DIR + "/version"),
         "pm_version": hex((FAKE.pm() if FAKE else pm_raw())[0] or 0),
         "co": read_co(), "fmax": read_fmax(), "shaper": read_shaper(),
-        "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"),
-                   "edc": lim.get("edc_limit"), "tjmax": lim.get("thm_limit")},
-        "now": {"ppt": lim.get("ppt"), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
+        "limits": {"ppt": lim.get("ppt_limit"), "tdc": lim.get("tdc_limit"), "edc": lim.get("edc_limit"),
+                   "tjmax": lim.get("thm_limit"), "stapm": lim.get("stapm_limit"),   # APUs: STAPM read only
+                   "fast": lim.get("fast_limit"), "slow": lim.get("slow_limit")},
+        "now": {"ppt": lim.get("ppt", lim.get("fast")), "tdc": lim.get("tdc"), "tctl": tctl(), "tctl_pm": lim.get("tctl")},
         "power": power_get(), "boost": boost_get(),
         "baseline": base, "baseline_fresh": os.path.exists(P(RUN + "/baseline-done")),
         "unlock": s["unlock"], "autostart": s["autostart"], "profile": s["profile"],
@@ -1090,7 +1128,8 @@ def cmd_status(ctx, args):
 def caps(base, unlock):
     """Allowed ranges (min, max) for the GUI: same logic as cap_of."""
     out = {"co": list(co_range()), "fan_step_ms": [0, FAN_STEP_MAX_MS], "fan_step_tol_ms": FAN_STEP_TOL_MS}
-    for key, lo in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN), ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
+    for key, lo in (("ppt", PPT_MIN), ("fast", APU_MIN_W), ("slow", APU_MIN_W), ("tdc", TDC_MIN), ("edc", EDC_MIN),
+                    ("fmax", FMAX_MIN), ("tjmax", TJMAX_MIN)):
         if key in base:
             out[key] = [lo, cap_of(base, key, unlock)]
     return out
@@ -1156,7 +1195,8 @@ def cmd_telemetry(ctx, args):
                 info = fan_roles().get(str(n), {})
                 fans.append({"canale": n, "rpm": rpm, "pwm": hw_read("%s/pwm%d" % (fd, n)),
                              "role": info.get("role", "sconosciuto"), "name": info.get("name")})
-    return {"tctl": tctl(), "tccd": tccd, "ppt": lim.get("ppt"), "ppt_limit": lim.get("ppt_limit"),
+    return {"tctl": tctl(), "tccd": tccd, "ppt": lim.get("ppt", lim.get("fast")),   # APUs: the fast PPT's power
+            "ppt_limit": lim.get("ppt_limit", lim.get("fast_limit")),
             "tdc": lim.get("tdc"), "tdc_limit": lim.get("tdc_limit"), "edc_limit": lim.get("edc_limit"),
             "tjmax": lim.get("thm_limit"), "fmax": read_fmax(), "cores": cores, "fans": fans, "power": power_get()}
 
@@ -1173,9 +1213,10 @@ def fmt_status(st):
         ("Shaper  " + "  ".join("t%d:%+d/%+d/%+d" % (i, *v) for i, v in enumerate(st["shaper"])) + _("  (experimental, not verified)"))
         if st["shaper"] is not None else _("Shaper  n/a on this CPU"),
         "FMax    %s MHz%s" % (f(st["fmax"]), bl("fmax", " MHz")),
-        _("Limits  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s") % (
-            f(st["limits"]["ppt"], " W"), bl("ppt", " W"), f(st["limits"]["tdc"], " A"), bl("tdc", " A"),
-            f(st["limits"]["edc"], " A"), bl("edc", " A"), f(st["limits"]["tjmax"], " °C"), bl("tjmax", " °C")),
+        _("Limits  ") + "  ".join("%s %s%s" % (name, f(st["limits"].get(k), u), bl(k, u)) for k, name, u in (
+            (("stapm", "STAPM", " W"), ("fast", _("fast PPT"), " W"), ("slow", _("slow PPT"), " W"))
+            if st["limits"].get("fast") is not None else (("ppt", "PPT", " W"),))
+            + (("tdc", "TDC", " A"), ("edc", "EDC", " A"), ("tjmax", "Tjmax", " °C"))),
         _("Now     PPT %s  TDC %s  Tctl %s") % (f(st["now"]["ppt"], " W"), f(st["now"]["tdc"], " A"), f(st["now"]["tctl"], " °C")),
         _("Power   %s%s, boost %s%s") % (st["power"] or _("n/a"), bl("power"), st["boost"] or _("n/a"), bl("boost")),
         _("Baseline %s, unlock %s, autostart %s, profile %s") % (
@@ -1186,7 +1227,7 @@ def fmt_status(st):
 
 
 # ---- Profiles ----------------------------------------------------------------------------
-PROFILE_CMDS = {"co", "ppt", "tdc", "edc", "fmax", "tjmax", "power", "boost", "fan"}  # shaper: experimental, excluded
+PROFILE_CMDS = {"co", "ppt", "fast", "slow", "tdc", "edc", "fmax", "tjmax", "power", "boost", "fan"}  # shaper: experimental, excluded
 FAN_PROFILE_SUBCMDS = ("step", "curve", "pump")   # `fan <N> step …` | `fan <N> curve …` | `fan <N> pump auto|<pct>`
 NAME_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
 
@@ -1309,14 +1350,14 @@ def cmd_autostart(ctx, args):
 # ponytail: fixed ratios relative to the baseline (quiet ≈ AMD's 65 W eco on a 162 W part, auto ≈ 105 W eco);
 # the Auto calibration replaces them with values measured on this CPU, the Eco one adds the measured CO.
 PRESETS = {
-    "quiet": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
+    "quiet": {"ppt": 0.55, "slow": 0.6, "fast": 0.6, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
     # eco: same values as quiet; `autotune eco` adds Auto's validated CO and the fan curve
-    "eco": {"ppt": 0.55, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
-    "auto": {"ppt": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
-    "performance": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
+    "eco": {"ppt": 0.55, "slow": 0.6, "fast": 0.6, "tdc": 0.63, "edc": 0.83, "fmax": -400, "tjmax": 80, "power": "balanced", "fan": (10000, 5000)},
+    "auto": {"ppt": 0.88, "slow": 0.88, "fast": 0.88, "tdc": 0.92, "edc": 0.94, "fmax": 0, "tjmax": None, "power": "balanced", "fan": (3000, 2000)},
+    "performance": {"ppt": 1.0, "slow": 1.0, "fast": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
     # boost: same values as performance until `autotune boost` replaces them (pushed CO, limits and
     # FMax at the allowed caps, stability check and measured gain)
-    "boost": {"ppt": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
+    "boost": {"ppt": 1.0, "slow": 1.0, "fast": 1.0, "tdc": 1.0, "edc": 1.0, "fmax": 0, "tjmax": None, "power": "performance", "fan": None},
 }
 
 
@@ -1337,8 +1378,8 @@ def preset_lines(name, base):
         raise Err(over)
     eco = dict(zip(("ppt", "tdc", "edc"), family().get("eco_limits", ())))   # AMD's Eco mode: Quiet/Eco in that case
     lines = ["co " + " ".join(str(v) for v in base["co"])] if "co" in base else []   # presets do not touch the CO
-    for key, floor in (("ppt", PPT_MIN), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
-        if key in base:
+    for key, floor in (("ppt", PPT_MIN), ("slow", APU_MIN_W), ("fast", APU_MIN_W), ("tdc", TDC_MIN), ("edc", EDC_MIN)):
+        if key in base:   # APUs: slow before fast, so that lowering never leaves fast below slow
             v = eco[key] if over and pr[key] < 1 and key in eco else max(floor, round(base[key] * pr[key]))
             lines.append("%s %d" % (key, v))
     if "fmax" in base:
@@ -1347,7 +1388,7 @@ def preset_lines(name, base):
         lines.append("tjmax %d" % (base["tjmax"] if pr["tjmax"] is None else min(base["tjmax"], pr["tjmax"])))
     lines.append("power " + pr["power"])
     if name == "quiet" and "co_set" not in family()["cmd"] and "boost" in base:
-        lines.append("boost off")   # Ryzen 1000–3000: no CO nor FMax, the kernel's boost switch is the lever
+        lines.append("boost off")   # Ryzen 1000–3000 and the APUs: no CO nor FMax, the kernel's boost switch is the lever
     d = fans_dir()
     if d:
         for n in fan_channels(d):
@@ -2999,7 +3040,10 @@ def cmd_hwtest(ctx, args):
              else ("co", None, _("skipped: %s") % no_co),
              ("fmax", [str(max(FMAX_MIN, base["fmax"] - 200))], [str(base["fmax"])]) if "fmax" in base
              else ("fmax", None, _("skipped: not available on this CPU"))]
-    for key, floor, delta in (("ppt", PPT_MIN, 12), ("tdc", TDC_MIN, 10), ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
+    for key, floor, delta in (("ppt", PPT_MIN, 12), ("slow", APU_MIN_W, 3), ("fast", APU_MIN_W, 3), ("tdc", TDC_MIN, 10),
+                              ("edc", EDC_MIN, 10), ("tjmax", TJMAX_MIN, 10)):
+        if key in ("slow", "fast") and key not in base:   # desktop families: not a function of theirs
+            continue
         if key in base:
             steps.append((key, [str(max(floor, base[key] - delta))], [str(base[key])]))
         else:
@@ -3226,6 +3270,8 @@ COMMANDS = {
     "ppt": limit_setter("ppt", "ppt_limit", "ppt_set", "W", PPT_MIN),
     "tdc": limit_setter("tdc", "tdc_limit", "tdc_set", "A", TDC_MIN),
     "edc": limit_setter("edc", "edc_limit", "edc_set", "A", EDC_MIN),
+    "fast": limit_setter("fast", "fast_limit", "fast_set", "W", APU_MIN_W),
+    "slow": limit_setter("slow", "slow_limit", "slow_set", "W", APU_MIN_W),
     "tjmax": limit_setter("tjmax", "thm_limit", "tjmax_set", "°C", TJMAX_MIN),
     "fmax": cmd_fmax, "shaper": cmd_shaper, "power": cmd_power, "boost": cmd_boost, "unlock": cmd_unlock,
     "apply": cmd_apply, "profile": cmd_profile, "use": cmd_use, "autostart": cmd_autostart, "trust": cmd_trust,
@@ -3265,7 +3311,7 @@ def selftest():
     assert shaper_arg(2, -10, -5, 3) == (3 << 24) | (0xFB << 16) | (0xF6 << 8) | 0x80 | 2
     assert shaper_decode(shaper_arg(4, -50, 0, 30)) == [-50, 0, 30]
     # CPU gate
-    FAKE.s["codename"] = 24
+    FAKE.s["codename"] = 25   # Storm Peak (Threadripper 7000): not in FAMILIES
     FAKE.save()
     expect_err(["status"], "unsupported")
     FAKE.s["codename"] = 23
@@ -3273,7 +3319,7 @@ def selftest():
     # status
     st = run(["status"])
     assert st["co"] == [0] * CORES and st["fmax"] == 5225 and st["baseline"] is None
-    assert st["limits"] == {"ppt": 162.0, "tdc": 120.0, "edc": 180.0, "tjmax": 95.0}
+    assert st["limits"] == {"ppt": 162.0, "tdc": 120.0, "edc": 180.0, "tjmax": 95.0, "stapm": None, "fast": None, "slow": None}
     assert "Granite Ridge" in fmt_status(st)
     expect_err(["nope"], "unknown")
     assert FAKE.smu(MP1, 0x10, [0])[0] == 0xFE   # outside the allowlist → UNKNOWN_CMD
@@ -4324,6 +4370,36 @@ def selftest_variants():
             assert run(["status"])["cpu"] == "Granite Ridge"
     expect_err(["status"], "laptop detected (BAT0)")
     expect_err(["co", "0", "-5"], "laptop detected")
+    # ---- desktop APUs (Cezanne 5700G, Phoenix 8700G): fast/slow PPT, Tctl, TDC/EDC through MP1, read back from
+    # the PM table; STAPM read only; no CO, no FMax; refused on a laptop until the laptop part ----
+    for variant, name in (("cezanne", "Cezanne"), ("phoenix", "Phoenix")):
+        ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-%s-" % variant)
+        FAKE = Fake(variant)
+        init_cpu()
+        st = run(["status"])
+        assert st["cpu"] == name and st["co"] is None and st["fmax"] is None and st["limits"]["stapm"] == 65.0, st
+        assert st["limits"]["fast"] == 88.0 and st["limits"]["slow"] == 65.0 and "STAPM 65 W" in fmt_status(st), fmt_status(st)
+        run(["boot"])
+        base = run(["baseline", "show"])
+        assert base["fast"] == 88 and base["slow"] == 65 and not any(k in base for k in ("ppt", "fmax", "stapm")), base
+        assert run(["slow", "40"])["slow"] == 40.0 and run(["fast", "60"])["fast"] == 60.0 and FAKE.s["slow"] == 40.0
+        expect_err(["fast", "89"], "out of range")            # never above the stock value: no unlock on APUs
+        expect_err(["slow", "%d" % (APU_MIN_W - 1)], "out of range")
+        expect_err(["ppt", "50"], "baseline")
+        expect_err(["co", "0", "-5"], "not available")
+        assert run(["tjmax", "85"])["tjmax"] == 85.0
+        pl = run(["preset", "quiet", "show"])["lines"]
+        assert "slow 39" in pl and "fast 53" in pl and pl.index("slow 39") < pl.index("fast 53") and "boost off" in pl, pl
+        r = run(["hwtest"])
+        assert r["slow"].startswith("ok") and r["fast"].startswith("ok") and r["co"].startswith("skipped") and r["esito"] == "ok", r
+        run(["default"])
+        assert FAKE.s["fast"] == 88.0 and FAKE.s["slow"] == 65.0
+        tele = run(["telemetry"])
+        assert tele["ppt"] == 52.0 and tele["ppt_limit"] == 88.0, tele
+    os.makedirs(P("/sys/class/power_supply/BAT0"))   # the same APU in a laptop: refused until the laptop part
+    with open(P("/sys/class/power_supply/BAT0/type"), "w") as fh:
+        fh.write("Battery\n")
+    expect_err(["status"], "laptop detected")
     # ---- custom calibration: from a base mode, saved under its own name; the mode's profile and the shared
     # CO measurement stay as they are (the user keeps the Auto that works while trying other parameters) ----
     ROOT = tempfile.mkdtemp(prefix="ryzenctl-selftest-custom-")

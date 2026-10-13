@@ -20,6 +20,7 @@ stress-ng terminated); per-core voltage sampled at every level (mV per step meas
 Revision 10 (2026-10-10): phases 5 and 6 swapped — the tray icon (phase 5, tag v0.5.0) precedes the deb/Arch packages (phase 6, tag v0.6.0).
 Revision 11 (2026-10-10): new phase 5 — support for all Ryzen processors (FAMILIES table, per-family gate, dynamic cores); tray → phase 6 (v0.6.0), deb/Arch → phase 7 (v0.7.0).
 Revision 12 (2026-10-10): project documentation, source comments and UI strings switched to English; UI localized with gettext (Italian catalog).
+Revision 20 (2026-10-13): phase 8, APUs and laptops, after a research agent (RyzenAdj, ZenStates-Core, UXTU, amd-pmf). First finding, fixed at once: the driver reports the HX laptop CPUs (Dragon Range, Fire Range) as Raphael and Granite Ridge, so a system battery (not a device battery such as a wireless mouse) now refuses every family not marked mobile. Step 25: desktop APUs and mini PCs — fast/slow PPT (MP1 0x15/0x16), Tctl (0x19), TDC/EDC (0x1A/0x1C) where the table is mapped, read back from the PM table at RyzenAdj's offsets for explicit versions; STAPM read only; no CO (no verified readback on any APU), no FMax; Quiet 60 % of fast/slow with boost off, Performance. Step 26: laptops — the power source recorded with the baseline and writes only on that source, `power` applied before the limits (amd-pmf rewrites them on profile changes), `ryzenctl reapply` from a udev rule on power-supply changes, the resume unit and a timer while a mobile profile is active, giving up after repeated firmware overrides.
 Revision 19 (2026-10-13): phase 7. The deb and Arch packages are thin wrappers of `make install`, and they are tested after all: podman is on the development machine, so `packaging/build-deb.sh` and `build-arch.sh` build and check them in containers (`make deb`, `make arch`, two jobs of the release workflow that attach them to the GitHub release); the install test (dependencies, maintainer scripts, DKMS registration, selftest of the installed package, removal) ran in Debian 13, Ubuntu 24.04 and Arch containers. Real hardware on those distributions: untested.
 Revision 18 (2026-10-13): phase 6, the tray icon (step 22). As planned, with three choices: the custom calibrations are listed in the menu with the modes; the icon asks for attention only after a crash (a Tctl above the Eco target is normal under load and would keep it lit); the `ryzenctl-notify` autostart stays (the tray is optional), the crash choice is also the first menu entry.
 Revision 17 (2026-10-13): custom calibrations (user request: keep the working Auto while trying other parameters): `autotune start eco|auto|boost name=<profile>` calibrates from a base mode and saves the result under its own name, never over eco/auto/boost (their names refused), and its own CO search is never written over the shared `co_limits.json` the three modes reuse; listed in `settings.json` (`calibrated`: base mode, time), Boost's unlock rule for those based on Boost, `profile delete` forgets them. GUI: a "Custom" row in the Calibrated column (Calibrate… = base + name + the usual dialog; one sub-row per saved custom calibration: apply, Verify…, delete). Steps 21c (single-core phase, watchdog, verify) merged.
@@ -565,6 +566,12 @@ banner becomes a menu entry).
 |---|---|---|
 | 23 | `build(deb): packaging/debian` — done (rev. 19) | built, lintian-clean, installed and removed in Debian 13 and Ubuntu 24.04 containers |
 | 24 | `build(arch): PKGBUILD` — done (rev. 19) | makepkg + namcap, installed and removed in an Arch container |
+
+### Phase 8 — APUs and laptops → `v0.8.0`
+| # | Commit | Verification |
+|---|---|---|
+| 25 | `feat: desktop APUs and mini PCs (fast/slow PPT, Tctl, TDC/EDC)` | selftest on fake Cezanne/Phoenix, GUI smoke; `hwtest` by owners (expected) |
+| 26 | `feat: laptops (power source, re-apply, give-up on firmware fights)` | selftest with fake power supplies and firmware resets; owners' `hwtest` |
 
 ## Verification
 

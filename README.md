@@ -35,7 +35,9 @@ has written and read back each of its functions; until then it is **expected**: 
 | Ryzen 5000 desktop: 5600X … 5950X, 5800X3D | Vermeer (12) | expected | Curve Optimizer (−30..+30), PPT/TDC/EDC/Tjmax (PM tables 0x3808xx/0x3809xx), all calibrations, Auto on the PPT alone; no FMax (Zen 3 has no command for it); the core positions always come from the fuses; on the 5800X3D the BIOS may lock the power limits (the CO still works) |
 | Ryzen 3000 desktop: 3600 … 3950X | Matisse (4) | expected | PPT/TDC/EDC/Tjmax (PM tables 0x240803/0x240903), Quiet and Performance, Quiet also turns the boost off; no Curve Optimizer, so no calibrated modes |
 | Ryzen 1000/2000 desktop | Summit Ridge (9), Pinnacle Ridge (10) | expected | boost switch, power profile and fans only: no SMU command (no Curve Optimizer, no readable limits); Tdie instead of Tctl on the X models with an offset |
-| APUs and laptops (Ryzen G, mobile, Ryzen AI) | Raven Ridge … Strix Halo | not supported | other limits (STAPM, fast/slow PPT), often no RSMU mailbox |
+| APUs without a battery: desktop Ryzen 4000G/5000G/8000G, mini PCs with Ryzen 6000/7040/8040/AI 300/AI Max | Renoir (2), Lucienne (17), Cezanne (14), Rembrandt (11), Phoenix (21), Hawk Point (24), Strix Point (22), Strix Halo (26) | expected | fast/slow PPT, Tjmax and TDC/EDC where the PM table is mapped, read back from it; STAPM shown read only; Quiet (60 % of fast/slow, boost off) and Performance. No Curve Optimizer (no verified readback on APUs), no FMax, so no calibrated modes |
+| Laptops with those APUs | same | not supported yet | refused while the machine has a system battery: the firmware resets the limits on AC/battery changes (planned) |
+| Raven Ridge, Picasso, Dali, Van Gogh (Steam Deck), Krackan… | | not supported | no readable PM table through ryzen_smu, or an unmapped one |
 | HX laptops: 7945HX, 9955HX … | Dragon Range, Fire Range (reported by the driver as Raphael / Granite Ridge) | not supported | refused when the machine has a system battery (a laptop): its firmware and battery limits are not handled |
 | Threadripper, EPYC | — | not supported | other interface (HSMP), out of scope |
 

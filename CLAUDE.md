@@ -90,7 +90,10 @@ containers by `packaging/build-deb.sh` / `build-arch.sh` (`make deb`, `make arch
 of the release workflow): lintian clean, namcap warnings expected (empty state dirs, the python3 shebang,
 runtime-only deps); installed, selftest and removed in Debian 13, Ubuntu 24.04 and Arch containers; not used
 on real Debian/Ubuntu/Arch hardware. `make check` fails if VERSION differs in the spec, debian/changelog or
-PKGBUILD. The repository's GitHub releases are immutable (no asset can be added after publishing): the
+PKGBUILD. **Phase 8** (APUs and laptops, rev. 20): step 25 desktop APUs and mini PCs (no battery) as
+expected — fast/slow/Tctl/TDC/EDC, Quiet/Performance presets; laptops refused by the battery check until
+step 26 (power source in the baseline, re-apply on AC changes and resume with a give-up on firmware fights).
+The repository's GitHub releases are immutable (no asset can be added after publishing): the
 workflow builds the three packages in parallel as artifacts and one `release` job publishes them together
 (v0.7.0 has the RPM only; v0.7.1 is the first with all three).
 
@@ -242,6 +245,10 @@ systemd: ryzenctl.service, -resume ─────┘─ /etc/ryzenctl, /var/lib
   0x10 (turns off the display); on Zen 2/3 never RSMU 0x58 (PBO scalar), 0x5A–0x5D (OC mode,
   PROCHOT, OC frequency), 0x61 (OC VID). Never voltage commands, OC mode (RSMU 0x5D), fixed VID (0x61),
   PBO scalar (0x5B), `smn` writes, FCLK/memory.
+- APUs (`APU_CMD`/`APU_PM`, codenames 2, 17, 14, 11, 21, 24, 22, 26): fast/slow PPT MP1 0x15/0x16, Tctl MP1
+  0x19, TDC/EDC MP1 0x1A/0x1C where mapped, read back from the PM table (explicit `pm_versions`: codename 22
+  has two table families); STAPM read only; no CO, no FMax, no unlock (`cap_of`: the stock value is the ceiling).
+  Writing exactly the stock value is always allowed back (an APU Tctl limit can be 100 °C > TJMAX_ABS_MAX).
 - Laptops: a system battery (`system_battery`, power_supply type Battery whose scope is not Device: a wireless
   mouse does not count) refuses every family not marked `mobile` — the driver reports Dragon Range and Fire
   Range (HX laptops) as Raphael and Granite Ridge.

@@ -146,8 +146,8 @@ msgstr "  (sperimentale, non verificato)"
 
 #: ryzenctl
 #, python-format
-msgid "Limits  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s"
-msgstr "Limiti  PPT %s%s  TDC %s%s  EDC %s%s  Tjmax %s%s"
+msgid "Limits  "
+msgstr "Limiti  "
 
 #: ryzenctl
 #, python-format
@@ -596,3 +596,9 @@ msgstr "systemd non ha preso il watchdog"
 
 msgid "laptop detected (%s): laptop processors are not supported yet, even when the driver reports them as the desktop %s"
 msgstr "rilevato un portatile (%s): i processori per portatili non sono ancora supportati, anche quando il driver li presenta come il desktop %s"
+
+msgid "fast PPT"
+msgstr "PPT fast"
+
+msgid "slow PPT"
+msgstr "PPT slow"
