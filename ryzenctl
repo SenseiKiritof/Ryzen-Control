@@ -2667,8 +2667,10 @@ def cmd_resume(ctx, args):
 
 
 def cmd_default(ctx, args):
-    """The baseline, no profile, Apply at startup off. On a laptop on the other power source the CPU values are not
-    written (the firmware's limits apply, see source_mismatch): only fans, power profile and boost."""
+    """The baseline and no profile. Apply at startup stays as it is (user request: with no profile the boot applies
+    nothing, and the next mode chosen is applied at startup again); after a crash the GUI's "Stay on Default" turns it
+    off itself. On a laptop on the other power source the CPU values are not written (the firmware's limits apply, see
+    source_mismatch): only fans, power profile and boost."""
     lines, why = profile_lines("baseline"), source_mismatch()
     done = apply_lines([t for t in lines if t[0] in ("fan", "power", "boost")] if why else lines, ctx)
     if not why:
@@ -2676,10 +2678,9 @@ def cmd_default(ctx, args):
     rm(P(REAPPLY_WANTED))
     rm(P(REAPPLY_STATE))
     s = load_settings()
-    s["autostart"] = False
     s["profile"] = None          # Default = no profile selected (the GUI derives the mode from here)
     save_settings(s)
-    out = {"applied": done, "autostart": False, "profile": None}
+    out = {"applied": done, "autostart": s["autostart"], "profile": None}
     if why:
         out["cpu_skipped"] = why
     return out
@@ -3658,17 +3659,19 @@ def selftest():
     run(["ppt", "162"])
     assert "crash" in run(["resume"])["errors"]["cpu"] and run(["status"])["limits"]["ppt"] == 162.0
     run(["crashed", "clear"])
-    # 7. default: everything at baseline, active gone, autostart off; a crash afterwards is not our fault
+    # 7. default: everything at baseline, active gone, Apply at startup kept (no profile: the boot applies nothing);
+    # a crash afterwards is not our fault
     run(["apply", "quiet"])
     with open(P(STATE + "/baseline.conf"), "a") as f:   # baseline of an old version with a shaper line
         f.write("shaper 4 0 0 0\n")
     out = run(["default"])
-    assert not out["autostart"] and not exists("active") and run(["status"])["profile"] is None
+    assert out["autostart"] and load_settings()["autostart"] and not exists("active") and run(["status"])["profile"] is None
     st = run(["status"])
     assert st["limits"]["ppt"] == 162.0 and st["co"] == [0] * CORES and st["fmax"] == 5225
     assert st["power"] == run(["baseline", "show"])["power"]
     reboot()
-    assert not run(["boot"])["crashed"]
+    out = run(["boot"])
+    assert not out["crashed"] and out["applied"] == {} and not out["errors"] and run(["status"])["limits"]["ppt"] == 162.0
     # 8. boot does not die if the apply fails (PM table missing): error reported, unit stays active
     run(["use", "quiet"])
     run(["autostart", "on"])
@@ -4752,11 +4755,11 @@ def selftest_laptop():
     supply("ucsi-source-psy-USBC000:001", type="USB", online=1)
     assert power_source() == "ac" and run(["reapply"])["reapplied"] == ["slow 39", "fast 53"] and not reapply_state()["held"]
     supply("ucsi-source-psy-USBC000:001", online=0)
-    # Default on battery: profile deselected, Apply at startup off, no CPU value written (active stays: the CPU may
+    # Default on battery: profile deselected, Apply at startup kept, no CPU value written (active stays: the CPU may
     # still run the profile's values), fans/power/boost back to the baseline
     n, thm = writes(), FAKE.s["thm"]
     out = run(["default"])
-    assert "on battery" in out["cpu_skipped"] and out["profile"] is None and not out["autostart"], out
+    assert "on battery" in out["cpu_skipped"] and out["profile"] is None and out["autostart"], out
     assert out["applied"] == ["power performance", "boost on"] and FAKE.s["power"] == "performance", out
     assert writes() == n and FAKE.s["thm"] == thm == 80.0   # no SMU write (fast/slow: the fake amd-pmf's, at the profile change)
     assert os.path.exists(marker("active")) and not wanted() and reapply_state() == {}

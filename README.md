@@ -213,7 +213,8 @@ state is remembered.
 ![Fans page](docs/screenshots/fans.png)
 
 **Preferences** — "Apply at startup" re-applies the selected profile at every boot and resume,
-never after a crash; "Start Ryzen Control at login" opens the window at every login; "Stop asking
+never after a crash; choosing Default leaves it on (nothing is applied until you pick another mode), the
+crash warning's "Stay on Default" turns it off; "Start Ryzen Control at login" opens the window at every login; "Stop asking
 for the password" writes the polkit rule described in "Safety"; "Allow beyond the stock values"
 raises the PPT/TDC/EDC and FMax ceilings (unlock); "Hardware check" writes and reads back one
 value per command, then restores the baseline.
@@ -247,7 +248,7 @@ sudo ryzenctl fmax 5000              # maximum boost frequency (MHz)
 sudo ryzenctl tjmax 85               # maximum temperature (°C), never above the baseline
 sudo ryzenctl power balanced         # power-saver | balanced | performance
 sudo ryzenctl boost off              # Precision Boost through the kernel (cpufreq), no SMU: on | off
-sudo ryzenctl default                # everything back to the base (BIOS) values, autostart off
+sudo ryzenctl default                # everything back to the base (BIOS) values, no mode selected
 sudo ryzenctl reapply                # laptops: the limits the firmware changed, written again (the timer runs it)
 sudo ryzenctl trust on|off|status    # polkit rule: your user starts Ryzen Control without a password
 sudo ryzenctl hwtest                 # reversible test of every command with readback

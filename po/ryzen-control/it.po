@@ -662,8 +662,8 @@ msgstr "Fabbrica"
 msgid "Stock CO; below, the reference voltage measured at start under the same load"
 msgstr "CO di fabbrica; sotto, la tensione di riferimento misurata all'avvio con lo stesso carico"
 
-msgid "Stock values (baseline), automatic start disabled"
-msgstr "Valori di fabbrica (baseline), avvio automatico disattivato"
+msgid "Stock values (baseline)"
+msgstr "Valori di fabbrica (baseline)"
 
 msgid "Stock values applied"
 msgstr "Valori di fabbrica applicati"

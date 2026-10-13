@@ -51,7 +51,7 @@ UI_FILE = os.path.join(MOCK_DIR if "--mock" in sys.argv else os.path.join(GLib.g
 POWER = ("power-saver", "balanced", "performance")
 PRESETS = ("quiet", "performance", "eco", "auto", "boost")
 CALIBRATED = ("eco", "auto", "boost")   # adapt to the hardware with load tests; the others are fixed presets
-MODES = (("default", _("Default"), _("Stock values (baseline), automatic start disabled")),
+MODES = (("default", _("Default"), _("Stock values (baseline)")),
          ("quiet", _("Quiet"), _("Fixed preset: reduced limits, FMax −400, slow-reacting fans")),
          ("performance", _("Performance"), _("Fixed preset: stock values, power mode at maximum")),
          ("eco", _("Eco"), _("Same undervolt as Auto (validated), lower power, FMax −400, Tjmax 80 °C, fans at the minimum at light load: quiet under heavy load")),
@@ -2332,8 +2332,10 @@ class Window(Adw.ApplicationWindow):
         def resp(_d, r):
             if r == "reactivate":
                 self.run([["crashed", "clear"], ["autostart", "on"], ["apply", prof]], lambda _r: self.toast(_("Profile '%s' reactivated") % prof))
-            elif r == "default":   # stock values for the fans too (the boot had applied them), profile deselected
-                self.run([["crashed", "clear"], ["default"]], lambda _r: self.toast(_("Stock values; automatic start disabled")))
+            elif r == "default":   # stock values for the fans too (the boot had applied them), profile deselected, and
+                # after a crash Apply at startup off (Default alone keeps it)
+                self.run([["crashed", "clear"], ["default"], ["autostart", "off"]],
+                         lambda _r: self.toast(_("Stock values; automatic start disabled")))
         d.connect("response", resp)
         d.present(self)
 
@@ -2478,7 +2480,7 @@ class Tray:
             add(_("Profile '%s' deactivated after a crash (%s)") % (prof or "-", crashed.get("time", "?")))
             if prof:
                 add(_("Reactivate"), lambda: self.run([["crashed", "clear"], ["autostart", "on"], ["apply", prof]]))
-            add(_("Stay on Default"), lambda: self.run([["crashed", "clear"], ["default"]]))
+            add(_("Stay on Default"), lambda: self.run([["crashed", "clear"], ["default"], ["autostart", "off"]]))
             items.append(None)
         prof, cal = s.get("profile"), s.get("calibrated") or {}
         titles = dict((k, t) for k, t, _sub in MODES)
@@ -2498,7 +2500,8 @@ class Tray:
         if prof and prof not in PRESETS and prof not in cal:   # a profile saved by hand: shown, chosen in the window
             add(_("Custom: %s") % prof, None, "radio", True)
         items.append(None)
-        add(_("Apply at startup"), (lambda: self.run([["autostart", "off" if s.get("autostart") else "on"]])) if prof else None,
+        add(_("Apply at startup"), (lambda: self.run([["autostart", "off" if s.get("autostart") else "on"]]))
+            if prof or s.get("autostart") else None,   # on Default (no profile) it can still be turned off
             "checkmark", bool(s.get("autostart")))
         items.append(None)
         add(_("Open Ryzen Control"), self.app.activate)
@@ -2889,7 +2892,12 @@ class App(Adw.Application):
             assert items[0]["action"] is None and items[1]["label"] == _("Reactivate") and items[3] is None, "tray: crash entries"
             del sent[:]
             items[1]["action"]()
-            assert sent == [[["crashed", "clear"], ["autostart", "on"], ["apply", "quiet"]]], sent
+            items[2]["action"]()   # Stay on Default: after a crash Apply at startup goes off too (Default alone keeps it)
+            assert sent == [[["crashed", "clear"], ["autostart", "on"], ["apply", "quiet"]],
+                            [["crashed", "clear"], ["default"], ["autostart", "off"]]], sent
+            del sent[:]   # on Default with Apply at startup still on: it can be turned off, not on
+            find(tray.build(dict(ls, settings=dict(ls["settings"], profile=None))), _("Apply at startup"))["action"]()
+            assert sent == [[["autostart", "off"]]] and find(tray.build(dict(ls, settings={})), _("Apply at startup"))["action"] is None, sent
             tray.items = items
             assert tray.layout().get_type_string() == "(u(ia{sv}av))" and "Tctl" in tray.tip, "tray: layout or tooltip"
             state = os.path.join(ROOT_DIR, "run", "ryzenctl", "reapply.json")   # what `ryzenctl reapply` leaves on a laptop
